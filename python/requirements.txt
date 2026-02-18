@@ -1,0 +1,3 @@
+# Python Dependencies
+# Required for animation/script.py
+Pillow>=10.0.0
