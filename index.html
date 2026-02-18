@@ -695,8 +695,8 @@
 
     <script src="https://cdn.socket.io/4.5.4/socket.io.js"></script>
     <script>
-        const API_BASE = "http://192.168.43.67:5000";  // Local server
-        // const API_BASE = "https://kakuproject.onrender.com";  // Cloud server (commented out)
+        const API_BASE = "https://kakuproject-90943350924.asia-south1.run.app";  // Google Cloud Run Production
+        // const API_BASE = "http://192.168.43.67:5000";  // Local server (for testing)
 
         let startTime = Date.now();
         let recordingActive = false;
@@ -739,16 +739,29 @@
         }
         
         function getOLEDDisplay() {
-            fetch(API_BASE +'/api/oled-display/get')
-                .then(response => response.json())
+            // Add timeout to fetch request
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            fetch(API_BASE +'/api/oled-display/get', { signal: controller.signal })
+                .then(response => {
+                    clearTimeout(timeoutId);
+                    return response.json();
+                })
                 .then(data => {
                     if (data.status === 'success') {
                         console.log('Current OLED animation:', data.animation_name);
                         updateOLEDDisplayUI(data.animation_id);
+                    } else {
+                        // Server returned error
+                        document.getElementById('petStatus').textContent = '❌ Error loading pet state';
                     }
                 })
                 .catch(error => {
+                    clearTimeout(timeoutId);
                     console.error('❌ Error getting OLED display:', error);
+                    // Update UI to show error instead of staying on "Loading..."
+                    document.getElementById('petStatus').textContent = '⚠️ Server not responding';
                 });
         }
         
@@ -771,16 +784,29 @@
 
         // 👟 Step Counter Functions
         function getStepCounter() {
-            fetch(API_BASE +'/api/step-counter/get')
-                .then(response => response.json())
+            // Add timeout to fetch request
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            fetch(API_BASE +'/api/step-counter/get', { signal: controller.signal })
+                .then(response => {
+                    clearTimeout(timeoutId);
+                    return response.json();
+                })
                 .then(data => {
                     if (data.status === 'success') {
                         console.log('👟 Step counter:', data.total_steps);
                         updateStepCounterUI(data.total_steps, data.daily_steps);
+                    } else {
+                        // Server returned error
+                        document.getElementById('stepStatus').textContent = '❌ Error loading steps';
                     }
                 })
                 .catch(error => {
+                    clearTimeout(timeoutId);
                     console.error('❌ Error getting step counter:', error);
+                    // Update UI to show error instead of staying on "Waiting for sensor data..."
+                    document.getElementById('stepStatus').textContent = '⚠️ Server not responding';
                 });
         }
 
@@ -808,6 +834,50 @@
             document.getElementById('stepCountDisplay').textContent = totalSteps;
             document.getElementById('dailyStepCountDisplay').textContent = dailySteps || 0;
             document.getElementById('stepStatus').textContent = `✅ Last updated: ${new Date().toLocaleTimeString()}`;
+        }
+
+        // Function to load the latest AI-analyzed image
+        function loadLatestAIImage() {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            fetch(API_BASE +'/api/latest-image', { signal: controller.signal })
+                .then(response => {
+                    clearTimeout(timeoutId);
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success && data.image_url) {
+                        // Update camera image (supports both file URLs and base64 data URIs)
+                        document.getElementById('cameraImage').src = data.image_url;
+                        document.getElementById('cameraPlaceholder').style.display = 'none';
+                        document.getElementById('cameraImage').style.display = 'block';
+                        
+                        // Update AI caption
+                        const aiCaptionElement = document.getElementById('aiCaption');
+                        const aiCaptionTextElement = document.getElementById('aiCaptionText');
+                        const aiTimestampElement = document.getElementById('aiTimestamp');
+                        
+                        if (data.ai_caption && data.ai_caption !== 'Waiting for AI analysis...') {
+                            aiCaptionTextElement.textContent = data.ai_caption;
+                            
+                            if (data.timestamp) {
+                                const timestamp = new Date(data.timestamp);
+                                aiTimestampElement.textContent = `Analyzed at ${timestamp.toLocaleString()}`;
+                            }
+                            
+                            aiCaptionElement.classList.add('show');
+                            
+                            console.log('🤖 Loaded latest image from database:', data.source || 'database');
+                        }
+                    } else {
+                        console.log('📷 No images found in database');
+                    }
+                })
+                .catch(error => {
+                    clearTimeout(timeoutId);
+                    console.error('❌ Error loading latest image:', error);
+                });
         }
 
         // Initialize Socket.IO connection
@@ -843,45 +913,6 @@
                 console.log('👟 Step counter updated:', data.total_steps);
                 updateStepCounterUI(data.total_steps, data.daily_steps);
             });
-
-            // Function to load the latest AI-analyzed image
-            function loadLatestAIImage() {
-                fetch(API_BASE +'/api/ai-images?limit=1')
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.status === 'success' && data.images && data.images.length > 0) {
-                            const latestImage = data.images[0];
-                            
-                            // Update camera image
-                            document.getElementById('cameraImage').src = latestImage.image_url;
-                            document.getElementById('cameraPlaceholder').style.display = 'none';
-                            document.getElementById('cameraImage').style.display = 'block';
-                            
-                            // Update AI caption
-                            const aiCaptionElement = document.getElementById('aiCaption');
-                            const aiCaptionTextElement = document.getElementById('aiCaptionText');
-                            const aiTimestampElement = document.getElementById('aiTimestamp');
-                            
-                            if (latestImage.ai_caption && latestImage.ai_caption !== 'No AI analysis available') {
-                                aiCaptionTextElement.textContent = latestImage.ai_caption;
-                                
-                                if (latestImage.timestamp) {
-                                    const timestamp = new Date(latestImage.timestamp);
-                                    aiTimestampElement.textContent = `Analyzed at ${timestamp.toLocaleString()}`;
-                                }
-                                
-                                aiCaptionElement.classList.add('show');
-                                
-                                console.log('🤖 Loaded latest AI-analyzed image:', latestImage.filename);
-                            }
-                        } else {
-                            console.log('📷 No AI-analyzed images found');
-                        }
-                    })
-                    .catch(error => {
-                        console.error('❌ Error loading latest AI image:', error);
-                    });
-            }
 
             socket.on('sensor_update', function(data) {
                 console.log('Received sensor update:', data);
@@ -1306,6 +1337,16 @@
             
             // Setup event listeners
             document.getElementById('recordLimit').addEventListener('change', refreshData);
+            
+            // Fallback: Try to load data even if WebSocket fails to connect within 3 seconds
+            setTimeout(function() {
+                if (!socket || !socket.connected) {
+                    console.log('⚠️ WebSocket not connected after 3 seconds, attempting direct API calls...');
+                    getOLEDDisplay();
+                    getStepCounter();
+                    loadLatestAIImage();
+                }
+            }, 3000);
         });
 
         // Function to load the latest image
