@@ -2,6 +2,11 @@
 ESP32 Dashboard Client - Arduino C++ Version with Camera & Microphone
 This sketch reads sensors, captures images, records audio, and sends data to dashboard
 
+⚠️  CURRENT MODE: SENSOR DATA ONLY ⚠️
+📡 ACTIVE: MPU6050 (accelerometer/gyro) + Microphone Level
+❌ DISABLED: Camera Image Capture & Audio Recording/Sending
+   (Camera & Audio code commented out for testing - search for "DISABLED" to re-enable)
+
 Required Libraries:
 - ArduinoJson
 - WiFi
@@ -34,10 +39,10 @@ Install via Arduino IDE: Sketch > Include Library > Manage Libraries
 #define WIFI_PASSWORD "KUNAL 26"
 
 // ================= API =================
-const char* serverUrl = "http://192.168.43.67:5000/api/sensor-data";  // Updated to actual server IP
-const char* eventsUrl = "http://192.168.43.67:5000/api/events?device_id=ESP32_001";  // Events endpoint
-const char* eventReceivedUrl = "http://192.168.43.67:5000/api/device/event/received";  // Event acknowledgment
-const char* oledDisplayUrl = "http://192.168.43.67:5000/api/oled-display/get";  // OLED display animation endpoint
+const char* serverUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/sensor-data";  // Google Cloud Run Production
+const char* eventsUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/events?device_id=ESP32_001";  // Events endpoint
+const char* eventReceivedUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/event/received";  // Event acknowledgment
+const char* oledDisplayUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/get";  // OLED display animation endpoint
 // NOTE: Orientation endpoint removed - server computes direction from sensor data
 
 // ================= CAMERA PINS (XIAO ESP32 S3 Sense) =================
@@ -82,7 +87,7 @@ enum PetAge { INFANT = 0, CHILD = 1, ADULT = 2, OLD = 3 };
 PetAge petAge = CHILD;              // Default to child
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
-const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds
+const unsigned long DISPLAY_CHECK_INTERVAL = 60000;  // Poll server for OLED display state every 60 seconds (cost optimized)
 const unsigned long ANIMATION_DISPLAY_INTERVAL = 2000;  // Display animation every 2 seconds
 uint8_t currentFrame = 0;
 bool displayReady = false;
@@ -133,8 +138,8 @@ unsigned long lastInternalReadTime = 0;        // Fast internal sensor reading t
 const unsigned long SEND_INTERVAL = 2000;      // Send sensor data batch every 2 seconds
 const unsigned long INTERNAL_READ_INTERVAL = 100;  // NEW: Read sensor every 100ms internally
 const unsigned long IMAGE_INTERVAL = 30000;    // Capture image every 30 seconds (reduced for power)
-const unsigned long EVENT_POLL_INTERVAL = 5000; // Poll for events every 5 seconds
-unsigned long dynamicEventPollInterval = 5000;  // Dynamic backoff for event polling
+const unsigned long EVENT_POLL_INTERVAL = 60000; // Poll for events every 60 seconds (cost optimized)
+unsigned long dynamicEventPollInterval = 60000;  // Dynamic backoff for event polling
 // Audio now triggered by speech detection, not timer
 
 // NEW: Sensor reading buffer
@@ -471,29 +476,29 @@ void loop() {
     // Read sensor data
     SensorData data = readAllSensors();
     
-    // Capture image every 20 seconds
+    // ✅ CAMERA ENABLED - Capture image every 30 seconds
     if (cameraReady && (millis() - lastImageCapture >= IMAGE_INTERVAL)) {
         lastImageCapture = millis();
         data.camera_image_b64 = captureImageBase64();
         data.has_new_image = !data.camera_image_b64.isEmpty();
     }
     
-    // Check for speech-triggered audio (from Core 0)
-    if (xSemaphoreTake(audioMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (speechDetected && !detectedAudioData.isEmpty()) {
-            data.audio_data_b64 = detectedAudioData;
-            data.has_new_audio = true;
-            
-            Serial.println("🗣️  Speech detected! Preparing to send audio...");
-            
-            // Clear the detected audio after copying
-            detectedAudioData = "";
-            speechDetected = false;
-        }
-        xSemaphoreGive(audioMutex);
-    }
+    // ❌ AUDIO DISABLED - Speech-triggered audio capture not needed
+    // if (xSemaphoreTake(audioMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    //     if (speechDetected && !detectedAudioData.isEmpty()) {
+    //         data.audio_data_b64 = detectedAudioData;
+    //         data.has_new_audio = true;
+    //         
+    //         Serial.println("🗣️  Speech detected! Preparing to send audio...");
+    //         
+    //         // Clear the detected audio after copying
+    //         detectedAudioData = "";
+    //         speechDetected = false;
+    //     }
+    //     xSemaphoreGive(audioMutex);
+    // }
     
-    // Send all data every 2 seconds ONLY if server is alive AND not uploading image
+    // Send all data every 2 seconds (removed redundant health check to reduce costs)
     if (millis() - lastSendTime >= SEND_INTERVAL) {
         // Skip sensor data while image is uploading (to avoid interference)
         if (isUploadingImage) {
@@ -501,11 +506,11 @@ void loop() {
         } else {
             lastSendTime = millis();
 
-            if (!isServerAlive()) {
-                Serial.println("🛑 Server offline. Skipping data send cycle.");
-            } else {
-                // NEW: Prepare batch with collected readings
-                data.sensor_batch = sensorBatch;
+            // Removed isServerAlive() check - saves 43,200 requests/day!
+            // Server will return error if offline, no need to check first
+            
+            // NEW: Prepare batch with collected readings
+            data.sensor_batch = sensorBatch;
                 
                 // Calculate average microphone level
                 if (micReadingCount > 0) {
@@ -527,30 +532,29 @@ void loop() {
                 // Send sensor data (includes batch of readings)
                 bool serverAccepted = sendSensorDataOnly(data);
                 
-                // RESET batch after sending
-                sensorBatch.reading_count = 0;
-                totalMicLevel = 0.0;
-                micReadingCount = 0;
-                
-                // Send images only if sensor data was accepted
-                if (serverAccepted && data.has_new_image && !data.camera_image_b64.isEmpty()) {
-                    sendImageData(data.camera_image_b64);
-                }
-                
-                // Send audio only if sensor data was accepted and speech detected
-                if (serverAccepted && data.has_new_audio && !data.audio_data_b64.isEmpty()) {
-                    sendAudioData(data.audio_data_b64);
-                    Serial.println("🎵 Speech audio sent to server!");
-                }
+            // RESET batch after sending
+            sensorBatch.reading_count = 0;
+            totalMicLevel = 0.0;
+            micReadingCount = 0;
+            
+        // ✅ IMAGE SENDING ENABLED - Send to database
+            if (serverAccepted && data.has_new_image && !data.camera_image_b64.isEmpty()) {
+                sendImageData(data.camera_image_b64);
             }
+            
+        // ❌ AUDIO SENDING DISABLED (not needed)
+            // if (serverAccepted && data.has_new_audio && !data.audio_data_b64.isEmpty()) {
+            //     sendAudioData(data.audio_data_b64);
+            //     Serial.println("🎵 Speech audio sent to server!");
+            // }
         }
     }
     
-    // FIX 5: Poll for events with optimized intervals
+    // FIX 5: Poll for events with optimized intervals (cost optimized: 60s)
     if (millis() - lastEventPoll >= dynamicEventPollInterval) {
         lastEventPoll = millis();
         pollForEvents();
-        dynamicEventPollInterval = 5000;  // Standard interval
+        dynamicEventPollInterval = 60000;  // Standard interval (cost optimized)
     }
     
     delay(10);  // Small delay for Core 1
@@ -832,7 +836,7 @@ bool isServerAlive() {
     http.setConnectTimeout(5000);  // Increased from 2000 to 5000ms
     http.setTimeout(8000);         // Increased from 2000 to 8000ms
 
-    if (!http.begin("http://192.168.43.67:5000/api/health")) {
+    if (!http.begin("https://kakuproject-90943350924.asia-south1.run.app/api/health")) {
         return false;
     }
 
@@ -929,6 +933,7 @@ bool sendSensorDataOnly(SensorData data) {
     // Larger JSON payload - sensor data + batch of readings
     StaticJsonDocument<4096> jsonDoc;
     
+    jsonDoc["device_id"] = "ESP32_001";
     jsonDoc["accel_x"] = data.accel_x;
     jsonDoc["accel_y"] = data.accel_y;
     jsonDoc["accel_z"] = data.accel_z;
@@ -1012,7 +1017,7 @@ void sendImageData(String imageBase64) {
     WiFiClient client;
     HTTPClient http;
     
-    if (!http.begin(client, "http://192.168.43.67:5000/upload")) {
+    if (!http.begin(client, "https://kakuproject-90943350924.asia-south1.run.app/upload")) {
         Serial.println("❌ Failed to connect to server");
         esp_camera_fb_return(fb);
         isUploadingImage = false;  // Resume on error
@@ -1070,7 +1075,7 @@ void sendAudioData(String audioBase64) {
     http.setConnectTimeout(5000);
     http.setTimeout(15000);  // Shorter timeout for smaller audio
     
-    if (!http.begin("http://192.168.43.67:5000/upload-audio")) {
+    if (!http.begin("https://kakuproject-90943350924.asia-south1.run.app/upload-audio")) {
         Serial.println("❌ Failed to connect to audio server");
         return;
     }
@@ -1540,7 +1545,7 @@ Silence 2000ms+ → Stop Recording & Send 📤
 =================
 Update these before uploading:
 1. WIFI_SSID and WIFI_PASSWORD
-2. Server IP address: "192.168.43.67:5000"
+2. Server URL: "https://kakuproject-90943350924.asia-south1.run.app"
 3. Adjust VAD_THRESHOLD for your environment
 4. Three separate optimized endpoints for different data types
 
