@@ -2123,13 +2123,53 @@ def store_sensor_data(data):
 def get_oled_display():
     """ESP32 polls this endpoint to get what animation to display on OLED
     
-    NOW RETURNS FULL PET STATE for AI Tamagotchi cloud brain
+    PRIORITY ORDER:
+    1. Manual button selection from web UI (oled_display_state table)
+    2. AI Tamagotchi pet state (pet_state table with health/hunger)
+    3. Default fallback
+    
     Includes backward compatibility with animation_id field
     """
     try:
         device_id = request.args.get('device_id', 'ESP32_001')
         
-        # Get pet state
+        # FIRST: Check if user manually selected an animation via web UI buttons
+        manual_selection = None
+        with db_lock:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT animation_id, animation_name, animation_type, updated_at
+                        FROM oled_display_state
+                        WHERE device_id = ?
+                    ''', (device_id,))
+                    result = cursor.fetchone()
+                    if result:
+                        manual_selection = {
+                            'animation_id': result[0],
+                            'animation_name': result[1],
+                            'animation_type': result[2],
+                            'updated_at': result[3]
+                        }
+                finally:
+                    conn.close()
+        
+        # If manual selection exists, use it (user pressed a button!)
+        if manual_selection:
+            print(f'📡 OLED: MANUAL SELECTION → {manual_selection["animation_name"]} (ID: {manual_selection["animation_id"]})')
+            return jsonify({
+                'status': 'success',
+                'animation_id': manual_selection['animation_id'],
+                'animation_name': manual_selection['animation_name'],
+                'animation_type': manual_selection['animation_type'],
+                'stage': manual_selection['animation_name'],
+                'mode': 'MANUAL',
+                'message': f'Manual selection: {manual_selection["animation_name"]}'
+            }), 200
+        
+        # SECOND: Fall back to AI pet state
         pet = get_pet_state(device_id)
         
         if not pet:
@@ -2146,6 +2186,7 @@ def get_oled_display():
                 'happiness': 100,
                 'energy': 100,
                 'poop_present': False,
+                'mode': 'DEFAULT',
                 'message': 'Default pet state'
             }), 200
         
@@ -2160,7 +2201,7 @@ def get_oled_display():
         
         animation_id = stage_to_id.get(pet['stage'], 1)
         
-        print(f'📡 OLED: {pet["stage"]} | {pet["current_emotion"]} | Menu: {pet["current_menu"]} | H:{pet["health"]} F:{pet["hunger"]}')
+        print(f'📡 OLED: AI PET STATE → {pet["stage"]} | {pet["current_emotion"]} | Menu: {pet["current_menu"]} | H:{pet["health"]} F:{pet["hunger"]}')
         
         return jsonify({
             'status': 'success',
@@ -2179,6 +2220,7 @@ def get_oled_display():
             'energy': pet['energy'],
             'poop_present': pet['poop_present'],
             'age': pet['age'],
+            'mode': 'AI_PET',
             'message': f'Pet: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
     
@@ -2274,6 +2316,56 @@ def set_oled_display():
         
     except Exception as e:
         print(f'❌ Error setting OLED display: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/oled-display/reset', methods=['POST'])
+def reset_oled_display():
+    """Reset OLED display to AI automatic mode
+    
+    Clears manual button selection, allowing AI pet state to control the display
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        device_id = data.get('device_id', 'ESP32_001')
+        
+        # Delete manual selection from database
+        with db_lock:
+            conn = get_db_connection()
+            if not conn:
+                return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+            
+            try:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM oled_display_state WHERE device_id = ?', (device_id,))
+                conn.commit()
+                print(f'✅ OLED display reset to AI mode for device: {device_id}')
+            except sqlite3.Error as e:
+                print(f'❌ Database error: {e}')
+                return jsonify({'status': 'error', 'message': 'Database reset failed'}), 500
+            finally:
+                conn.close()
+        
+        # Broadcast reset to all connected web clients
+        def emit_oled_reset():
+            with app.app_context():
+                socketio.emit('oled_display_reset', {
+                    'device_id': device_id,
+                    'mode': 'AI',
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        socketio.start_background_task(emit_oled_reset)
+        
+        return jsonify({
+            'status': 'success',
+            'mode': 'AI',
+            'device_id': device_id,
+            'message': 'OLED display reset to AI automatic mode'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error resetting OLED display: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ================= STEP COUNTER ENDPOINTS =================

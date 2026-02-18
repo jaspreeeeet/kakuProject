@@ -415,7 +415,7 @@
             <!-- Pet Animation Control Card -->
             <div class="card" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E72 100%); grid-column: 1 / -1;">
                 <h2><span class="card-icon">🐣</span> Pet Animation Control</h2>
-                <div class="sensor-label">Click a button to display pet animation on ESP32 OLED screen</div>
+                <div class="sensor-label">Click a button to manually display pet animation on ESP32 OLED screen</div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-top: 15px;">
                     <button id="petInfant" class="pet-btn" onclick="setOLEDDisplay(0)" style="background: #FFE5E5;">
                         <span style="font-size: 1.8em;">🐣</span>
@@ -434,8 +434,16 @@
                         <span>OLD</span>
                     </button>
                 </div>
-                <div id="petStatus" style="margin-top: 15px; text-align: center; color: white; font-weight: bold;">
-                    Loading current pet age...
+                <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+                    <div id="petStatus" style="color: white; font-weight: bold; flex: 1;">
+                        Loading current pet age...
+                    </div>
+                    <button onclick="resetOLEDToAI()" style="background: #4ECDC4; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
+                        🤖 Reset to AI Mode
+                    </button>
+                </div>
+                <div id="oledMode" style="margin-top: 10px; text-align: center; padding: 8px; border-radius: 8px; background: rgba(255,255,255,0.2); color: white; font-size: 0.9em;">
+                    Mode: <span id="oledModeText">Loading...</span>
                 </div>
             </div>
 
@@ -724,9 +732,10 @@
             .then(data => {
                 if (data.status === 'success') {
                     console.log('✅ OLED display changed to:', data.animation_name);
-                    updateOLEDDisplayUI(animationId);
+                    updateOLEDDisplayUI(animationId, 'MANUAL');
+                    updateOLEDModeDisplay('MANUAL');
                     // Show visual feedback
-                    alert('🎬 OLED display changed to: ' + data.animation_name);
+                    alert('🎬 OLED display changed to: ' + data.animation_name + ' (Manual Mode)');
                 } else {
                     console.error('❌ Failed to set OLED display:', data.message);
                     alert('❌ Error: ' + data.message);
@@ -734,6 +743,37 @@
             })
             .catch(error => {
                 console.error('❌ Error setting OLED display:', error);
+                alert('❌ Connection error: ' + error);
+            });
+        }
+        
+        function resetOLEDToAI() {
+            if (!confirm('Reset OLED display to AI automatic mode?')) {
+                return;
+            }
+            
+            fetch(API_BASE +'/api/oled-display/reset', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('✅ OLED display reset to AI mode');
+                    updateOLEDModeDisplay('AI');
+                    alert('🤖 OLED display reset to AI automatic mode');
+                    // Refresh to show AI pet state
+                    getOLEDDisplay();
+                } else {
+                    console.error('❌ Failed to reset OLED display:', data.message);
+                    alert('❌ Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('❌ Error resetting OLED display:', error);
                 alert('❌ Connection error: ' + error);
             });
         }
@@ -750,8 +790,9 @@
                 })
                 .then(data => {
                     if (data.status === 'success') {
-                        console.log('Current OLED animation:', data.animation_name);
-                        updateOLEDDisplayUI(data.animation_id);
+                        console.log('Current OLED animation:', data.animation_name, 'Mode:', data.mode || 'UNKNOWN');
+                        updateOLEDDisplayUI(data.animation_id, data.mode);
+                        updateOLEDModeDisplay(data.mode || 'UNKNOWN');
                     } else {
                         // Server returned error
                         document.getElementById('petStatus').textContent = '❌ Error loading pet state';
@@ -762,10 +803,11 @@
                     console.error('❌ Error getting OLED display:', error);
                     // Update UI to show error instead of staying on "Loading..."
                     document.getElementById('petStatus').textContent = '⚠️ Server not responding';
+                    document.getElementById('oledModeText').textContent = '⚠️ Offline';
                 });
         }
         
-        function updateOLEDDisplayUI(animationId) {
+        function updateOLEDDisplayUI(animationId, mode) {
             // Remove active class from all buttons
             document.getElementById('petInfant').classList.remove('active');
             document.getElementById('petChild').classList.remove('active');
@@ -778,8 +820,26 @@
                 document.getElementById(buttons[animationId]).classList.add('active');
             }
             
-            // Update status text
-            document.getElementById('petStatus').textContent = '✅ Current: ' + animationNames[animationId];
+            // Update status text with mode indicator
+            const modeEmoji = mode === 'MANUAL' ? '👆' : mode === 'AI' || mode === 'AI_PET' ? '🤖' : '📡';
+            document.getElementById('petStatus').textContent = modeEmoji + ' Current: ' + animationNames[animationId];
+        }
+        
+        function updateOLEDModeDisplay(mode) {
+            const modeText = document.getElementById('oledModeText');
+            if (mode === 'MANUAL') {
+                modeText.innerHTML = '👆 <strong>MANUAL</strong> (Button Control)';
+                modeText.parentElement.style.background = 'rgba(255, 193, 7, 0.3)'; // Yellow
+            } else if (mode === 'AI' || mode === 'AI_PET') {
+                modeText.innerHTML = '🤖 <strong>AI AUTOMATIC</strong> (Based on Health/Hunger)';
+                modeText.parentElement.style.background = 'rgba(76, 175, 80, 0.3)'; // Green
+            } else if (mode === 'DEFAULT') {
+                modeText.innerHTML = '📡 <strong>DEFAULT</strong> (No Pet State)';
+                modeText.parentElement.style.background = 'rgba(158, 158, 158, 0.3)'; // Gray
+            } else {
+                modeText.innerHTML = '❓ <strong>UNKNOWN</strong>';
+                modeText.parentElement.style.background = 'rgba(255, 255, 255, 0.2)';
+            }
         }
 
         // 👟 Step Counter Functions
