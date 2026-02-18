@@ -315,70 +315,86 @@ def analyze_image_with_ai(image_path):
     
     return "Image received but analysis unavailable"
 
+# ❌ DISABLED: Background AI analysis (file-based, not compatible with database-only storage)
 # ================= BACKGROUND AI ANALYSIS (NON-BLOCKING) =================
-def analyze_and_store_image(filepath, filename):
-    """Background task: Run AI analysis and store result without blocking server"""
-    try:
-        print(f"🤖 [BACKGROUND] Starting AI analysis for {filename}...")
-        ai_caption = analyze_image_with_ai(filepath)
-        
-        # Store in database
-        with db_lock:
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE sensor_readings 
-                        SET image_filename = ?, ai_caption = ?
-                        WHERE id = (SELECT MAX(id) FROM sensor_readings WHERE accel_x IS NOT NULL)
-                    ''', (filename, ai_caption))
-                    
-                    if cursor.rowcount == 0:
-                        cursor.execute('''
-                            INSERT INTO sensor_readings (device_id, image_filename, ai_caption, timestamp)
-                            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                        ''', ('ESP32_CAM', filename, ai_caption))
-                    
-                    conn.commit()
-                    print(f"✅ [BG] Stored AI caption in database")
-                except sqlite3.Error as e:
-                    print(f"❌ [BG] Database error: {e}")
-                finally:
-                    conn.close()
-        
-        # Broadcast result to dashboard with local PC IP
-        image_url = f'http://192.168.1.6:5000/uploads/images/{filename}'
-        broadcast_camera_update(
-            image_url=image_url,
-            ai_caption=ai_caption,
-            timestamp=datetime.now().isoformat()
-        )
-        
-        print(f"✅ [BG] AI complete: {ai_caption[:60]}...")
-    
-    except Exception as e:
-        print(f"❌ [BG] AI analysis error: {e}")
+# def analyze_and_store_image(filepath, filename):
+#     """Background task: Run AI analysis and store result without blocking server"""
+#     try:
+#         print(f"🤖 [BACKGROUND] Starting AI analysis for {filename}...")
+#         ai_caption = analyze_image_with_ai(filepath)
+#         
+#         # Store in database
+#         with db_lock:
+#             conn = get_db_connection()
+#             if conn:
+#                 try:
+#                     cursor = conn.cursor()
+#                     cursor.execute('''
+#                         UPDATE sensor_readings 
+#                         SET image_filename = ?, ai_caption = ?
+#                         WHERE id = (SELECT MAX(id) FROM sensor_readings WHERE accel_x IS NOT NULL)
+#                     ''', (filename, ai_caption))
+#                     
+#                     if cursor.rowcount == 0:
+#                         cursor.execute('''
+#                             INSERT INTO sensor_readings (device_id, image_filename, ai_caption, timestamp)
+#                             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+#                         ''', ('ESP32_CAM', filename, ai_caption))
+#                     
+#                     conn.commit()
+#                     print(f"✅ [BG] Stored AI caption in database")
+#                 except sqlite3.Error as e:
+#                     print(f"❌ [BG] Database error: {e}")
+#                 finally:
+#                     conn.close()
+#         
+#         # Broadcast result to dashboard
+#         # broadcast_camera_update(...)
+#         
+#         print(f"✅ [BG] AI complete: {ai_caption[:60]}...")
+#     
+#     except Exception as e:
+#         print(f"❌ [BG] AI analysis error: {e}")
 
 # Helper function for broadcasting camera updates to all connected clients
-def broadcast_camera_update(image_url, ai_caption, timestamp=None):
+def broadcast_camera_update(image_id=None, ai_caption=None, timestamp=None):
     """
     Broadcast camera update event to all connected WebSocket clients
-    Uses a background task to ensure proper context for emission
-    Uses local PC IP address for image URLs
+    Uses database image ID to fetch base64 image data
     """
     def emit_update():
         with app.app_context():
-            # Convert to local PC IP address URL
-            local_image_url = image_url.replace('/uploads/images/', f'http://192.168.1.6:5000/uploads/images/')
-            
-            socketio.emit('camera_update', {
-                'image_url': local_image_url,
-                'ai_caption': ai_caption,
-                'timestamp': timestamp or datetime.now().isoformat(),
-                'device_id': 'ESP32_CAM'
-            })
-            print(f"📡 Broadcasted camera update to all connected clients")
+            try:
+                # ✅ Fetch image from database and convert to base64
+                if image_id:
+                    conn = sqlite3.connect(DB_PATH)
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT camera_image FROM sensor_readings WHERE id = ?', (image_id,))
+                    result = cursor.fetchone()
+                    conn.close()
+                    
+                    if result and result[0]:
+                        image_binary = result[0]
+                        image_base64 = base64.b64encode(image_binary).decode('utf-8')
+                        image_url = f'data:image/jpeg;base64,{image_base64}'
+                    else:
+                        print(f"⚠️ No image found for id={image_id}")
+                        return
+                else:
+                    print("⚠️ No image_id provided to broadcast")
+                    return
+                
+                socketio.emit('camera_update', {
+                    'image_url': image_url,
+                    'ai_caption': ai_caption,
+                    'timestamp': timestamp or datetime.now().isoformat(),
+                    'device_id': 'ESP32_CAM',
+                    'image_id': image_id,
+                    'source': 'database'
+                })
+                print(f"📡 Broadcasted camera update to all connected clients (id={image_id})")
+            except Exception as e:
+                print(f"❌ Error broadcasting camera update: {e}")
     
     socketio.start_background_task(emit_update)
 
@@ -986,51 +1002,24 @@ from threading import Lock
 
 image_cleanup_lock = Lock()
 
-def cleanup_old_images():
-    """Delete all images except the latest one every 30 seconds"""
-    while True:
-        try:
-            time.sleep(30)  # Wait 30 seconds before first cleanup (HIGH FREQUENCY)
-            
-            with image_cleanup_lock:
-                uploads_dir = os.path.join(os.getcwd(), 'uploads', 'images')
-                
-                if not os.path.exists(uploads_dir):
-                    continue
-                
-                # Get all image files with their modification times
-                image_files = []
-                for filename in os.listdir(uploads_dir):
-                    filepath = os.path.join(uploads_dir, filename)
-                    if os.path.isfile(filepath) and filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                        mod_time = os.path.getmtime(filepath)
-                        image_files.append((filepath, filename, mod_time))
-                
-                # Keep only the latest image, delete the rest
-                if len(image_files) > 1:
-                    image_files.sort(key=lambda x: x[2], reverse=True)
-                    latest_file = image_files[0][1]
-                    
-                    deleted_count = 0
-                    for filepath, filename, _ in image_files[1:]:
-                        try:
-                            os.remove(filepath)
-                            deleted_count += 1
-                            print(f"Deleted old image: {filename}")
-                            
-                            # Keep AI captions in database (preserve knowledge/experience)
-                        except Exception as e:
-                            print(f"Error deleting image {filename}: {e}")
-                    
-                    if deleted_count > 0:
-                        print(f"Cleanup: Deleted {deleted_count} old images, kept latest: {latest_file}")
-        except Exception as e:
-            print(f"Error in cleanup task: {e}")
+# ❌ DISABLED: File system image cleanup (images stored in database only)
+# def cleanup_old_images():
+#     """Delete all images except the latest one every 30 seconds"""
+#     while True:
+#         try:
+#             time.sleep(30)
+#             with image_cleanup_lock:
+#                 uploads_dir = os.path.join(os.getcwd(), 'uploads', 'images')
+#                 if not os.path.exists(uploads_dir):
+#                     continue
+#                 # ... cleanup logic ...
+#         except Exception as e:
+#             print(f"Error in cleanup task: {e}")
 
-# Start cleanup thread
-cleanup_thread = Thread(target=cleanup_old_images, daemon=True)
-cleanup_thread.start()
-print("Image cleanup task started (runs every 30 seconds, keeps latest image + AI captions)")
+# ❌ DISABLED: Cleanup thread (no file system storage)
+# cleanup_thread = Thread(target=cleanup_old_images, daemon=True)
+# cleanup_thread.start()
+print("✅ Image storage: DATABASE ONLY (no file system cleanup needed)")
 
 # ==================== STEP STATISTICS UPDATE TASK ====================
 
@@ -1352,64 +1341,28 @@ def receive_orientation_data():
 # Only using /upload (binary) endpoint for image uploads
 
 
+# ❌ DISABLED: Audio upload endpoint (ESP32 not sending audio)
+# The try-except block below was part of the original audio upload handler
+# Keeping this section commented out for future reference
+# 
+# Original code structure:
+# @app.route('/upload-audio', methods=['POST'])
+# def upload_audio_data():
+#     try:
+#         ... audio handling logic ...
+#         return jsonify({'status': 'success'}), 200
+#     except Exception as e:
+#         print(f'❌ Error uploading audio: {e}')
+#         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ✅ Placeholder endpoint for compatibility (returns disabled message)
 @app.route('/upload-audio', methods=['POST'])
 def upload_audio_data():
-    """Receive audio data from ESP32"""
-    try:
-        data = request.get_json()
-        if not data or 'audio_data' not in data:
-            return jsonify({'status': 'error', 'message': 'No audio data'}), 400
-        
-        audio_base64 = data['audio_data']
-        
-        # Decode from base64 to binary
-        audio_binary = base64.b64decode(audio_base64)
-        
-        # 🔒 CRITICAL FIX: Use improved database connection
-        with db_lock:
-            conn = get_db_connection()
-            if not conn:
-                return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
-            cursor = conn.cursor()
-            
-            # Add audio_data column if it doesn't exist
-            cursor.execute("PRAGMA table_info(sensor_readings)")
-            columns = [column[1] for column in cursor.fetchall()]
-            
-            if 'audio_data' not in columns:
-                cursor.execute('ALTER TABLE sensor_readings ADD COLUMN audio_data BLOB')
-            
-            # Find the latest sensor record and update it with audio
-            cursor.execute('''
-                UPDATE sensor_readings 
-                SET audio_data = ?
-                WHERE id = (SELECT MAX(id) FROM sensor_readings WHERE accel_x IS NOT NULL)
-            ''', (audio_binary,))
-            
-            if cursor.rowcount == 0:
-                # If no sensor record exists, create one with audio only
-                cursor.execute('''
-                    INSERT INTO sensor_readings (audio_data)
-                    VALUES (?)
-                ''', (audio_binary,))
-            
-            conn.commit()
-            conn.close()
-        
-        # Broadcast to connected clients (non-blocking, smaller payload)
-        def emit_audio_update():
-            with app.app_context():
-                socketio.emit('audio_update', {
-                    'audio_data': audio_base64[:100] + '...',  # Preview only
-                    'size': len(audio_binary)
-                })
-        socketio.start_background_task(emit_audio_update)
-        
-        print(f'✅ Audio received and linked to latest sensor record: {len(audio_binary)} bytes ({len(audio_base64)} base64 chars)')
-        return jsonify({'status': 'success', 'message': 'Audio uploaded'}), 200
-    except Exception as e:
-        print(f'❌ Error uploading audio: {e}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    """Audio upload disabled - ESP32 not sending audio data"""
+    return jsonify({
+        'status': 'disabled',
+        'message': 'Audio upload is currently disabled (ESP32 not sending audio)'
+    }), 200
 
 @app.route('/upload', methods=['POST'])
 def upload_binary_image():
@@ -1422,16 +1375,20 @@ def upload_binary_image():
         image_data = request.get_data()
         if not image_data:
             return 'ERROR', 400
-        # Save image as file (for frontend access via local PC IP)
+        
+        # ✅ DATABASE-ONLY STORAGE (no file system)
         import time
-        uploads_dir = os.path.join(os.getcwd(), 'uploads', 'images')
-        os.makedirs(uploads_dir, exist_ok=True)
         filename = f"esp32_{int(time.time())}.jpg"
-        filepath = os.path.join(uploads_dir, filename)
-        with open(filepath, "wb") as f:
-            f.write(image_data)
-        print(f"✅ Image saved locally: {filename} ({len(image_data)} bytes)")
-        # Save image binary to database (camera_image BLOB)
+        
+        # ❌ DISABLED: File system storage (commented out)
+        # uploads_dir = os.path.join(os.getcwd(), 'uploads', 'images')
+        # os.makedirs(uploads_dir, exist_ok=True)
+        # filepath = os.path.join(uploads_dir, filename)
+        # with open(filepath, "wb") as f:
+        #     f.write(image_data)
+        # print(f"✅ Image saved locally: {filename} ({len(image_data)} bytes)")
+        
+        # ✅ Save image binary to database ONLY (camera_image BLOB)
         with db_lock:
             conn = get_db_connection()
             if conn:
@@ -1443,15 +1400,15 @@ def upload_binary_image():
                 image_id = cursor.lastrowid
                 conn.commit()
                 conn.close()
-        print(f"✅ Image saved to database (id={image_id}, {len(image_data)} bytes)")
+        print(f"✅ Image saved to DATABASE ONLY (id={image_id}, {len(image_data)} bytes)")
         
-        # Return local PC IP-based URL for frontend
-        local_url = f'http://192.168.1.6:5000/uploads/images/{filename}'
+        # Return database-based URL for frontend
+        db_url = f'/api/image/{image_id}'
         
         return jsonify({
             'status': 'success',
             'image_id': image_id,
-            'image_url': local_url,
+            'image_url': db_url,
             'filename': filename
         }), 200
     except Exception as e:
@@ -1518,14 +1475,14 @@ def get_latest_data():
 
 @app.route('/api/latest-image', methods=['GET'])
 def get_latest_image():
-    """Get the latest image filename, URL (using local PC IP), and AI caption"""
+    """Get the latest image as base64 from database with AI caption"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT image_filename, ai_caption FROM sensor_readings 
-            WHERE image_filename IS NOT NULL 
+            SELECT id, camera_image, image_filename, ai_caption FROM sensor_readings 
+            WHERE camera_image IS NOT NULL 
             ORDER BY timestamp DESC 
             LIMIT 1
         ''')
@@ -1533,21 +1490,28 @@ def get_latest_image():
         result = cursor.fetchone()
         conn.close()
         
-        if result and result[0]:
-            image_filename = result[0]
-            ai_caption = result[1] if result[1] else "Waiting for AI analysis..."
-            # Use local PC IP address for frontend access
-            image_url = f'http://192.168.1.6:5000/uploads/images/{image_filename}'
+        if result and result[1]:
+            image_id = result[0]
+            image_binary = result[1]
+            image_filename = result[2] if result[2] else f"image_{image_id}.jpg"
+            ai_caption = result[3] if result[3] else "Waiting for AI analysis..."
+            
+            # ✅ Return base64 image data from database
+            image_base64 = base64.b64encode(image_binary).decode('utf-8')
+            image_url = f'data:image/jpeg;base64,{image_base64}'
+            
             return jsonify({
                 'success': True,
                 'image_url': image_url,
+                'image_id': image_id,
                 'filename': image_filename,
-                'ai_caption': ai_caption
+                'ai_caption': ai_caption,
+                'source': 'database'
             }), 200
         else:
             return jsonify({
                 'success': False,
-                'message': 'No images found'
+                'message': 'No images found in database'
             }), 404
     except Exception as e:
         print(f'Error fetching latest image: {e}')
