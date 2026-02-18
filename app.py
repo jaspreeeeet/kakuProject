@@ -311,10 +311,6 @@ def analyze_image_with_ai(image_path):
         traceback.print_exc()
         return f"Image analysis failed: {str(e)[:100]}..."
 
-        return f"Image analysis failed: {str(e)[:100]}..."
-    
-    return "Image received but analysis unavailable"
-
 # ❌ DISABLED: Background AI analysis (file-based, not compatible with database-only storage)
 # ================= BACKGROUND AI ANALYSIS (NON-BLOCKING) =================
 # def analyze_and_store_image(filepath, filename):
