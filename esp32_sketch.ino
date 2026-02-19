@@ -581,7 +581,7 @@ void loop() {
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         while (WiFi.status() != WL_CONNECTED) {
             Serial.print(".");
-            delay(300);
+            vTaskDelay(pdMS_TO_TICKS(300));
         }
         Serial.println("\n✅ WiFi Reconnected");
         Serial.println(WiFi.localIP());
@@ -732,7 +732,7 @@ void loop() {
         dynamicEventPollInterval = 5000;  // Standard interval
     }
     
-    delay(10);  // Small delay for Core 1
+    vTaskDelay(pdMS_TO_TICKS(10));  // Small delay for Core 1 (non-blocking)
 }
 
 // ================= CAMERA INITIALIZATION =================
@@ -1290,7 +1290,7 @@ bool sendSensorDataOnly(SensorData data) {
         Serial.printf("    Orient: %s (%.1f%% confidence)\n", 
                      data.device_orientation.c_str(), data.orientation_confidence);
         digitalWrite(LED_PIN, HIGH);
-        delay(50);
+        vTaskDelay(pdMS_TO_TICKS(50));
         digitalWrite(LED_PIN, LOW);
     } else {
         Serial.printf("❌ HTTP error: %s\n", http.errorToString(httpCode).c_str());
@@ -1407,7 +1407,7 @@ void sendAudioData(String audioBase64) {
     }
     
     http.end();
-    delay(200);  // Server breathing room after audio upload
+    vTaskDelay(pdMS_TO_TICKS(200));  // Server breathing room after audio upload (non-blocking)
 }
 
 void sendAllDataToServer(SensorData data) {
@@ -1481,7 +1481,7 @@ void sendAllDataToServer(SensorData data) {
             
             // Success LED blink
             digitalWrite(LED_PIN, HIGH);
-            delay(100);
+            vTaskDelay(pdMS_TO_TICKS(100));
             digitalWrite(LED_PIN, LOW);
         } else {
             Serial.printf("❌ Server error: %s\n", http.getString().c_str());
@@ -1580,7 +1580,7 @@ void pollForEvents() {
                                 // Acknowledge event received
                                 acknowledgeEvent(event_id);
                                 
-                                delay(100);  // Small delay between events
+                                vTaskDelay(pdMS_TO_TICKS(100));  // Small delay between events
                             }
                         } else {
                             Serial.println("✅ No new important events (all quiet)");
@@ -1618,7 +1618,7 @@ void processEvent(const char* event_type, const char* message) {
     if (strcmp(event_type, "high_sound") == 0) {
         Serial.println("🔊 High sound detected - might want to take action!");
         digitalWrite(LED_PIN, HIGH);  // Turn on LED for high sound
-        delay(200);
+        vTaskDelay(pdMS_TO_TICKS(200));
         digitalWrite(LED_PIN, LOW);   // Blink LED
     }
     else if (strcmp(event_type, "sudden_motion") == 0) {
@@ -1626,15 +1626,15 @@ void processEvent(const char* event_type, const char* message) {
         // Blink LED multiple times for motion
         for (int i = 0; i < 3; i++) {
             digitalWrite(LED_PIN, HIGH);
-            delay(100);
+            vTaskDelay(pdMS_TO_TICKS(100));
             digitalWrite(LED_PIN, LOW);
-            delay(100);
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
     else if (strcmp(event_type, "alert") == 0) {
         Serial.println("⚠️ Generic alert received!");
         digitalWrite(LED_PIN, HIGH);  // Solid LED for alert
-        delay(500);
+        vTaskDelay(pdMS_TO_TICKS(500));
         digitalWrite(LED_PIN, LOW);
     }
     else {
