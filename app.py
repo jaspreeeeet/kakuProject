@@ -2208,6 +2208,8 @@ def get_oled_display():
                 'happiness': 100,
                 'energy': 100,
                 'poop_present': False,
+                'show_home_icon': True,
+                'screen_type': 'MAIN',
                 'mode': 'DEFAULT',
                 'message': 'Default pet state'
             }), 200
@@ -2243,7 +2245,7 @@ def get_oled_display():
             'poop_present': pet['poop_present'],
             'age': pet['age'],
             'mode': 'AI_PET',
-            'show_home_icon': False,
+            'show_home_icon': True,
             'screen_type': 'MAIN',
             'message': f'Pet: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
