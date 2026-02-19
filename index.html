@@ -1075,7 +1075,7 @@
             }
             
             // Update status text with mode indicator
-            const modeEmoji = mode === 'MANUAL' ? '👆' : mode === 'AI' || mode === 'AI_PET' ? '🤖' : '📡';
+            const modeEmoji = mode === 'MANUAL' ? '👆' : mode === 'AI' || mode === 'AI_PET' || mode === 'AUTOMATIC' ? '🤖' : '📡';
             document.getElementById('petStatus').textContent = modeEmoji + ' Current: ' + animationNames[animationId];
         }
         
@@ -1084,7 +1084,7 @@
             if (mode === 'MANUAL') {
                 modeText.innerHTML = '👆 <strong>MANUAL</strong> (Button Control)';
                 modeText.parentElement.style.background = 'rgba(255, 193, 7, 0.3)'; // Yellow
-            } else if (mode === 'AI' || mode === 'AI_PET') {
+            } else if (mode === 'AI' || mode === 'AI_PET' || mode === 'AUTOMATIC') {
                 modeText.innerHTML = '🤖 <strong>AI AUTOMATIC</strong> (Based on Health/Hunger)';
                 modeText.parentElement.style.background = 'rgba(76, 175, 80, 0.3)'; // Green
             } else if (mode === 'DEFAULT') {
