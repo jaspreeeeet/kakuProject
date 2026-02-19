@@ -94,6 +94,7 @@ uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
 bool showHomeIcon = false;  // NEW: Only show home icon when server says so
+bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
 String currentScreenType = "MAIN";  // NEW: Track current screen state from server
 
 // MPU6050 sensor
@@ -222,6 +223,7 @@ String recordAudioBase64();
 void notifyServerStartupComplete();  // NEW: Notify server startup is complete
 void getOLEDDisplayFromServer();  // NEW: Forward declaration
 void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
+void drawFoodIcon();  // NEW: Draw food icon pixel-by-pixel (bottom-right)
 void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
 
 // ================= OLED ANIMATION TASK (Core 0) =================
@@ -513,6 +515,27 @@ void drawHomeIcon() {
     }
 }
 
+// ================= FOOD ICON DRAWING (PIXEL-BY-PIXEL) =================
+// Draws food icon at bottom-right corner using pixel-by-pixel approach
+void drawFoodIcon() {
+    int xOffset = SCREEN_WIDTH - FOOD_ICON_WIDTH;   // Bottom-right: 64-24 = 40
+    int yOffset = SCREEN_HEIGHT - FOOD_ICON_HEIGHT;  // Bottom-right: 32-12 = 20
+    
+    // Draw current food icon frame (animate between 2 frames)
+    uint8_t foodFrame = (millis() / food_icon_delays[0]) % FOOD_ICON_FRAME_COUNT;
+    
+    for (uint16_t y = 0; y < FOOD_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < FOOD_ICON_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * FOOD_ICON_WIDTH + x;
+            uint8_t bitIndex = y % 8;
+            
+            if (pgm_read_byte(&food_icon_frames[foodFrame][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
 // ================= PET ANIMATION FUNCTION =================
 void displayPetAnimation() {
     if (!displayReady) return;
@@ -552,6 +575,11 @@ void displayPetAnimation() {
         // Draw home icon at top-left corner using pixel-by-pixel approach (no corruption)
         if (showHomeIcon && currentScreenType == "MAIN") {
             drawHomeIcon();
+        }
+        
+        // Draw food icon at bottom-right corner (shows when pet is hungry)
+        if (showFoodIcon && currentScreenType == "MAIN") {
+            drawFoodIcon();
         }
         
         // Only animation - no text
@@ -1126,6 +1154,15 @@ void getOLEDDisplayFromServer() {
                 }
             }
             
+            // NEW: Handle show_food_icon flag
+            if (doc.containsKey("show_food_icon")) {
+                bool newShowFood = doc["show_food_icon"].as<bool>();
+                if (showFoodIcon != newShowFood) {
+                    showFoodIcon = newShowFood;
+                    Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
+                }
+            }
+            
             // NEW: Handle current_menu
             if (doc.containsKey("current_menu")) {
                 String menu = doc["current_menu"].as<String>();
@@ -1188,6 +1225,10 @@ void notifyServerStartupComplete() {
             if (responseDoc.containsKey("show_home_icon")) {
                 showHomeIcon = responseDoc["show_home_icon"].as<bool>();
                 Serial.printf("   Home icon: %s\n", showHomeIcon ? "ENABLED" : "DISABLED");
+            }
+            if (responseDoc.containsKey("show_food_icon")) {
+                showFoodIcon = responseDoc["show_food_icon"].as<bool>();
+                Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
             }
         }
     } else {

@@ -583,6 +583,7 @@ def init_database():
                     animation_id INTEGER DEFAULT 1,
                     animation_name TEXT DEFAULT 'CHILD',
                     show_home_icon BOOLEAN DEFAULT 0,
+                    show_food_icon BOOLEAN DEFAULT 0,
                     screen_type TEXT DEFAULT 'MAIN',
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_by TEXT DEFAULT 'web_ui'
@@ -598,6 +599,10 @@ def init_database():
                 if 'show_home_icon' not in columns:
                     cursor.execute('ALTER TABLE oled_display_state ADD COLUMN show_home_icon BOOLEAN DEFAULT 0')
                     print("✅ Added show_home_icon column to oled_display_state")
+                
+                if 'show_food_icon' not in columns:
+                    cursor.execute('ALTER TABLE oled_display_state ADD COLUMN show_food_icon BOOLEAN DEFAULT 0')
+                    print("✅ Added show_food_icon column to oled_display_state")
                 
                 if 'screen_type' not in columns:
                     cursor.execute('ALTER TABLE oled_display_state ADD COLUMN screen_type TEXT DEFAULT "MAIN"')
@@ -2159,7 +2164,7 @@ def get_oled_display():
                 try:
                     cursor = conn.cursor()
                     cursor.execute('''
-                        SELECT animation_id, animation_name, animation_type, show_home_icon, screen_type, updated_at
+                        SELECT animation_id, animation_name, animation_type, show_home_icon, show_food_icon, screen_type, updated_at
                         FROM oled_display_state
                         WHERE device_id = ?
                     ''', (device_id,))
@@ -2170,8 +2175,9 @@ def get_oled_display():
                             'animation_name': result[1],
                             'animation_type': result[2],
                             'show_home_icon': result[3],
-                            'screen_type': result[4],
-                            'updated_at': result[5]
+                            'show_food_icon': result[4],
+                            'screen_type': result[5],
+                            'updated_at': result[6]
                         }
                 finally:
                     conn.close()
@@ -2187,6 +2193,7 @@ def get_oled_display():
                 'stage': manual_selection['animation_name'],
                 'mode': 'MANUAL',
                 'show_home_icon': bool(manual_selection.get('show_home_icon')) if manual_selection.get('show_home_icon') is not None else False,
+                'show_food_icon': bool(manual_selection.get('show_food_icon')) if manual_selection.get('show_food_icon') is not None else False,
                 'screen_type': manual_selection.get('screen_type') or 'MAIN',
                 'message': f'Manual selection: {manual_selection["animation_name"]}'
             }), 200
@@ -2209,6 +2216,7 @@ def get_oled_display():
                 'energy': 100,
                 'poop_present': False,
                 'show_home_icon': True,
+                'show_food_icon': False,
                 'screen_type': 'MAIN',
                 'mode': 'DEFAULT',
                 'message': 'Default pet state'
@@ -2246,6 +2254,7 @@ def get_oled_display():
             'age': pet['age'],
             'mode': 'AI_PET',
             'show_home_icon': True,
+            'show_food_icon': pet['hunger'] > 70,  # Show food icon when hungry
             'screen_type': 'MAIN',
             'message': f'Pet: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
@@ -2510,6 +2519,71 @@ def toggle_home_icon():
         
     except Exception as e:
         print(f'❌ Error toggling home icon: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/oled-display/food-icon-toggle', methods=['POST'])
+def toggle_food_icon():
+    """Toggle food icon display on OLED (indicates pet is hungry)
+    
+    Updates show_food_icon flag in database and returns new state
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        device_id = data.get('device_id', 'ESP32_001')
+        show_food_icon = data.get('show_food_icon', False)
+        
+        with db_lock:
+            conn = get_db_connection()
+            if not conn:
+                return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+            
+            try:
+                cursor = conn.cursor()
+                
+                # Update food icon state
+                cursor.execute('''
+                    UPDATE oled_display_state
+                    SET show_food_icon = ?, updated_at = CURRENT_TIMESTAMP, updated_by = 'web_ui'
+                    WHERE device_id = ?
+                ''', (show_food_icon, device_id))
+                
+                if cursor.rowcount == 0:
+                    # Insert if not exists
+                    cursor.execute('''
+                        INSERT INTO oled_display_state
+                        (device_id, show_food_icon, updated_by)
+                        VALUES (?, ?, ?)
+                    ''', (device_id, show_food_icon, 'web_ui'))
+                
+                conn.commit()
+                print(f'🍽️  Food icon toggled to: {show_food_icon} for device {device_id}')
+                
+            except sqlite3.Error as e:
+                print(f'❌ Database error: {e}')
+                return jsonify({'status': 'error', 'message': 'Database update failed'}), 500
+            finally:
+                conn.close()
+        
+        # Broadcast change to all web clients
+        def emit_food_icon_change():
+            with app.app_context():
+                socketio.emit('food_icon_changed', {
+                    'show_food_icon': show_food_icon,
+                    'device_id': device_id,
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        socketio.start_background_task(emit_food_icon_change)
+        
+        return jsonify({
+            'status': 'success',
+            'show_food_icon': show_food_icon,
+            'device_id': device_id,
+            'message': f'Food icon {("enabled" if show_food_icon else "disabled")}'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error toggling food icon: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ================= STEP COUNTER ENDPOINTS =================

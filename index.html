@@ -441,6 +441,9 @@
                     <button id="homeIconBtn" onclick="toggleHomeIcon()" style="background: #FFD700; color: #333; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em; display: flex; align-items: center; gap: 8px; transition: all 0.3s ease;">
                         🏠 <span id="homeIconStatus">Home Off</span>
                     </button>
+                    <button id="foodIconBtn" onclick="toggleFoodIcon()" style="background: #C0C0C0; color: #333; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em; display: flex; align-items: center; gap: 8px; transition: all 0.3s ease;">
+                        🍽️ <span id="foodIconStatus">Food Off</span>
+                    </button>
                     <button onclick="resetOLEDToAI()" style="background: #4ECDC4; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
                         🤖 Reset to AI Mode
                     </button>
@@ -783,6 +786,7 @@
         
         // Global variable to track home icon state
         let homeIconState = false;
+        let foodIconState = false;  // NEW: Track food icon state
         
         function toggleHomeIcon() {
             // Toggle the state
@@ -828,6 +832,50 @@
             }
         }
         
+        function toggleFoodIcon() {
+            // Toggle the state
+            foodIconState = !foodIconState;
+            
+            fetch(API_BASE + '/api/oled-display/food-icon-toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ show_food_icon: foodIconState })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('✅ Food icon toggled:', foodIconState);
+                    updateFoodIconUI(foodIconState);
+                    alert('🍽️ Food icon ' + (foodIconState ? 'enabled' : 'disabled'));
+                } else {
+                    console.error('❌ Failed to toggle food icon:', data.message);
+                    foodIconState = !foodIconState; // Revert on error
+                    alert('❌ Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('❌ Error toggling food icon:', error);
+                foodIconState = !foodIconState; // Revert on error
+                alert('❌ Connection error: ' + error);
+            });
+        }
+        
+        function updateFoodIconUI(isShowing) {
+            const btn = document.getElementById('foodIconBtn');
+            const status = document.getElementById('foodIconStatus');
+            if (isShowing) {
+                btn.style.background = '#FF6B6B';
+                btn.style.boxShadow = '0 0 10px rgba(255, 107, 107, 0.5)';
+                status.textContent = 'Food On';
+            } else {
+                btn.style.background = '#C0C0C0';
+                btn.style.boxShadow = 'none';
+                status.textContent = 'Food Off';
+            }
+        }
+        
         function getOLEDDisplay() {
             // Add timeout to fetch request
             const controller = new AbortController();
@@ -847,6 +895,11 @@
                         if (data.show_home_icon !== undefined) {
                             homeIconState = data.show_home_icon;
                             updateHomeIconUI(homeIconState);
+                        }
+                        // Sync food icon state from server
+                        if (data.show_food_icon !== undefined) {
+                            foodIconState = data.show_food_icon;
+                            updateFoodIconUI(foodIconState);
                         }
                     } else {
                         // Server returned error
