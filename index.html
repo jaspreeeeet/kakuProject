@@ -434,10 +434,13 @@
                         <span>OLD</span>
                     </button>
                 </div>
-                <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
-                    <div id="petStatus" style="color: white; font-weight: bold; flex: 1;">
+                <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <div id="petStatus" style="color: white; font-weight: bold; flex: 1; min-width: 200px;">
                         Loading current pet age...
                     </div>
+                    <button id="homeIconBtn" onclick="toggleHomeIcon()" style="background: #FFD700; color: #333; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em; display: flex; align-items: center; gap: 8px; transition: all 0.3s ease;">
+                        🏠 <span id="homeIconStatus">Home Off</span>
+                    </button>
                     <button onclick="resetOLEDToAI()" style="background: #4ECDC4; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
                         🤖 Reset to AI Mode
                     </button>
@@ -778,6 +781,53 @@
             });
         }
         
+        // Global variable to track home icon state
+        let homeIconState = false;
+        
+        function toggleHomeIcon() {
+            // Toggle the state
+            homeIconState = !homeIconState;
+            
+            fetch(API_BASE + '/api/oled-display/home-icon-toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ show_home_icon: homeIconState })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('✅ Home icon toggled:', homeIconState);
+                    updateHomeIconUI(homeIconState);
+                    alert('🏠 Home icon ' + (homeIconState ? 'enabled' : 'disabled'));
+                } else {
+                    console.error('❌ Failed to toggle home icon:', data.message);
+                    homeIconState = !homeIconState; // Revert on error
+                    alert('❌ Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('❌ Error toggling home icon:', error);
+                homeIconState = !homeIconState; // Revert on error
+                alert('❌ Connection error: ' + error);
+            });
+        }
+        
+        function updateHomeIconUI(isShowing) {
+            const btn = document.getElementById('homeIconBtn');
+            const status = document.getElementById('homeIconStatus');
+            if (isShowing) {
+                btn.style.background = '#FFD700';
+                btn.style.boxShadow = '0 0 10px rgba(255, 215, 0, 0.5)';
+                status.textContent = 'Home On';
+            } else {
+                btn.style.background = '#999';
+                btn.style.boxShadow = 'none';
+                status.textContent = 'Home Off';
+            }
+        }
+        
         function getOLEDDisplay() {
             // Add timeout to fetch request
             const controller = new AbortController();
@@ -793,6 +843,11 @@
                         console.log('Current OLED animation:', data.animation_name, 'Mode:', data.mode || 'UNKNOWN');
                         updateOLEDDisplayUI(data.animation_id, data.mode);
                         updateOLEDModeDisplay(data.mode || 'UNKNOWN');
+                        // Sync home icon state from server
+                        if (data.show_home_icon !== undefined) {
+                            homeIconState = data.show_home_icon;
+                            updateHomeIconUI(homeIconState);
+                        }
                     } else {
                         // Server returned error
                         document.getElementById('petStatus').textContent = '❌ Error loading pet state';

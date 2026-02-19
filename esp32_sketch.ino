@@ -89,10 +89,12 @@ PetAge petAge = CHILD;              // Default to child
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
 const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds
-const unsigned long ANIMATION_DISPLAY_INTERVAL = 2000;  // Display animation every 2 seconds
+const unsigned long ANIMATION_DISPLAY_INTERVAL = 1000;  // Display animation every 1 second (faster animation)
 uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
+bool showHomeIcon = false;  // NEW: Only show home icon when server says so
+String currentScreenType = "MAIN";  // NEW: Track current screen state from server
 
 // MPU6050 sensor
 MPU6050 mpu;
@@ -217,6 +219,8 @@ void acknowledgeEvent(int event_id);
 void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample_rate);
 void sendAllDataToServer(SensorData data);
 String recordAudioBase64();
+void notifyServerStartupComplete();  // NEW: Notify server startup is complete
+void getOLEDDisplayFromServer();  // NEW: Forward declaration
 
 void setup() {
     Serial.begin(115200);
@@ -446,14 +450,7 @@ void slideInfantSlowlyFromLeft() {
         // Draw infant gradually appearing from left
         display.drawBitmap(xPos, 0, infant_frames[0], INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
         
-        // Show label when infant is more than halfway visible
-        if (xPos > -INFANT_WIDTH / 2) {
-            display.setTextSize(1);
-            display.setTextColor(SSD1306_WHITE);
-            display.setCursor(xPos + 35, 24);
-            display.print("INF");
-        }
-        
+        // Animation only - no text!
         display.display();
         delay(200);  // 15 steps × 200ms = 3 seconds total
     }
@@ -461,14 +458,13 @@ void slideInfantSlowlyFromLeft() {
     // Final position - infant fully visible and centered
     display.clearDisplay();
     display.drawBitmap(0, 0, infant_frames[0], INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 24);
-    display.print("INF");
     display.display();
     
     petAge = INFANT;
     Serial.println("✅ Infant fully visible!");
+    
+    // NEW: Notify server that startup is complete
+    notifyServerStartupComplete();
 }
 
 // ================= PET ANIMATION FUNCTION =================
@@ -513,13 +509,12 @@ void displayPetAnimation() {
                 break;
         }
         
-        // Display label at bottom (no overlap with animation)
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 24);  // Bottom of 32-pixel display
-        const char* ageNames[] = {"INF", "CHD", "ADT", "OLD"};
-        display.print(ageNames[petAge]);
+        // Draw home icon at top-left corner ONLY if server says to show it
+        if (showHomeIcon && currentScreenType == "MAIN") {
+            display.drawBitmap(0, 0, home_icon_frames[0], HOME_ICON_WIDTH, HOME_ICON_HEIGHT, SSD1306_WHITE);
+        }
         
+        // Only animation - no text
         display.display();
         
         // Increment frame
@@ -1051,24 +1046,108 @@ void getOLEDDisplayFromServer() {
     if (httpCode == 200) {
         String response = http.getString();
         
-        // Parse JSON response: {"animation_type": "pet", "animation_id": 0-3, "animation_name": "INFANT|CHILD|ADULT|OLD"}
-        DynamicJsonDocument doc(512);
+        // Parse JSON response with multiple fields from server
+        DynamicJsonDocument doc(768);
         DeserializationError error = deserializeJson(doc, response);
         
-        if (!error && doc.containsKey("animation_id")) {
-            int newAnimationId = doc["animation_id"].as<int>();
-            String animationType = doc["animation_type"] | "pet";
-            String animationName = doc["animation_name"] | "UNKNOWN";
-            
-            if (newAnimationId >= 0 && newAnimationId <= 3) {
-                // Only update if changed
-                if ((int)petAge != newAnimationId) {
-                    petAge = (PetAge)newAnimationId;
-                    Serial.printf("🎬 OLED animation from server: %s (type: %s, id: %d)\n", 
-                                  animationName.c_str(), animationType.c_str(), newAnimationId);
+        if (!error) {
+            // Handle animation_id
+            if (doc.containsKey("animation_id")) {
+                int newAnimationId = doc["animation_id"].as<int>();
+                String animationName = doc["animation_name"] | "UNKNOWN";
+                
+                if (newAnimationId >= 0 && newAnimationId <= 3) {
+                    if ((int)petAge != newAnimationId) {
+                        petAge = (PetAge)newAnimationId;
+                        Serial.printf("🎬 Animation: %s (id: %d)\n", animationName.c_str(), newAnimationId);
+                    }
                 }
             }
+            
+            // NEW: Handle screen_type / screen_state
+            if (doc.containsKey("screen_type")) {
+                currentScreenType = doc["screen_type"].as<String>();
+                Serial.printf("📺 Screen Type: %s\n", currentScreenType.c_str());
+            } else if (doc.containsKey("screen_state")) {
+                currentScreenType = doc["screen_state"].as<String>();
+                Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
+            }
+            
+            // NEW: Handle show_home_icon flag
+            if (doc.containsKey("show_home_icon")) {
+                bool newShowIcon = doc["show_home_icon"].as<bool>();
+                if (showHomeIcon != newShowIcon) {
+                    showHomeIcon = newShowIcon;
+                    Serial.printf("🏠 Home Icon: %s\n", showHomeIcon ? "SHOW" : "HIDE");
+                }
+            }
+            
+            // NEW: Handle current_menu
+            if (doc.containsKey("current_menu")) {
+                String menu = doc["current_menu"].as<String>();
+                Serial.printf("📱 Menu: %s\n", menu.c_str());
+            }
         }
+    }
+    
+    http.end();
+}
+
+// ================= STARTUP COMPLETE NOTIFICATION =================
+void notifyServerStartupComplete() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️  WiFi not connected, cannot notify server");
+        return;
+    }
+    
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    
+    const char* startupUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/startup-complete";
+    
+    if (!http.begin(startupUrl)) {
+        Serial.println("❌ Failed to connect for startup notification");
+        return;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    
+    // Create startup notification payload
+    DynamicJsonDocument doc(256);
+    doc["device_id"] = "ESP32_001";
+    doc["status"] = "startup_complete";
+    doc["timestamp"] = millis();
+    doc["pet_stage"] = petAge;  // Send current pet stage
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    Serial.printf("📤 Notifying server: Startup complete (payload: %d bytes)\n", payload.length());
+    
+    int httpCode = http.POST(payload);
+    
+    if (httpCode == 200) {
+        String response = http.getString();
+        Serial.println("✅ Server acknowledged startup!");
+        
+        // Parse response - server might send initial state
+        DynamicJsonDocument responseDoc(768);
+        DeserializationError error = deserializeJson(responseDoc, response);
+        
+        if (!error) {
+            if (responseDoc.containsKey("animation_id")) {
+                int animId = responseDoc["animation_id"].as<int>();
+                petAge = (PetAge)animId;
+                Serial.printf("   Initial animation set to: %d\n", animId);
+            }
+            if (responseDoc.containsKey("show_home_icon")) {
+                showHomeIcon = responseDoc["show_home_icon"].as<bool>();
+                Serial.printf("   Home icon: %s\n", showHomeIcon ? "ENABLED" : "DISABLED");
+            }
+        }
+    } else {
+        Serial.printf("⚠️  Server response: %d\n", httpCode);
     }
     
     http.end();

@@ -582,6 +582,8 @@ def init_database():
                     animation_type TEXT DEFAULT 'pet',
                     animation_id INTEGER DEFAULT 1,
                     animation_name TEXT DEFAULT 'CHILD',
+                    show_home_icon BOOLEAN DEFAULT 0,
+                    screen_type TEXT DEFAULT 'MAIN',
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_by TEXT DEFAULT 'web_ui'
                 )
@@ -2141,7 +2143,7 @@ def get_oled_display():
                 try:
                     cursor = conn.cursor()
                     cursor.execute('''
-                        SELECT animation_id, animation_name, animation_type, updated_at
+                        SELECT animation_id, animation_name, animation_type, show_home_icon, screen_type, updated_at
                         FROM oled_display_state
                         WHERE device_id = ?
                     ''', (device_id,))
@@ -2151,7 +2153,9 @@ def get_oled_display():
                             'animation_id': result[0],
                             'animation_name': result[1],
                             'animation_type': result[2],
-                            'updated_at': result[3]
+                            'show_home_icon': result[3],
+                            'screen_type': result[4],
+                            'updated_at': result[5]
                         }
                 finally:
                     conn.close()
@@ -2166,6 +2170,8 @@ def get_oled_display():
                 'animation_type': manual_selection['animation_type'],
                 'stage': manual_selection['animation_name'],
                 'mode': 'MANUAL',
+                'show_home_icon': manual_selection.get('show_home_icon', False),
+                'screen_type': manual_selection.get('screen_type', 'MAIN'),
                 'message': f'Manual selection: {manual_selection["animation_name"]}'
             }), 200
         
@@ -2221,6 +2227,8 @@ def get_oled_display():
             'poop_present': pet['poop_present'],
             'age': pet['age'],
             'mode': 'AI_PET',
+            'show_home_icon': False,
+            'screen_type': 'MAIN',
             'message': f'Pet: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
     
@@ -2366,6 +2374,124 @@ def reset_oled_display():
         
     except Exception as e:
         print(f'❌ Error resetting OLED display: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/device/startup-complete', methods=['POST'])
+def device_startup_complete():
+    """Handle ESP32 startup notification
+    
+    Called by ESP32 after infant animation completes.
+    Returns initial display configuration.
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        device_id = data.get('device_id', 'ESP32_001')
+        status = data.get('status', 'unknown')
+        pet_stage = data.get('pet_stage', 0)
+        
+        print(f'✅ Device startup notification received from {device_id}')
+        print(f'   Status: {status} | Pet Stage: {pet_stage}')
+        
+        # Get initial display state to send back
+        animation_id = pet_stage
+        show_home_icon = False
+        screen_type = 'MAIN'
+        
+        # Check if manual selection exists
+        with db_lock:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT animation_id, show_home_icon, screen_type
+                        FROM oled_display_state
+                        WHERE device_id = ?
+                    ''', (device_id,))
+                    result = cursor.fetchone()
+                    if result:
+                        animation_id = result[0]
+                        show_home_icon = result[1]
+                        screen_type = result[2]
+                finally:
+                    conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'animation_id': animation_id,
+            'show_home_icon': show_home_icon,
+            'screen_type': screen_type,
+            'current_menu': 'MAIN',
+            'message': f'Initial display state sent to {device_id}'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error handling device startup: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/oled-display/home-icon-toggle', methods=['POST'])
+def toggle_home_icon():
+    """Toggle home icon display on OLED
+    
+    Updates show_home_icon flag in database and returns new state
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        device_id = data.get('device_id', 'ESP32_001')
+        show_home_icon = data.get('show_home_icon', False)
+        
+        with db_lock:
+            conn = get_db_connection()
+            if not conn:
+                return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+            
+            try:
+                cursor = conn.cursor()
+                
+                # Update home icon state
+                cursor.execute('''
+                    UPDATE oled_display_state
+                    SET show_home_icon = ?, updated_at = CURRENT_TIMESTAMP, updated_by = 'web_ui'
+                    WHERE device_id = ?
+                ''', (show_home_icon, device_id))
+                
+                if cursor.rowcount == 0:
+                    # Insert if not exists
+                    cursor.execute('''
+                        INSERT INTO oled_display_state
+                        (device_id, show_home_icon, updated_by)
+                        VALUES (?, ?, ?)
+                    ''', (device_id, show_home_icon, 'web_ui'))
+                
+                conn.commit()
+                print(f'🏠 Home icon toggled to: {show_home_icon} for device {device_id}')
+                
+            except sqlite3.Error as e:
+                print(f'❌ Database error: {e}')
+                return jsonify({'status': 'error', 'message': 'Database update failed'}), 500
+            finally:
+                conn.close()
+        
+        # Broadcast change to all web clients
+        def emit_home_icon_change():
+            with app.app_context():
+                socketio.emit('home_icon_changed', {
+                    'show_home_icon': show_home_icon,
+                    'device_id': device_id,
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        socketio.start_background_task(emit_home_icon_change)
+        
+        return jsonify({
+            'status': 'success',
+            'show_home_icon': show_home_icon,
+            'device_id': device_id,
+            'message': f'Home icon {("enabled" if show_home_icon else "disabled")}'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error toggling home icon: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ================= STEP COUNTER ENDPOINTS =================
