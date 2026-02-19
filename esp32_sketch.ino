@@ -644,22 +644,36 @@ void drawStaticToiletIcon() {
 void displayFoodMenu() {
     display.clearDisplay();
     
-    // Draw static food icon at top-left
-    drawStaticFoodIcon();
-    
+    // NEW: Show EATING ANIMATION while image is uploading
+    // The captured frame IS the food - no AI detection needed
+    if (isUploadingImage) {
+        // Show looping eating animation (Pacman) - full screen, no food icon
+        uint8_t eatingFrame = (millis() / 100) % EATING_FRAME_COUNT;  // 100ms per frame
+        display.drawBitmap(0, 0, eating_frames[eatingFrame], EATING_WIDTH, EATING_HEIGHT, SSD1306_WHITE);
+        Serial.println("😋 Eating animation playing during upload...");
+    }
     // Check if just finished eating (show GOOD for 3 seconds)
-    if (justFinishedEating && (millis() - eatingFinishTime < 3000)) {
+    else if (justFinishedEating && (millis() - eatingFinishTime < 3000)) {
+        // Draw food icon at top-left
+        drawStaticFoodIcon();
+        
         // Show "GOOD" text after eating
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
         display.setCursor(18, 12);
         display.println("GOOD!");
     } else if (justFinishedEating) {
+        // Draw food icon at top-left
+        drawStaticFoodIcon();
+        
         // After GOOD text expires, show HAPPY face
         justFinishedEating = false;  // Reset flag
         const uint8_t* frameData = child_frames[0];  // HAPPY face
         display.drawBitmap(20, 8, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
     } else {
+        // Draw food icon at top-left
+        drawStaticFoodIcon();
+        
         // Before eating: Show SAD pet face (hungry, waiting for food)
         uint8_t sadFrame = (millis() / sad_delays[0]) % SAD_FRAME_COUNT;
         const uint8_t* frameData = sad_frames[sadFrame];  // SAD animation
@@ -1753,6 +1767,14 @@ void sendImageData(String imageBase64) {
 
     if (httpCode == 200) {
         Serial.println("✅ Image uploaded successfully");
+        
+        // NEW: Trigger "eating finished" state to show GOOD! text
+        // Image upload = feeding complete (the frame IS the food)
+        if (currentScreenType == "FOOD_MENU") {
+            justFinishedEating = true;
+            eatingFinishTime = millis();
+            Serial.println("🎉 Feeding complete! Showing GOOD! text...");
+        }
     } else {
         Serial.printf("❌ Upload failed: %d (%s)\n",
                       httpCode,

@@ -1394,11 +1394,17 @@ def upload_binary_image():
     Receive binary image from ESP32, save it to the database as BLOB, and also save as a file.
     Frontend uses local PC IP address (192.168.1.6) for image URLs.
     Database BLOB storage maintained for persistence.
+    
+    NEW: Image upload = feeding the pet (the frame IS the food data)
+    - Automatically reduces hunger when image is received
+    - No AI food detection required
     """
     try:
         image_data = request.get_data()
         if not image_data:
             return 'ERROR', 400
+        
+        device_id = request.args.get('device_id', 'ESP32_001')
         
         # ✅ DATABASE-ONLY STORAGE (no file system)
         import time
@@ -1420,11 +1426,31 @@ def upload_binary_image():
                 cursor.execute('''
                     INSERT INTO sensor_readings (device_id, camera_image, image_filename, timestamp)
                     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ''', ('ESP32_CAM', image_data, filename))
+                ''', (device_id, image_data, filename))
                 image_id = cursor.lastrowid
                 conn.commit()
                 conn.close()
         print(f"✅ Image saved to DATABASE ONLY (id={image_id}, {len(image_data)} bytes)")
+        
+        # NEW: FEED THE PET - The captured frame IS the food!
+        # Reduce hunger immediately when image is received
+        state = get_pet_state(device_id)
+        if state:
+            from datetime import datetime, timedelta
+            
+            # Feed logic (same as /api/pet/feed)
+            updates = {
+                'hunger': max(0, state['hunger'] - 40),
+                'last_feed_time': datetime.now().isoformat(),
+                'digestion_due_time': (datetime.now() + timedelta(minutes=30)).isoformat(),
+                'current_emotion': 'EATING',
+                'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat()
+            }
+            
+            result = update_pet_state_atomic(device_id, updates)
+            
+            if result:
+                print(f"🍔 Pet auto-fed via image upload: hunger {state['hunger']} → {result['hunger']}")
         
         # Return database-based URL for frontend
         db_url = f'/api/image/{image_id}'
@@ -1433,7 +1459,9 @@ def upload_binary_image():
             'status': 'success',
             'image_id': image_id,
             'image_url': db_url,
-            'filename': filename
+            'filename': filename,
+            'pet_fed': True,
+            'hunger_reduced': 40
         }), 200
     except Exception as e:
         print(f"❌ Error uploading image: {e}")
