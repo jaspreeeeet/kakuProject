@@ -89,7 +89,7 @@ PetAge petAge = CHILD;              // Default to child
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
 const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds
-const unsigned long ANIMATION_DISPLAY_INTERVAL = 150;  // Display animation every 150ms (fast smooth animation)
+const unsigned long ANIMATION_DISPLAY_INTERVAL = 100;  // Display animation every 100ms (~10 FPS smooth)
 uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
@@ -222,7 +222,23 @@ String recordAudioBase64();
 void notifyServerStartupComplete();  // NEW: Notify server startup is complete
 void getOLEDDisplayFromServer();  // NEW: Forward declaration
 void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
+void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
 
+// ================= OLED ANIMATION TASK (Core 0) =================
+// Independent FreeRTOS task runs OLED animation on Core 0
+// Decoupled from WiFi/HTTP calls on Core 1 for smooth 60 FPS display
+void oledTask(void *parameter) {
+    Serial.println("🎬 OLED Task started on Core 0");
+    
+    while (true) {
+        if (displayReady && startupComplete) {
+            displayPetAnimation();  // Draw animation (non-blocking)
+        }
+        vTaskDelay(pdMS_TO_TICKS(16));  // ~60 FPS refresh rate (every 16ms)
+    }
+}
+
+// ================= SETUP FUNCTION =================
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -354,6 +370,17 @@ void setup() {
         1,                  // Priority (lower than audio)
         &cameraTaskHandle,  // Task handle
         0                   // Core 0 (shared with audio)
+    );
+    
+    // Start OLED animation task on Core 0 (independent of WiFi on Core 1)
+    xTaskCreatePinnedToCore(
+        oledTask,           // Task function
+        "OLED",            // Task name
+        4096,              // Stack size
+        NULL,              // Parameters
+        1,                 // Priority (lower than audio)
+        NULL,              // Task handle
+        0                  // Core 0 (opposite of WiFi heavy Core 1)
     );
     
     Serial.println("System Ready!");
@@ -536,20 +563,15 @@ void displayPetAnimation() {
 }
 
 void loop() {
-    // This loop runs on Core 1 - handles sensors, camera, WiFi
+    // This loop runs on Core 1 - handles sensors, camera, WiFi, HTTP I/O
+    // OLED animation runs independently on Core 0 task
     
-    // Only show main screen after startup is complete
+    // Only poll server after startup is complete
     if (startupComplete) {
-        // Display pet animation on OLED (smooth 150ms refresh)
-        displayPetAnimation();
-        
         // Poll server for OLED display state every 2 seconds (non-blocking)
         if (millis() - lastDisplayCheckTime >= DISPLAY_CHECK_INTERVAL) {
             lastDisplayCheckTime = millis();
-            
-            if (isServerAlive()) {
-                getOLEDDisplayFromServer();
-            }
+            getOLEDDisplayFromServer();  // Let it fail silently if server down
         }
     }
     
