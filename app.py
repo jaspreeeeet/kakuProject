@@ -589,6 +589,22 @@ def init_database():
                 )
             ''')
             
+            # ===== DATABASE MIGRATION: Add missing columns to existing tables =====
+            # Check and add show_home_icon column if it doesn't exist
+            try:
+                cursor.execute('PRAGMA table_info(oled_display_state)')
+                columns = [column[1] for column in cursor.fetchall()]
+                
+                if 'show_home_icon' not in columns:
+                    cursor.execute('ALTER TABLE oled_display_state ADD COLUMN show_home_icon BOOLEAN DEFAULT 0')
+                    print("✅ Added show_home_icon column to oled_display_state")
+                
+                if 'screen_type' not in columns:
+                    cursor.execute('ALTER TABLE oled_display_state ADD COLUMN screen_type TEXT DEFAULT "MAIN"')
+                    print("✅ Added screen_type column to oled_display_state")
+            except Exception as e:
+                print(f"⚠️ Migration warning: {e}")
+            
             # Initialize default OLED state if not exists
             cursor.execute('SELECT COUNT(*) FROM oled_display_state')
             if cursor.fetchone()[0] == 0:
@@ -2170,8 +2186,8 @@ def get_oled_display():
                 'animation_type': manual_selection['animation_type'],
                 'stage': manual_selection['animation_name'],
                 'mode': 'MANUAL',
-                'show_home_icon': manual_selection.get('show_home_icon', False),
-                'screen_type': manual_selection.get('screen_type', 'MAIN'),
+                'show_home_icon': bool(manual_selection.get('show_home_icon')) if manual_selection.get('show_home_icon') is not None else False,
+                'screen_type': manual_selection.get('screen_type') or 'MAIN',
                 'message': f'Manual selection: {manual_selection["animation_name"]}'
             }), 200
         
