@@ -95,7 +95,26 @@ bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
 bool showHomeIcon = false;  // NEW: Only show home icon when server says so
 bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
+bool showPoopIcon = false;  // NEW: Show poop icon when poop present
 String currentScreenType = "MAIN";  // NEW: Track current screen state from server
+bool justFinishedEating = false;  // NEW: Track if just finished eating to show GOOD text
+unsigned long eatingFinishTime = 0;  // NEW: Track when eating finished
+
+// NEW: Mode and hunger tracking for conditional camera send
+String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
+bool petIsHungry = false;          // Hunger status from server (hunger > 70)
+
+// Camera cover detection for menu switching
+#define BLACK_BRIGHTNESS_TH 25     // Brightness threshold for black detection
+#define BLACK_CONTRAST_TH   25     // Contrast threshold for black detection
+#define HOLD_TIME_MS        3000   // 3 sec camera cover → cycle menu
+#define COOLDOWN_MS         1500   // Cooldown between actions
+
+bool blackActive = false;
+unsigned long blackStartTime = 0;
+unsigned long lastCoverActionTime = 0;
+volatile bool cameraCapturing = false;  // NEW: Flag to prevent camera access conflicts
+bool imageAlreadySentThisSession = false;  // NEW: Track if image sent for current food session
 
 // MPU6050 sensor
 MPU6050 mpu;
@@ -149,7 +168,7 @@ unsigned long lastEventPoll = 0;               // Event polling timing
 unsigned long lastInternalReadTime = 0;        // Fast internal sensor reading timing
 const unsigned long SEND_INTERVAL = 2000;      // Send sensor data batch every 2 seconds
 const unsigned long INTERNAL_READ_INTERVAL = 100;  // NEW: Read sensor every 100ms internally
-const unsigned long IMAGE_INTERVAL = 30000;    // Capture image every 30 seconds (reduced for power)
+const unsigned long IMAGE_INTERVAL = 5000;     // Capture image every 5 seconds (continuous background)
 const unsigned long EVENT_POLL_INTERVAL = 5000; // Poll for events every 5 seconds
 unsigned long dynamicEventPollInterval = 5000;  // Dynamic backoff for event polling
 // Audio now triggered by speech detection, not timer
@@ -224,6 +243,15 @@ void notifyServerStartupComplete();  // NEW: Notify server startup is complete
 void getOLEDDisplayFromServer();  // NEW: Forward declaration
 void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
 void drawFoodIcon();  // NEW: Draw food icon pixel-by-pixel (bottom-right)
+void drawPoopIcon();  // NEW: Draw poop icon pixel-by-pixel (bottom-right)
+void playEatingAnimation();  // NEW: Play eating animation
+void drawStaticFoodIcon();  // NEW: Draw static food icon at top-left (food menu)
+void drawStaticToiletIcon();  // NEW: Draw static toilet icon at top-left (toilet menu)
+void displayFoodMenu();  // NEW: Display food menu screen
+void displayToiletMenu();  // NEW: Display toilet menu screen
+bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
+void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET)
+void checkCameraCover();  // NEW: Check camera cover for menu switching
 void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
 
 // ================= OLED ANIMATION TASK (Core 0) =================
@@ -536,6 +564,227 @@ void drawFoodIcon() {
     }
 }
 
+// ================= POOP ICON DRAWING (PIXEL-BY-PIXEL) =================
+// Draws poop icon at bottom-right corner using pixel-by-pixel approach
+void drawPoopIcon() {
+    int xOffset = SCREEN_WIDTH - POOP_WIDTH;   // Bottom-right: 64-24 = 40
+    int yOffset = SCREEN_HEIGHT - POOP_HEIGHT;  // Bottom-right: 32-12 = 20
+    
+    // Draw current poop icon frame (animate between 2 frames)
+    uint8_t poopFrame = (millis() / poop_delays[0]) % POOP_FRAME_COUNT;
+    
+    for (uint16_t y = 0; y < POOP_HEIGHT; y++) {
+        for (uint16_t x = 0; x < POOP_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * POOP_WIDTH + x;
+            uint8_t bitIndex = 7 - (y % 8);  // Different bit indexing for poop
+            
+            if (pgm_read_byte(&poop_frames[poopFrame][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
+// ================= EATING ANIMATION (Full Screen) =================
+// Plays full-screen eating animation (5 frames)
+void playEatingAnimation() {
+    if (!displayReady) return;
+    
+    Serial.println("😋 Playing eating animation...");
+    
+    for (uint8_t frame = 0; frame < EATING_FRAME_COUNT; frame++) {
+        display.clearDisplay();
+        
+        // Draw full-screen eating animation frame
+        display.drawBitmap(0, 0, eating_frames[frame], EATING_WIDTH, EATING_HEIGHT, SSD1306_WHITE);
+        
+        display.display();
+        vTaskDelay(pdMS_TO_TICKS(eating_delays[frame]));  // 100ms per frame
+    }
+    
+    Serial.println("✅ Eating animation complete!");
+}
+
+// Draw static food icon at top-left (for food menu)
+void drawStaticFoodIcon() {
+    int xOffset = 0;  // Top-left corner
+    int yOffset = 0;
+    
+    // Use first frame of food icon animation (no animation in menu)
+    for (uint16_t y = 0; y < FOOD_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < FOOD_ICON_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * FOOD_ICON_WIDTH + x;
+            uint8_t bitIndex = y % 8;
+            
+            if (pgm_read_byte(&food_icon_frames[0][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
+// Draw static toilet icon at top-left (for toilet menu)
+void drawStaticToiletIcon() {
+    int xOffset = 0;  // Top-left corner
+    int yOffset = 0;
+    
+    for (uint16_t y = 0; y < TOILET_HEIGHT; y++) {
+        for (uint16_t x = 0; x < TOILET_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * TOILET_WIDTH + x;
+            uint8_t bitIndex = y % 8;
+            
+            if (pgm_read_byte(&toilet_icon[byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
+// Display food menu screen
+void displayFoodMenu() {
+    display.clearDisplay();
+    
+    // Draw static food icon at top-left
+    drawStaticFoodIcon();
+    
+    // Check if just finished eating (show GOOD for 3 seconds)
+    if (justFinishedEating && (millis() - eatingFinishTime < 3000)) {
+        // Show "GOOD" text after eating
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(18, 12);
+        display.println("GOOD!");
+    } else if (justFinishedEating) {
+        // After GOOD text expires, show HAPPY face
+        justFinishedEating = false;  // Reset flag
+        const uint8_t* frameData = child_frames[0];  // HAPPY face
+        display.drawBitmap(20, 8, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+    } else {
+        // Before eating: Show SAD pet face (hungry, waiting for food)
+        uint8_t sadFrame = (millis() / sad_delays[0]) % SAD_FRAME_COUNT;
+        const uint8_t* frameData = sad_frames[sadFrame];  // SAD animation
+        display.drawBitmap(20, 8, frameData, SAD_WIDTH, SAD_HEIGHT, SSD1306_WHITE);
+    }
+    
+    display.display();
+}
+
+// Display toilet menu screen
+void displayToiletMenu() {
+    display.clearDisplay();
+    
+    // Draw static toilet icon at top-left (no blinking)
+    drawStaticToiletIcon();
+    
+    display.display();
+}
+
+// ================= CAMERA COVER DETECTION FOR MENU SWITCHING =================
+// Check if camera frame is mostly black (covered)
+bool isFrameMostlyBlack(camera_fb_t * fb) {
+    if (!fb || fb->len == 0) return false;
+    
+    long total = 0;
+    int maxB = 0;
+    int minB = 255;
+    int count = 0;
+    
+    // Sample pixels (every 8th pixel for speed)
+    for (int i = 0; i < fb->len && i < 12000; i += 8) {
+        uint8_t p = fb->buf[i];
+        total += p;
+        count++;
+        if (p > maxB) maxB = p;
+        if (p < minB) minB = p;
+    }
+    
+    if (count == 0) return false;
+    
+    int avg = total / count;
+    int contrast = maxB - minB;
+    
+    return (avg <= BLACK_BRIGHTNESS_TH && contrast <= BLACK_CONTRAST_TH);
+}
+
+// Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → MAIN
+void cycleMenu() {
+    String newMenu;
+    
+    if (currentScreenType == "MAIN") {
+        newMenu = "FOOD_MENU";
+    } else if (currentScreenType == "FOOD_MENU") {
+        newMenu = "TOILET_MENU";
+    } else {
+        newMenu = "MAIN";
+    }
+    
+    // Update server with new menu selection
+    HTTPClient http;
+    http.setConnectTimeout(3000);
+    http.setTimeout(3000);
+    
+    String url = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/menu-switch";
+    
+    if (http.begin(url)) {
+        http.addHeader("Content-Type", "application/json");
+        
+        String payload = "{\"device_id\":\"ESP32_001\",\"menu\":\"" + newMenu + "\"}";
+        int httpCode = http.POST(payload);
+        
+        if (httpCode == 200) {
+            currentScreenType = newMenu;
+            
+            // Reset image send flag when leaving FOOD_MENU
+            if (newMenu != "FOOD_MENU") {
+                imageAlreadySentThisSession = false;
+                Serial.println("🔄 Reset image send flag (left FOOD_MENU)");
+            }
+            
+            Serial.printf("📱 Menu cycled to: %s\n", newMenu.c_str());
+        } else {
+            Serial.printf("❌ Menu switch failed: %d\n", httpCode);
+        }
+        
+        http.end();
+    }
+}
+
+// Check camera cover and handle menu cycling
+void checkCameraCover() {
+    // Skip cover detection if camera is currently capturing (prevent conflict)
+    if (cameraCapturing) return;
+    
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) return;
+    
+    bool isBlack = isFrameMostlyBlack(fb);
+    unsigned long now = millis();
+    
+    if (isBlack) {
+        if (!blackActive) {
+            blackActive = true;
+            blackStartTime = now;
+        }
+    } else {
+        if (blackActive) {
+            unsigned long holdTime = now - blackStartTime;
+            
+            // Check cooldown to prevent rapid switching
+            if ((now - lastCoverActionTime) > COOLDOWN_MS) {
+                if (holdTime >= HOLD_TIME_MS) {
+                    // 3+ second hold → Cycle menu
+                    cycleMenu();
+                    lastCoverActionTime = now;
+                }
+            }
+            
+            blackActive = false;
+        }
+    }
+    
+    esp_camera_fb_return(fb);
+}
+
 // ================= PET ANIMATION FUNCTION =================
 void displayPetAnimation() {
     if (!displayReady) return;
@@ -543,6 +792,17 @@ void displayPetAnimation() {
     // Display animation every 150ms
     if (millis() - lastAnimationTime >= ANIMATION_DISPLAY_INTERVAL) {
         lastAnimationTime = millis();
+        
+        // Check which screen to display
+        if (currentScreenType == "FOOD_MENU") {
+            displayFoodMenu();
+            return;  // Exit early
+        } else if (currentScreenType == "TOILET_MENU") {
+            displayToiletMenu();
+            return;  // Exit early
+        }
+        
+        // Default: MAIN screen with pet animation
         display.clearDisplay();
         
         // Select frame based on pet age
@@ -582,6 +842,11 @@ void displayPetAnimation() {
             drawFoodIcon();
         }
         
+        // Draw poop icon at bottom-right corner (shows when poop present)
+        if (showPoopIcon && currentScreenType == "MAIN") {
+            drawPoopIcon();
+        }
+        
         // Only animation - no text
         display.display();
         
@@ -601,6 +866,9 @@ void loop() {
             lastDisplayCheckTime = millis();
             getOLEDDisplayFromServer();  // Let it fail silently if server down
         }
+        
+        // Check camera cover for menu switching (every loop)
+        checkCameraCover();
     }
     
     // Check WiFi connection
@@ -676,8 +944,32 @@ void loop() {
     // Check if camera image ready from Core 0
     if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (cameraImageReady && capturedImageBuffer != NULL) {
-            // Mark that we have a new image (Core 1 will send binary buffer directly)
-            data.has_new_image = true;
+            // NEW: CONDITIONAL SEND - Only send image if ALL conditions met:
+            // 1. Mode is AUTOMATIC (AI pet mode)
+            // 2. Currently on FOOD_MENU (user wants to feed)
+            // 3. Pet is hungry (hunger > 70)
+            // 4. Haven't sent image this session yet
+            if (currentMode == "AUTOMATIC" && 
+                currentScreenType == "FOOD_MENU" && 
+                petIsHungry && 
+                !imageSentThisSession) {
+                
+                // Mark that we have a new image (Core 1 will send binary buffer directly)
+                data.has_new_image = true;
+                imageSentThisSession = true;  // Mark as sent (prevents resend until flag reset)
+                Serial.println("📸 AUTO MODE: Sending image for food detection");
+            } else {
+                // Don't send - conditions not met
+                if (currentMode != "AUTOMATIC") {
+                    Serial.println("⏭️  Skipping image send - MANUAL mode");
+                } else if (currentScreenType != "FOOD_MENU") {
+                    Serial.println("⏭️  Skipping image send - not on FOOD_MENU");
+                } else if (!petIsHungry) {
+                    Serial.println("⏭️  Skipping image send - pet not hungry");
+                } else if (imageSentThisSession) {
+                    Serial.println("⏭️  Skipping image send - already sent this session");
+                }
+            }
         }
         xSemaphoreGive(cameraMutex);
     }
@@ -700,7 +992,7 @@ void loop() {
     
     // Send all data every 2 seconds ONLY if server is alive AND not uploading image
     if (millis() - lastSendTime >= SEND_INTERVAL) {
-        // Skip sensor data while image is uploading (to avoid interference)
+        // NEW: PAUSE SENSOR DATA while image is uploading (to avoid interference)
         if (isUploadingImage) {
             Serial.println("⏸️  Image uploading... PAUSING sensor data transmission");
         } else {
@@ -737,10 +1029,19 @@ void loop() {
                 totalMicLevel = 0.0;
                 micReadingCount = 0;
                 
-                // ========== IMAGE SENDING ENABLED ==========
-                // Send images only if sensor data was accepted
-                if (serverAccepted && data.has_new_image) {
+                // ========== CONDITIONAL IMAGE SENDING ==========
+                // Send image ONLY if:
+                // 1. On FOOD_MENU screen
+                // 2. In AUTOMATIC mode (not manual override)
+                // 3. Image not already sent for this food session
+                if (serverAccepted && data.has_new_image && 
+                    currentScreenType == "FOOD_MENU" && 
+                    !imageAlreadySentThisSession) {
+                    
+                    Serial.println("🍽️  Conditions met: Sending image for food detection");
                     sendImageData("");  // Binary data passed via shared buffer
+                    imageAlreadySentThisSession = true;  // Mark as sent
+                    Serial.println("✅ Image sent flag set - won't send again until menu changes");
                 }
                 
                 // Send audio only if sensor data was accepted and speech detected
@@ -753,11 +1054,15 @@ void loop() {
         }
     }
     
-    // FIX 5: Poll for events with optimized intervals
-    if (millis() - lastEventPoll >= dynamicEventPollInterval) {
+    // FIX 5: Poll for events with optimized intervals (PAUSE during image upload)
+    if (!isUploadingImage && millis() - lastEventPoll >= dynamicEventPollInterval) {
         lastEventPoll = millis();
         pollForEvents();
         dynamicEventPollInterval = 5000;  // Standard interval
+    } else if (isUploadingImage && millis() - lastEventPoll >= dynamicEventPollInterval) {
+        // Skip event polling during upload
+        lastEventPoll = millis();  // Update time to prevent immediate poll after upload
+        Serial.println("⏸️  Image uploading... PAUSING event polling");
     }
     
     vTaskDelay(pdMS_TO_TICKS(10));  // Small delay for Core 1 (non-blocking)
@@ -868,12 +1173,21 @@ void cameraMonitorTask(void *parameter) {
             continue;
         }
         
-        // Capture image every 30 seconds
+        // Capture image every 5 seconds (continuous background)
         if (millis() - lastCapture >= IMAGE_INTERVAL) {
             lastCapture = millis();
             
-            Serial.println("📸 Core 0: Capturing image...");
+            // Skip capture if currently uploading (prevent overlap)
+            if (isUploadingImage) {
+                Serial.println("⏭️  Skipping capture - upload in progress");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+            
+            cameraCapturing = true;  // Set flag to prevent conflicts
+            Serial.println("📸 Core 0: Capturing image (5-sec interval)...");
             camera_fb_t *fb = esp_camera_fb_get();
+            cameraCapturing = false;  // Release flag
             
             if (fb) {
                 Serial.printf("✅ Core 0: Image captured: %d bytes (raw JPEG)\n", fb->len);
@@ -1138,10 +1452,18 @@ void getOLEDDisplayFromServer() {
             
             // NEW: Handle screen_type / screen_state
             if (doc.containsKey("screen_type")) {
-                currentScreenType = doc["screen_type"].as<String>();
+                String newScreenType = doc["screen_type"].as<String>();
+                if (currentScreenType == "FOOD_MENU" && newScreenType != "FOOD_MENU") {
+                    imageSentThisSession = false;  // Reset flag when leaving FOOD_MENU
+                }
+                currentScreenType = newScreenType;
                 Serial.printf("📺 Screen Type: %s\n", currentScreenType.c_str());
             } else if (doc.containsKey("screen_state")) {
-                currentScreenType = doc["screen_state"].as<String>();
+                String newScreenState = doc["screen_state"].as<String>();
+                if (currentScreenType == "FOOD_MENU" && newScreenState != "FOOD_MENU") {
+                    imageSentThisSession = false;  // Reset flag when leaving FOOD_MENU
+                }
+                currentScreenType = newScreenState;
                 Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
             }
             
@@ -1163,10 +1485,42 @@ void getOLEDDisplayFromServer() {
                 }
             }
             
-            // NEW: Handle current_menu
+            // NEW: Handle show_poop_icon flag
+            if (doc.containsKey("show_poop_icon")) {
+                showPoopIcon = doc["show_poop_icon"].as<bool>();
+                Serial.printf("💩 Poop Icon: %s\n", showPoopIcon ? "SHOW" : "HIDE");
+            }
+            
+            // NEW: Handle mode (AUTOMATIC/MANUAL)
+            if (doc.containsKey("mode")) {
+                currentMode = doc["mode"].as<String>();
+                Serial.printf("🤖 Mode: %s\n", currentMode.c_str());
+            }
+            
+            // NEW: Handle hunger status for conditional camera send
+            if (doc.containsKey("is_hungry")) {
+                petIsHungry = doc["is_hungry"].as<bool>();
+                Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
+            }
+            
+            // NEW: Handle current_emotion to trigger eating animation on FOOD_MENU
+            if (doc.containsKey("current_emotion")) {
+                String emotion = doc["current_emotion"].as<String>();
+                if (emotion == "EATING" && currentScreenType == "FOOD_MENU") {
+                    Serial.println("😋 Emotion: EATING - triggering animation on FOOD MENU!");
+                    playEatingAnimation();  // Play 5-frame Pacman eating
+                    justFinishedEating = true;  // Set flag to show GOOD text
+                    eatingFinishTime = millis();  // Record finish time
+                }
+            }
+            
+            // NEW: Handle current_menu (maps to currentScreenType)
             if (doc.containsKey("current_menu")) {
                 String menu = doc["current_menu"].as<String>();
-                Serial.printf("📱 Menu: %s\n", menu.c_str());
+                if (currentScreenType != menu) {
+                    currentScreenType = menu;
+                    Serial.printf("📱 Menu Changed: %s\n", currentScreenType.c_str());
+                }
             }
         }
     }

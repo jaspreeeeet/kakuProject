@@ -584,6 +584,7 @@ def init_database():
                     animation_name TEXT DEFAULT 'CHILD',
                     show_home_icon BOOLEAN DEFAULT 0,
                     show_food_icon BOOLEAN DEFAULT 0,
+                    show_poop_icon BOOLEAN DEFAULT 0,
                     screen_type TEXT DEFAULT 'MAIN',
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_by TEXT DEFAULT 'web_ui'
@@ -603,6 +604,10 @@ def init_database():
                 if 'show_food_icon' not in columns:
                     cursor.execute('ALTER TABLE oled_display_state ADD COLUMN show_food_icon BOOLEAN DEFAULT 0')
                     print("✅ Added show_food_icon column to oled_display_state")
+                
+                if 'show_poop_icon' not in columns:
+                    cursor.execute('ALTER TABLE oled_display_state ADD COLUMN show_poop_icon BOOLEAN DEFAULT 0')
+                    print("✅ Added show_poop_icon column to oled_display_state")
                 
                 if 'screen_type' not in columns:
                     cursor.execute('ALTER TABLE oled_display_state ADD COLUMN screen_type TEXT DEFAULT "MAIN"')
@@ -2164,7 +2169,7 @@ def get_oled_display():
                 try:
                     cursor = conn.cursor()
                     cursor.execute('''
-                        SELECT animation_id, animation_name, animation_type, show_home_icon, show_food_icon, screen_type, updated_at
+                        SELECT animation_id, animation_name, animation_type, show_home_icon, show_food_icon, show_poop_icon, screen_type, updated_at
                         FROM oled_display_state
                         WHERE device_id = ?
                     ''', (device_id,))
@@ -2176,8 +2181,9 @@ def get_oled_display():
                             'animation_type': result[2],
                             'show_home_icon': result[3],
                             'show_food_icon': result[4],
-                            'screen_type': result[5],
-                            'updated_at': result[6]
+                            'show_poop_icon': result[5],
+                            'screen_type': result[6],
+                            'updated_at': result[7]
                         }
                 finally:
                     conn.close()
@@ -2194,6 +2200,7 @@ def get_oled_display():
                 'mode': 'MANUAL',
                 'show_home_icon': bool(manual_selection.get('show_home_icon')) if manual_selection.get('show_home_icon') is not None else False,
                 'show_food_icon': bool(manual_selection.get('show_food_icon')) if manual_selection.get('show_food_icon') is not None else False,
+                'show_poop_icon': bool(manual_selection.get('show_poop_icon')) if manual_selection.get('show_poop_icon') is not None else False,
                 'screen_type': manual_selection.get('screen_type') or 'MAIN',
                 'message': f'Manual selection: {manual_selection["animation_name"]}'
             }), 200
@@ -2208,6 +2215,7 @@ def get_oled_display():
                 'animation_id': 1,
                 'stage': 'CHILD',
                 'emotion': 'IDLE',
+                'current_emotion': 'IDLE',
                 'current_menu': 'MAIN',
                 'health': 100,
                 'hunger': 0,
@@ -2217,6 +2225,7 @@ def get_oled_display():
                 'poop_present': False,
                 'show_home_icon': True,
                 'show_food_icon': False,
+                'show_poop_icon': False,
                 'screen_type': 'MAIN',
                 'mode': 'DEFAULT',
                 'message': 'Default pet state'
@@ -2233,7 +2242,73 @@ def get_oled_display():
         
         animation_id = stage_to_id.get(pet['stage'], 1)
         
-        print(f'📡 OLED: AI PET STATE → {pet["stage"]} | {pet["current_emotion"]} | Menu: {pet["current_menu"]} | H:{pet["health"]} F:{pet["hunger"]}')
+        # NEW: Menu state management
+        # Menu is controlled by USER ONLY (frontend buttons or camera cover)
+        # NO auto-switching based on hunger/poop
+        current_menu = pet['current_menu']
+        play_eating = False
+        play_cleaning = False
+        
+        # Only handle eating/cleaning logic when user is already on menu
+        
+        if pet['hunger'] <= 50 and current_menu == 'FOOD_MENU':
+            # Pet is no longer hungry, trigger eating animation on FOOD_MENU
+            play_eating = True  # Trigger eating animation on FOOD_MENU
+            # DON'T return to MAIN yet - let eating animation play on FOOD_MENU
+            # Current menu stays FOOD_MENU to show eating animation
+            # After animation, next poll will return to MAIN
+            with db_lock:
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        # Set emotion to EATING for animation trigger
+                        cursor.execute('UPDATE pet_state SET current_emotion = ? WHERE device_id = ?', ('EATING', device_id))
+                        conn.commit()
+                        # Re-fetch pet state to get updated emotion
+                        pet = get_pet_state(device_id)
+                    except Exception as e:
+                        print(f'Error updating emotion: {e}')
+                    finally:
+                        conn.close()
+        
+        elif pet['current_emotion'] == 'EATING' and current_menu == 'FOOD_MENU':
+            # Eating animation finished, return to MAIN with IDLE emotion
+            current_menu = 'MAIN'
+            with db_lock:
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute('UPDATE pet_state SET current_menu = ?, current_emotion = ? WHERE device_id = ?', 
+                                     ('MAIN', 'IDLE', device_id))
+                        conn.commit()
+                        # Re-fetch pet state to get updated values
+                        pet = get_pet_state(device_id)
+                    except Exception as e:
+                        print(f'Error updating menu: {e}')
+                    finally:
+                        conn.close()
+        
+        elif not pet['poop_present'] and current_menu == 'TOILET_MENU':
+            # Pet is clean, return to MAIN with IDLE emotion
+            current_menu = 'MAIN'
+            with db_lock:
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute('UPDATE pet_state SET current_menu = ?, current_emotion = ? WHERE device_id = ?', 
+                                     ('MAIN', 'IDLE', device_id))
+                        conn.commit()
+                        # Re-fetch pet state to get updated values
+                        pet = get_pet_state(device_id)
+                    except Exception as e:
+                        print(f'Error updating menu: {e}')
+                    finally:
+                        conn.close()
+        
+        print(f'📡 OLED: AI PET STATE → {pet["stage"]} | {pet["current_emotion"]} | Menu: {current_menu} | H:{pet["health"]} F:{pet["hunger"]}')
         
         return jsonify({
             'status': 'success',
@@ -2244,7 +2319,8 @@ def get_oled_display():
             # Full pet state for AI Tamagotchi
             'stage': pet['stage'],
             'emotion': pet['current_emotion'],
-            'current_menu': pet['current_menu'],
+            'current_emotion': pet['current_emotion'],
+            'current_menu': current_menu,
             'health': pet['health'],
             'hunger': pet['hunger'],
             'cleanliness': pet['cleanliness'],
@@ -2252,10 +2328,14 @@ def get_oled_display():
             'energy': pet['energy'],
             'poop_present': pet['poop_present'],
             'age': pet['age'],
-            'mode': 'AI_PET',
+            'mode': 'AUTOMATIC',  # NEW: AI mode is always AUTOMATIC
+            'is_hungry': pet['hunger'] > 70,  # NEW: Boolean flag for conditional camera send
             'show_home_icon': True,
             'show_food_icon': pet['hunger'] > 70,  # Show food icon when hungry
-            'screen_type': 'MAIN',
+            'show_poop_icon': pet['poop_present'],  # Show poop icon when poop present
+            'screen_type': current_menu,
+            'play_eating_animation': play_eating,  # Trigger eating animation when fed
+            'play_cleaning_animation': play_cleaning,  # Trigger cleaning when cleaned
             'message': f'Pet: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
     
@@ -2584,6 +2664,124 @@ def toggle_food_icon():
         
     except Exception as e:
         print(f'❌ Error toggling food icon: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/oled-display/poop-icon-toggle', methods=['POST'])
+def toggle_poop_icon():
+    """Toggle poop icon display on OLED (indicates pet needs cleaning)
+    
+    Updates show_poop_icon flag in database and returns new state
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        device_id = data.get('device_id', 'ESP32_001')
+        show_poop_icon = data.get('show_poop_icon', False)
+        
+        with db_lock:
+            conn = get_db_connection()
+            if not conn:
+                return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+            
+            try:
+                cursor = conn.cursor()
+                
+                # Update poop icon state
+                cursor.execute('''
+                    UPDATE oled_display_state
+                    SET show_poop_icon = ?, updated_at = CURRENT_TIMESTAMP, updated_by = 'web_ui'
+                    WHERE device_id = ?
+                ''', (show_poop_icon, device_id))
+                
+                if cursor.rowcount == 0:
+                    # Insert if not exists
+                    cursor.execute('''
+                        INSERT INTO oled_display_state
+                        (device_id, show_poop_icon, updated_by)
+                        VALUES (?, ?, ?)
+                    ''', (device_id, show_poop_icon, 'web_ui'))
+                
+                conn.commit()
+                print(f'💩 Poop icon toggled to: {show_poop_icon} for device {device_id}')
+                
+            except sqlite3.Error as e:
+                print(f'❌ Database error: {e}')
+                return jsonify({'status': 'error', 'message': 'Database update failed'}), 500
+            finally:
+                conn.close()
+        
+        # Broadcast change to all web clients
+        def emit_poop_icon_change():
+            with app.app_context():
+                socketio.emit('poop_icon_changed', {
+                    'show_poop_icon': show_poop_icon,
+                    'device_id': device_id,
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        socketio.start_background_task(emit_poop_icon_change)
+        
+        return jsonify({
+            'status': 'success',
+            'show_poop_icon': show_poop_icon,
+            'device_id': device_id,
+            'message': f'Poop icon {("enabled" if show_poop_icon else "disabled")}'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error toggling poop icon: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/oled-display/menu-switch', methods=['POST'])
+def switch_menu():
+    """Switch current menu (MAIN/FOOD_MENU/TOILET_MENU)
+    
+    User-controlled menu switching via frontend or camera cover detection
+    """
+    try:
+        data = request.get_json()
+        device_id = data.get('device_id', 'ESP32_001')
+        menu = data.get('menu', 'MAIN')  # MAIN, FOOD_MENU, TOILET_MENU
+        
+        # Validate menu value
+        valid_menus = ['MAIN', 'FOOD_MENU', 'TOILET_MENU']
+        if menu not in valid_menus:
+            return jsonify({'status': 'error', 'message': f'Invalid menu. Must be one of: {valid_menus}'}), 400
+        
+        # Update pet state with new menu
+        with db_lock:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('UPDATE pet_state SET current_menu = ? WHERE device_id = ?', (menu, device_id))
+                    conn.commit()
+                    print(f'📱 Menu switched to: {menu}')
+                except Exception as e:
+                    print(f'Error switching menu: {e}')
+                    return jsonify({'status': 'error', 'message': str(e)}), 500
+                finally:
+                    conn.close()
+        
+        # Broadcast menu change to connected clients
+        def emit_menu_change():
+            socketio.emit('menu_changed', {
+                'device_id': device_id,
+                'menu': menu
+            }, namespace='/')
+        
+        socketio.start_background_task(emit_menu_change)
+        
+        return jsonify({
+            'status': 'success',
+            'current_menu': menu,
+            'device_id': device_id,
+            'message': f'Menu switched to {menu}'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error switching menu: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ================= STEP COUNTER ENDPOINTS =================
