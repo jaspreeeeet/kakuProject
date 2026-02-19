@@ -89,7 +89,7 @@ PetAge petAge = CHILD;              // Default to child
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
 const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds
-const unsigned long ANIMATION_DISPLAY_INTERVAL = 1000;  // Display animation every 1 second (faster animation)
+const unsigned long ANIMATION_DISPLAY_INTERVAL = 150;  // Display animation every 150ms (fast smooth animation)
 uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
@@ -490,13 +490,7 @@ void drawHomeIcon() {
 void displayPetAnimation() {
     if (!displayReady) return;
     
-    // Poll server for OLED display animation every 2 seconds
-    if (millis() - lastDisplayCheckTime >= DISPLAY_CHECK_INTERVAL) {
-        lastDisplayCheckTime = millis();
-        getOLEDDisplayFromServer();
-    }
-    
-    // Display animation every 2 seconds
+    // Display animation every 150ms
     if (millis() - lastAnimationTime >= ANIMATION_DISPLAY_INTERVAL) {
         lastAnimationTime = millis();
         display.clearDisplay();
@@ -546,8 +540,17 @@ void loop() {
     
     // Only show main screen after startup is complete
     if (startupComplete) {
-        // Display pet animation on OLED (every 2 seconds with age change every 30 seconds)
+        // Display pet animation on OLED (smooth 150ms refresh)
         displayPetAnimation();
+        
+        // Poll server for OLED display state every 2 seconds (non-blocking)
+        if (millis() - lastDisplayCheckTime >= DISPLAY_CHECK_INTERVAL) {
+            lastDisplayCheckTime = millis();
+            
+            if (isServerAlive()) {
+                getOLEDDisplayFromServer();
+            }
+        }
     }
     
     // Check WiFi connection
