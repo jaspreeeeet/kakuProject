@@ -107,14 +107,14 @@ bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 // Camera cover detection for menu switching
 #define BLACK_BRIGHTNESS_TH 25     // Brightness threshold for black detection
 #define BLACK_CONTRAST_TH   25     // Contrast threshold for black detection
-#define HOLD_TIME_MS        3000   // 3 sec camera cover → cycle menu
-#define COOLDOWN_MS         1500   // Cooldown between actions
 
-bool blackActive = false;
-unsigned long blackStartTime = 0;
-unsigned long lastCoverActionTime = 0;
-volatile bool cameraCapturing = false;  // NEW: Flag to prevent camera access conflicts
-bool imageAlreadySentThisSession = false;  // NEW: Track if image sent for current food session
+// NEW: Menu cycling via consecutive black frame detection (uses 5-sec captures only)
+int consecutiveBlackFrames = 0;        // Count consecutive black frames
+unsigned long lastMenuCycleTime = 0;   // Cooldown between menu cycles (prevent spam)
+const unsigned long MENU_CYCLE_COOLDOWN = 3000;  // 3 seconds cooldown
+
+volatile bool cameraCapturing = false;  // Flag to prevent camera access conflicts
+bool imageAlreadySentThisSession = false;  // Track if image sent for current food session
 
 // MPU6050 sensor
 MPU6050 mpu;
@@ -251,7 +251,7 @@ void displayFoodMenu();  // NEW: Display food menu screen
 void displayToiletMenu();  // NEW: Display toilet menu screen
 bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
 void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET)
-void checkCameraCover();  // NEW: Check camera cover for menu switching
+// void checkCameraCover();  // DISABLED: Check camera cover for menu switching (now uses 5-sec intervals)
 void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
 
 // ================= OLED ANIMATION TASK (Core 0) =================
@@ -763,7 +763,10 @@ void cycleMenu() {
     }
 }
 
-// Check camera cover and handle menu cycling
+// ================= CAMERA COVER DETECTION (DISABLED - Moved to 5-sec capture) =================
+// OLD: Continuous frame checking every loop (causes hardware heating)
+// NEW: Black frame detection integrated into cameraMonitorTask() 5-second captures
+/*
 void checkCameraCover() {
     // Skip cover detection if camera is currently capturing (prevent conflict)
     if (cameraCapturing) return;
@@ -794,7 +797,8 @@ void checkCameraCover() {
             
             blackActive = false;
         }
-    }
+ 
+*/   }
     
     esp_camera_fb_return(fb);
 }
@@ -881,8 +885,8 @@ void loop() {
             getOLEDDisplayFromServer();  // Let it fail silently if server down
         }
         
-        // Check camera cover for menu switching (every loop)
-        checkCameraCover();
+        // NOTE: Camera cover detection moved to 5-second capture interval
+        // No continuous checking - reduces hardware heating
     }
     
     // Check WiFi connection
@@ -1201,10 +1205,32 @@ void cameraMonitorTask(void *parameter) {
             cameraCapturing = true;  // Set flag to prevent conflicts
             Serial.println("📸 Core 0: Capturing image (5-sec interval)...");
             camera_fb_t *fb = esp_camera_fb_get();
-            cameraCapturing = false;  // Release flag
             
             if (fb) {
                 Serial.printf("✅ Core 0: Image captured: %d bytes (raw JPEG)\n", fb->len);
+                
+                // NEW: Check if frame is black (camera covered) for menu cycling
+                bool isBlack = isFrameMostlyBlack(fb);
+                unsigned long now = millis();
+                
+                if (isBlack) {
+                    consecutiveBlackFrames++;
+                    Serial.printf("🖤 Black frame detected (%d/2)\n", consecutiveBlackFrames);
+                    
+                    // If 2 consecutive black frames (10 seconds total) → Cycle menu
+                    if (consecutiveBlackFrames >= 2 && (now - lastMenuCycleTime) > MENU_CYCLE_COOLDOWN) {
+                        Serial.println("🔄 Camera covered for 10 seconds → Cycling menu...");
+                        cycleMenu();  // MAIN → FOOD_MENU → TOILET_MENU → MAIN
+                        lastMenuCycleTime = now;
+                        consecutiveBlackFrames = 0;  // Reset counter
+                    }
+                } else {
+                    // Frame not black - reset counter
+                    if (consecutiveBlackFrames > 0) {
+                        Serial.println("✅ Camera uncovered - reset black frame counter");
+                    }
+                    consecutiveBlackFrames = 0;
+                }
                 
                 // Store raw binary in PSRAM with mutex protection
                 if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
