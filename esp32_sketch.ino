@@ -279,17 +279,26 @@ void setup() {
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
     
-    // Connect to WiFi
+    // Connect to WiFi with timeout protection
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Connecting WiFi");
 
-    while (WiFi.status() != WL_CONNECTED) {
+    // FIX: Add 30-second timeout to prevent infinite loop
+    unsigned long wifiStartTime = millis();
+    const unsigned long WIFI_TIMEOUT = 30000;  // 30 seconds
+    
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifiStartTime < WIFI_TIMEOUT)) {
         Serial.print(".");
         delay(300);
     }
 
-    Serial.println("\nWiFi Connected");
-    Serial.println(WiFi.localIP());
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi Connected");
+        Serial.println(WiFi.localIP());
+    } else {
+        Serial.println("\n⚠️  WiFi connection timeout! Continuing without WiFi...");
+        Serial.println("⚠️  Server communication disabled - running in offline mode");
+    }
     
     // FIX 6: Enable WiFi modem sleep for power savings
     WiFi.setSleep(true);
@@ -650,18 +659,18 @@ void displayFoodMenu() {
         // Show looping eating animation (Pacman) - full screen, no food icon
         uint8_t eatingFrame = (millis() / 100) % EATING_FRAME_COUNT;  // 100ms per frame
         display.drawBitmap(0, 0, eating_frames[eatingFrame], EATING_WIDTH, EATING_HEIGHT, SSD1306_WHITE);
-        Serial.println("😋 Eating animation playing during upload...");
+        // Removed Serial.println to reduce clutter during animation loop
     }
     // Check if just finished eating (show GOOD for 3 seconds)
     else if (justFinishedEating && (millis() - eatingFinishTime < 3000)) {
         // Draw food icon at top-left
         drawStaticFoodIcon();
         
-        // Show "GOOD" text after eating
+        // Show "GOOD" text after eating (NO newline to prevent cursor artifacts)
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
         display.setCursor(18, 12);
-        display.println("GOOD!");
+        display.print("GOOD!");  // Changed from println to print - prevents unwanted cursor movement
     } else if (justFinishedEating) {
         // Draw food icon at top-left
         drawStaticFoodIcon();
@@ -889,16 +898,27 @@ void loop() {
         // No continuous checking - reduces hardware heating
     }
     
-    // Check WiFi connection
+    // Check WiFi connection with timeout protection
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("❌ WiFi disconnected, attempting reconnect...");
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-        while (WiFi.status() != WL_CONNECTED) {
+        
+        // FIX: Add 20-second timeout to prevent infinite loop
+        unsigned long reconnectStart = millis();
+        const unsigned long RECONNECT_TIMEOUT = 20000;  // 20 seconds
+        
+        while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart < RECONNECT_TIMEOUT)) {
             Serial.print(".");
             vTaskDelay(pdMS_TO_TICKS(300));
         }
-        Serial.println("\n✅ WiFi Reconnected");
-        Serial.println(WiFi.localIP());
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("\n✅ WiFi Reconnected");
+            Serial.println(WiFi.localIP());
+        } else {
+            Serial.println("\n⚠️  WiFi reconnection failed! Operating in offline mode...");
+            // Continue running - OLED and local sensors still work
+        }
     }
     
     // Debug: Print WiFi status
