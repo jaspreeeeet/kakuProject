@@ -1551,11 +1551,12 @@ void getOLEDDisplayFromServer() {
                 Serial.printf("💩 Poop Icon: %s\n", showPoopIcon ? "SHOW" : "HIDE");
             }
             
-            // NEW: Handle mode (AUTOMATIC/MANUAL)
-            if (doc.containsKey("mode")) {
-                currentMode = doc["mode"].as<String>();
-                Serial.printf("🤖 Mode: %s\n", currentMode.c_str());
-            }
+            // NEW: Handle mode (AUTOMATIC/MANUAL) - COMMENTED OUT TO FORCE AUTOMATIC MODE
+            // if (doc.containsKey("mode")) {
+            //     currentMode = doc["mode"].as<String>();
+            //     Serial.printf("🤖 Mode: %s\n", currentMode.c_str());
+            // }
+            Serial.println("🤖 Mode: AUTOMATIC (forced)");
             
             // NEW: Handle hunger status for conditional camera send
             if (doc.containsKey("is_hungry")) {
