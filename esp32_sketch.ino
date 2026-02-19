@@ -966,11 +966,11 @@ void loop() {
             if (currentMode == "AUTOMATIC" && 
                 currentScreenType == "FOOD_MENU" && 
                 petIsHungry && 
-                !imageSentThisSession) {
+                !imageAlreadySentThisSession) {
                 
                 // Mark that we have a new image (Core 1 will send binary buffer directly)
                 data.has_new_image = true;
-                imageSentThisSession = true;  // Mark as sent (prevents resend until flag reset)
+                imageAlreadySentThisSession = true;  // Mark as sent (prevents resend until flag reset)
                 Serial.println("📸 AUTO MODE: Sending image for food detection");
             } else {
                 // Don't send - conditions not met
@@ -980,7 +980,7 @@ void loop() {
                     Serial.println("⏭️  Skipping image send - not on FOOD_MENU");
                 } else if (!petIsHungry) {
                     Serial.println("⏭️  Skipping image send - pet not hungry");
-                } else if (imageSentThisSession) {
+                } else if (imageAlreadySentThisSession) {
                     Serial.println("⏭️  Skipping image send - already sent this session");
                 }
             }
@@ -1468,14 +1468,14 @@ void getOLEDDisplayFromServer() {
             if (doc.containsKey("screen_type")) {
                 String newScreenType = doc["screen_type"].as<String>();
                 if (currentScreenType == "FOOD_MENU" && newScreenType != "FOOD_MENU") {
-                    imageSentThisSession = false;  // Reset flag when leaving FOOD_MENU
+                    imageAlreadySentThisSession = false;  // Reset flag when leaving FOOD_MENU
                 }
                 currentScreenType = newScreenType;
                 Serial.printf("📺 Screen Type: %s\n", currentScreenType.c_str());
             } else if (doc.containsKey("screen_state")) {
                 String newScreenState = doc["screen_state"].as<String>();
                 if (currentScreenType == "FOOD_MENU" && newScreenState != "FOOD_MENU") {
-                    imageSentThisSession = false;  // Reset flag when leaving FOOD_MENU
+                    imageAlreadySentThisSession = false;  // Reset flag when leaving FOOD_MENU
                 }
                 currentScreenType = newScreenState;
                 Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
