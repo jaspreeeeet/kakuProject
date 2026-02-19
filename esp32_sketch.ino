@@ -221,6 +221,7 @@ void sendAllDataToServer(SensorData data);
 String recordAudioBase64();
 void notifyServerStartupComplete();  // NEW: Notify server startup is complete
 void getOLEDDisplayFromServer();  // NEW: Forward declaration
+void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
 
 void setup() {
     Serial.begin(115200);
@@ -467,6 +468,24 @@ void slideInfantSlowlyFromLeft() {
     notifyServerStartupComplete();
 }
 
+// ================= HOME ICON DRAWING (PIXEL-BY-PIXEL) =================
+// Draws home icon using pixel-by-pixel approach to prevent corruption with other animations
+void drawHomeIcon() {
+    int xOffset = 0;  // Top-left corner
+    int yOffset = 0;
+    
+    for (uint16_t y = 0; y < HOME_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < HOME_ICON_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * HOME_ICON_WIDTH + x;
+            uint8_t bitIndex = y % 8;
+            
+            if (pgm_read_byte(&home_icon_frames[0][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
 // ================= PET ANIMATION FUNCTION =================
 void displayPetAnimation() {
     if (!displayReady) return;
@@ -509,9 +528,9 @@ void displayPetAnimation() {
                 break;
         }
         
-        // Draw home icon at top-left corner ONLY if server says to show it
+        // Draw home icon at top-left corner using pixel-by-pixel approach (no corruption)
         if (showHomeIcon && currentScreenType == "MAIN") {
-            display.drawBitmap(0, 0, home_icon_frames[0], HOME_ICON_WIDTH, HOME_ICON_HEIGHT, SSD1306_WHITE);
+            drawHomeIcon();
         }
         
         // Only animation - no text
