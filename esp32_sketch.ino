@@ -19,6 +19,7 @@ Install via Arduino IDE: Sketch > Include Library > Manage Libraries
 */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -87,10 +88,11 @@ enum PetAge { INFANT = 0, CHILD = 1, ADULT = 2, OLD = 3 };
 PetAge petAge = CHILD;              // Default to child
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
-const unsigned long DISPLAY_CHECK_INTERVAL = 60000;  // Poll server for OLED display state every 60 seconds (cost optimized)
+const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds
 const unsigned long ANIMATION_DISPLAY_INTERVAL = 2000;  // Display animation every 2 seconds
 uint8_t currentFrame = 0;
 bool displayReady = false;
+bool startupComplete = false;  // Track if startup egg animation is done
 
 // MPU6050 sensor
 MPU6050 mpu;
@@ -107,7 +109,14 @@ String detectedAudioData = "";
 
 // Dual-core synchronization
 SemaphoreHandle_t audioMutex;
+SemaphoreHandle_t cameraMutex;
 TaskHandle_t audioTaskHandle = NULL;
+TaskHandle_t cameraTaskHandle = NULL;
+
+// Camera data ready flag
+volatile bool cameraImageReady = false;
+uint8_t* capturedImageBuffer = NULL;
+size_t capturedImageLength = 0;
 
 // VAD Settings
 #define VAD_THRESHOLD 1000        // Energy threshold for speech detection
@@ -138,8 +147,8 @@ unsigned long lastInternalReadTime = 0;        // Fast internal sensor reading t
 const unsigned long SEND_INTERVAL = 2000;      // Send sensor data batch every 2 seconds
 const unsigned long INTERNAL_READ_INTERVAL = 100;  // NEW: Read sensor every 100ms internally
 const unsigned long IMAGE_INTERVAL = 30000;    // Capture image every 30 seconds (reduced for power)
-const unsigned long EVENT_POLL_INTERVAL = 60000; // Poll for events every 60 seconds (cost optimized)
-unsigned long dynamicEventPollInterval = 60000;  // Dynamic backoff for event polling
+const unsigned long EVENT_POLL_INTERVAL = 5000; // Poll for events every 5 seconds
+unsigned long dynamicEventPollInterval = 5000;  // Dynamic backoff for event polling
 // Audio now triggered by speech detection, not timer
 
 // NEW: Sensor reading buffer
@@ -202,6 +211,7 @@ void scanI2CDevices();
 bool initCamera();
 bool initAudio();
 void audioMonitorTask(void *parameter);
+void cameraMonitorTask(void *parameter);
 void processEvent(const char* event_type, const char* message);
 void acknowledgeEvent(int event_id);
 void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample_rate);
@@ -251,15 +261,35 @@ void setup() {
         displayReady = false;
     } else {
         Serial.println("✅ OLED initialized successfully!");
+        displayReady = true;
+        
+        // ============ STARTUP SEQUENCE ============
+        // Display startup text
         display.clearDisplay();
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 0);
-        display.println("ESP32 Pet Ready!");
+        display.setCursor(0, 8);
+        display.println("KAKU");
+        display.setCursor(0, 18);
+        display.println("Starting...");
         display.display();
-        displayReady = true;
         delay(1000);
-        display.clearDisplay();
+        
+        // Play egg cracking animation from all_pets.h
+        Serial.println("🥚 Playing egg cracking animation...");
+        playEggCrackingAnimation();
+        
+        // Egg screen slides to the left and exits
+        Serial.println("🥚 Sliding egg screen out...");
+        slideEggScreenOut();
+        
+        // Infant appears gradually from left side
+        Serial.println("👶 Sliding infant in from left...");
+        slideInfantSlowlyFromLeft();
+        
+        // Mark startup as complete
+        startupComplete = true;
+        Serial.println("✅ Startup complete! Main screen ready.");
     }
     
     Serial.println("Scanning I2C devices...");
@@ -295,8 +325,9 @@ void setup() {
     // Initialize I2S Microphone
     initAudio();
     
-    // Create mutex for audio synchronization
+    // Create mutexes for synchronization
     audioMutex = xSemaphoreCreateMutex();
+    cameraMutex = xSemaphoreCreateMutex();
     
     // Start audio monitoring task on Core 0 (dedicated to audio/VAD)
     xTaskCreatePinnedToCore(
@@ -309,9 +340,20 @@ void setup() {
         0                   // Core 0 (dedicated to audio)
     );
     
+    // Start camera monitoring task on Core 0 (shares core with audio)
+    xTaskCreatePinnedToCore(
+        cameraMonitorTask,   // Task function
+        "CameraMonitor",     // Task name
+        4096,               // Stack size
+        NULL,               // Parameters
+        1,                  // Priority (lower than audio)
+        &cameraTaskHandle,  // Task handle
+        0                   // Core 0 (shared with audio)
+    );
+    
     Serial.println("System Ready!");
-    Serial.println("🎤 Core 0: Audio monitoring with voice detection");
-    Serial.println("🌐 Core 1: Sensors, camera, WiFi transmission");
+    Serial.println("🎤 Core 0: Audio + Camera monitoring");
+    Serial.println("🌐 Core 1: Sensors, WiFi transmission, OLED");
 }
 
 void scanI2CDevices() {
@@ -343,6 +385,90 @@ void scanI2CDevices() {
         Serial.printf("🎯 Found %d I2C device(s)\n", deviceCount);
     }
     Serial.println();
+}
+
+// ================= EGG CRACKING ANIMATION =================
+void playEggCrackingAnimation() {
+    // Display egg cracking animation from all_pets.h
+    Serial.println("🥚 Egg animation starting...");
+    
+    if (displayReady) {
+        // Display egg cracking sequence with all frames
+        for (int i = 0; i < EGG_CRACK_FRAME_COUNT; i++) {
+            display.clearDisplay();
+            // Draw the actual egg crack frame from all_pets.h
+            display.drawBitmap(0, 0, egg_crack_frames[i], EGG_CRACK_WIDTH, EGG_CRACK_HEIGHT, SSD1306_WHITE);
+            display.display();
+            Serial.printf("🥚 Egg frame %d/%d\n", i + 1, EGG_CRACK_FRAME_COUNT);
+            delay(egg_crack_delays[i]);  // Use delay from all_pets.h (2 seconds each)
+        }
+        Serial.println("🐣 Egg hatching complete!");
+    }
+}
+
+// ================= SLIDE TRANSITION ANIMATION =================
+void slideEggScreenOut() {
+    // Egg screen slides to the left and exits
+    if (!displayReady) return;
+    
+    Serial.println("🥚 Egg screen sliding left...");
+    const int slideSteps = 8;
+    
+    for (int step = 0; step <= slideSteps; step++) {
+        display.clearDisplay();
+        
+        // Calculate x position: starts at 0, ends at -64 (completely off left side)
+        int xPos = -(step * SCREEN_WIDTH) / slideSteps;
+        
+        // Draw the final egg frame sliding left
+        display.drawBitmap(xPos, 0, egg_crack_frames[EGG_CRACK_FRAME_COUNT - 1], EGG_CRACK_WIDTH, EGG_CRACK_HEIGHT, SSD1306_WHITE);
+        
+        display.display();
+        delay(80);
+    }
+    Serial.println("✅ Egg screen exit complete!");
+}
+
+void slideInfantSlowlyFromLeft() {
+    // Infant appears gradually from left side (width gradually increasing)
+    if (!displayReady) return;
+    
+    Serial.println("👶 Infant appearing slowly from left...");
+    const int slideSteps = 15;  // 15 steps @ 200ms = 3 seconds
+    
+    for (int step = 0; step <= slideSteps; step++) {
+        display.clearDisplay();
+        
+        // Calculate x position: starts at -width (fully left of screen, invisible)
+        // ends at 0 (fully visible on screen)
+        int xPos = -INFANT_WIDTH + (step * INFANT_WIDTH) / slideSteps;
+        
+        // Draw infant gradually appearing from left
+        display.drawBitmap(xPos, 0, infant_frames[0], INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+        
+        // Show label when infant is more than halfway visible
+        if (xPos > -INFANT_WIDTH / 2) {
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(xPos + 35, 24);
+            display.print("INF");
+        }
+        
+        display.display();
+        delay(200);  // 15 steps × 200ms = 3 seconds total
+    }
+    
+    // Final position - infant fully visible and centered
+    display.clearDisplay();
+    display.drawBitmap(0, 0, infant_frames[0], INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 24);
+    display.print("INF");
+    display.display();
+    
+    petAge = INFANT;
+    Serial.println("✅ Infant fully visible!");
 }
 
 // ================= PET ANIMATION FUNCTION =================
@@ -404,8 +530,11 @@ void displayPetAnimation() {
 void loop() {
     // This loop runs on Core 1 - handles sensors, camera, WiFi
     
-    // Display pet animation on OLED (every 2 seconds with age change every 30 seconds)
-    displayPetAnimation();
+    // Only show main screen after startup is complete
+    if (startupComplete) {
+        // Display pet animation on OLED (every 2 seconds with age change every 30 seconds)
+        displayPetAnimation();
+    }
     
     // Check WiFi connection
     if (WiFi.status() != WL_CONNECTED) {
@@ -476,14 +605,17 @@ void loop() {
     // Read sensor data
     SensorData data = readAllSensors();
     
-    // ✅ CAMERA ENABLED - Capture image every 30 seconds
-    if (cameraReady && (millis() - lastImageCapture >= IMAGE_INTERVAL)) {
-        lastImageCapture = millis();
-        data.camera_image_b64 = captureImageBase64();
-        data.has_new_image = !data.camera_image_b64.isEmpty();
+    // ========== CAMERA ON CORE 0 ==========
+    // Check if camera image ready from Core 0
+    if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (cameraImageReady && capturedImageBuffer != NULL) {
+            // Mark that we have a new image (Core 1 will send binary buffer directly)
+            data.has_new_image = true;
+        }
+        xSemaphoreGive(cameraMutex);
     }
     
-    // ❌ AUDIO DISABLED - Speech-triggered audio capture not needed
+    // Check for speech-triggered audio (from Core 0)
     // if (xSemaphoreTake(audioMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     //     if (speechDetected && !detectedAudioData.isEmpty()) {
     //         data.audio_data_b64 = detectedAudioData;
@@ -497,8 +629,9 @@ void loop() {
     //     }
     //     xSemaphoreGive(audioMutex);
     // }
+    // ========== AUDIO STILL DISABLED ==========
     
-    // Send all data every 2 seconds (removed redundant health check to reduce costs)
+    // Send all data every 2 seconds ONLY if server is alive AND not uploading image
     if (millis() - lastSendTime >= SEND_INTERVAL) {
         // Skip sensor data while image is uploading (to avoid interference)
         if (isUploadingImage) {
@@ -506,11 +639,11 @@ void loop() {
         } else {
             lastSendTime = millis();
 
-            // Removed isServerAlive() check - saves 43,200 requests/day!
-            // Server will return error if offline, no need to check first
-            
-            // NEW: Prepare batch with collected readings
-            data.sensor_batch = sensorBatch;
+            if (!isServerAlive()) {
+                Serial.println("🛑 Server offline. Skipping data send cycle.");
+            } else {
+                // NEW: Prepare batch with collected readings
+                data.sensor_batch = sensorBatch;
                 
                 // Calculate average microphone level
                 if (micReadingCount > 0) {
@@ -532,29 +665,32 @@ void loop() {
                 // Send sensor data (includes batch of readings)
                 bool serverAccepted = sendSensorDataOnly(data);
                 
-            // RESET batch after sending
-            sensorBatch.reading_count = 0;
-            totalMicLevel = 0.0;
-            micReadingCount = 0;
-            
-        // ✅ IMAGE SENDING ENABLED - Send to database
-            if (serverAccepted && data.has_new_image && !data.camera_image_b64.isEmpty()) {
-                sendImageData(data.camera_image_b64);
+                // RESET batch after sending
+                sensorBatch.reading_count = 0;
+                totalMicLevel = 0.0;
+                micReadingCount = 0;
+                
+                // ========== IMAGE SENDING ENABLED ==========
+                // Send images only if sensor data was accepted
+                if (serverAccepted && data.has_new_image) {
+                    sendImageData("");  // Binary data passed via shared buffer
+                }
+                
+                // Send audio only if sensor data was accepted and speech detected
+                // if (serverAccepted && data.has_new_audio && !data.audio_data_b64.isEmpty()) {
+                //     sendAudioData(data.audio_data_b64);
+                //     Serial.println("🎵 Speech audio sent to server!");
+                // }
+                // ========== AUDIO STILL DISABLED ==========
             }
-            
-        // ❌ AUDIO SENDING DISABLED (not needed)
-            // if (serverAccepted && data.has_new_audio && !data.audio_data_b64.isEmpty()) {
-            //     sendAudioData(data.audio_data_b64);
-            //     Serial.println("🎵 Speech audio sent to server!");
-            // }
         }
     }
     
-    // FIX 5: Poll for events with optimized intervals (cost optimized: 60s)
+    // FIX 5: Poll for events with optimized intervals
     if (millis() - lastEventPoll >= dynamicEventPollInterval) {
         lastEventPoll = millis();
         pollForEvents();
-        dynamicEventPollInterval = 60000;  // Standard interval (cost optimized)
+        dynamicEventPollInterval = 5000;  // Standard interval
     }
     
     delay(10);  // Small delay for Core 1
@@ -651,6 +787,60 @@ bool initAudio() {
     micReady = true;
     Serial.println("✅ PDM Microphone initialized successfully");
     return true;
+}
+
+// ================= DUAL-CORE CAMERA MONITORING TASK =================
+void cameraMonitorTask(void *parameter) {
+    Serial.println("📸 Core 0: Camera monitoring task started");
+    
+    unsigned long lastCapture = 0;
+    
+    while (true) {
+        if (!cameraReady) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        
+        // Capture image every 30 seconds
+        if (millis() - lastCapture >= IMAGE_INTERVAL) {
+            lastCapture = millis();
+            
+            Serial.println("📸 Core 0: Capturing image...");
+            camera_fb_t *fb = esp_camera_fb_get();
+            
+            if (fb) {
+                Serial.printf("✅ Core 0: Image captured: %d bytes (raw JPEG)\n", fb->len);
+                
+                // Store raw binary in PSRAM with mutex protection
+                if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    // Free previous buffer if exists
+                    if (capturedImageBuffer != NULL) {
+                        free(capturedImageBuffer);
+                    }
+                    
+                    // Allocate new buffer and copy data
+                    capturedImageBuffer = (uint8_t*)ps_malloc(fb->len);
+                    if (capturedImageBuffer) {
+                        memcpy(capturedImageBuffer, fb->buf, fb->len);
+                        capturedImageLength = fb->len;
+                        cameraImageReady = true;
+                        Serial.println("📦 Core 0: Image buffered for Core 1");
+                    } else {
+                        Serial.println("❌ Core 0: Failed to allocate image buffer");
+                    }
+                    
+                    xSemaphoreGive(cameraMutex);
+                }
+                
+                esp_camera_fb_return(fb);
+            } else {
+                Serial.println("❌ Core 0: Camera capture failed");
+            }
+        }
+        
+        // Check every second
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 // ================= DUAL-CORE AUDIO MONITORING TASK =================
@@ -933,7 +1123,6 @@ bool sendSensorDataOnly(SensorData data) {
     // Larger JSON payload - sensor data + batch of readings
     StaticJsonDocument<4096> jsonDoc;
     
-    jsonDoc["device_id"] = "ESP32_001";
     jsonDoc["accel_x"] = data.accel_x;
     jsonDoc["accel_y"] = data.accel_y;
     jsonDoc["accel_z"] = data.accel_z;
@@ -990,75 +1179,72 @@ bool sendSensorDataOnly(SensorData data) {
 
 void sendImageData(String imageBase64) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("⚠️  WiFi not connected, skipping image upload");
+        Serial.println("⚠️ WiFi not connected");
         return;
     }
-    
-    // Check free heap before capturing image
-    size_t freeHeap = ESP.getFreeHeap();
-    if (freeHeap < 50000) {  // Need at least 50KB free for image processing
-        Serial.printf("⚠️  Low memory (%d bytes), skipping image capture\n", freeHeap);
-        return;
-    }
-    
-    // Capture fresh image
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        Serial.println("❌ Camera capture failed");
-        isUploadingImage = false;  // Resume on error
-        return;
-    }
-    
-    // 🔴 SET FLAG: Pause sensor data transmission
+
     isUploadingImage = true;
-    Serial.println("🔴 STARTING IMAGE UPLOAD - Sensor data PAUSED");
-    Serial.printf("🖼️ Sending image: %d bytes (binary stream)\n", fb->len);
     
-    WiFiClient client;
-    HTTPClient http;
+    // Get binary data from Core 0 with mutex protection
+    uint8_t* binary_data = NULL;
+    size_t data_length = 0;
     
-    if (!http.begin(client, "https://kakuproject-90943350924.asia-south1.run.app/upload")) {
-        Serial.println("❌ Failed to connect to server");
-        esp_camera_fb_return(fb);
-        isUploadingImage = false;  // Resume on error
+    if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (capturedImageBuffer != NULL && capturedImageLength > 0) {
+            // Copy data for sending
+            binary_data = (uint8_t*)malloc(capturedImageLength);
+            if (binary_data) {
+                memcpy(binary_data, capturedImageBuffer, capturedImageLength);
+                data_length = capturedImageLength;
+            }
+            
+            // Free Core 0 buffer
+            free(capturedImageBuffer);
+            capturedImageBuffer = NULL;
+            capturedImageLength = 0;
+            cameraImageReady = false;
+        }
+        xSemaphoreGive(cameraMutex);
+    }
+    
+    if (!binary_data || data_length == 0) {
+        Serial.println("⚠️ No image data to send");
+        isUploadingImage = false;
         return;
     }
-    
-    // Configure HTTP client for large image data
-    http.setTimeout(20000);          // 20 second timeout for large images
-    http.setConnectTimeout(5000);    // 5 second connection timeout
-    http.addHeader("Content-Type", "application/octet-stream");
-    http.addHeader("Connection", "close");  // Close connection after upload
-    
-    // 🔥 Use sendRequest() to stream binary data directly
-    int httpCode = http.sendRequest("POST", fb->buf, fb->len);
-    
-    if (httpCode == 200) {
-        Serial.println("✅ Image sent successfully!");
-        Serial.printf("   Sent %d bytes to server\n", fb->len);
-        digitalWrite(LED_PIN, HIGH);
-        delay(50);
-        digitalWrite(LED_PIN, LOW);
-    } else if (httpCode > 0) {
-        // HTTP error response from server
-        Serial.printf("❌ HTTP Error: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-        String payload = http.getString();
-        if (payload.length() > 0) {
-            Serial.printf("   Server response: %s\n", payload.c_str());
-        }
-    } else {
-        // Connection or timeout error
-        Serial.printf("❌ Connection Error: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-        Serial.println("   Check WiFi connection and server availability");
+
+    Serial.printf("🖼️ Sending image: %d bytes (raw binary from Core 0)\n", data_length);
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+    http.setTimeout(30000);
+    http.setConnectTimeout(10000);
+
+    if (!http.begin(client, "https://kakuproject-90943350924.asia-south1.run.app/upload")) {
+        Serial.println("❌ HTTP begin failed");
+        free(binary_data);
+        isUploadingImage = false;
+        return;
     }
-    
+
+    http.addHeader("Content-Type", "application/octet-stream");
+
+    int httpCode = http.sendRequest("POST", binary_data, data_length);
+
+    if (httpCode == 200) {
+        Serial.println("✅ Image uploaded successfully");
+    } else {
+        Serial.printf("❌ Upload failed: %d (%s)\n",
+                      httpCode,
+                      http.errorToString(httpCode).c_str());
+    }
+
     http.end();
-    esp_camera_fb_return(fb);
-    delay(200);  // Server breathing room after large upload
-    
-    // 🟢 CLEAR FLAG: Resume sensor data transmission
+    free(binary_data);
+
     isUploadingImage = false;
-    Serial.println("🟢 IMAGE UPLOAD COMPLETE - Sensor data RESUMED");
 }
 
 void sendAudioData(String audioBase64) {

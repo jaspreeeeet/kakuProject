@@ -6,3 +6,5 @@ __pycache__/
 *.safetensors
 venv/
 .env
+
+.vercel
