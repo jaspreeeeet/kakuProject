@@ -797,11 +797,11 @@ void checkCameraCover() {
             
             blackActive = false;
         }
- 
-*/   }
+    }
     
     esp_camera_fb_return(fb);
 }
+*/
 
 // ================= PET ANIMATION FUNCTION =================
 void displayPetAnimation() {
