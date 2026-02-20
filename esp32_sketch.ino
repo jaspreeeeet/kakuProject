@@ -106,8 +106,7 @@ String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 
 // Camera cover detection for menu switching
-#define BLACK_BRIGHTNESS_TH 150    // Brightness threshold (increased from 100 - need darker)
-#define BLACK_CONTRAST_TH   150    // Contrast threshold (increased from 80 - need more uniform)
+#define BLACK_BRIGHTNESS_TH 100    // Brightness threshold (JPEG avg when covered ~70-85)
 
 // NEW: Menu cycling via consecutive black frame detection (uses 5-sec captures only)
 int consecutiveBlackFrames = 0;        // Count consecutive black frames
@@ -709,8 +708,6 @@ bool isFrameMostlyBlack(camera_fb_t * fb) {
     if (!fb || fb->len == 0) return false;
     
     long total = 0;
-    int maxB = 0;
-    int minB = 255;
     int count = 0;
     
     // Sample pixels (every 8th pixel for speed)
@@ -718,20 +715,17 @@ bool isFrameMostlyBlack(camera_fb_t * fb) {
         uint8_t p = fb->buf[i];
         total += p;
         count++;
-        if (p > maxB) maxB = p;
-        if (p < minB) minB = p;
     }
     
     if (count == 0) return false;
     
     int avg = total / count;
-    int contrast = maxB - minB;
     
-    // DEBUG: Always print brightness/contrast values
-    Serial.printf("🔍 Frame analysis: avg_brightness=%d (threshold=%d) | contrast=%d (threshold=%d)\n", 
-                 avg, BLACK_BRIGHTNESS_TH, contrast, BLACK_CONTRAST_TH);
+    // JPEG compression creates noise artifacts - only check brightness, ignore contrast
+    Serial.printf("🔍 Frame brightness: avg=%d (threshold=%d) | Size: %d bytes\n", 
+                 avg, BLACK_BRIGHTNESS_TH, fb->len);
     
-    bool isBlack = (avg <= BLACK_BRIGHTNESS_TH && contrast <= BLACK_CONTRAST_TH);
+    bool isBlack = (avg <= BLACK_BRIGHTNESS_TH);
     Serial.printf("   Result: %s\n", isBlack ? "✅ BLACK" : "❌ NOT BLACK");
     
     return isBlack;
