@@ -1618,8 +1618,8 @@ void notifyServerStartupComplete() {
     }
     
     HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(5000);
+    http.setConnectTimeout(2000);  // Reduced from 5s
+    http.setTimeout(2000);  // Reduced from 5s
     
     const char* startupUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/startup-complete";
     
@@ -1645,39 +1645,14 @@ void notifyServerStartupComplete() {
     int httpCode = http.POST(payload);
     
     if (httpCode == 200) {
-        String response = http.getString();
         Serial.println("✅ Server acknowledged startup!");
-        Serial.printf("   Response: %s\n", response.c_str());
-        
-        // Parse response - server might send initial state
-        DynamicJsonDocument responseDoc(768);
-        DeserializationError error = deserializeJson(responseDoc, response);
-        
-        if (!error) {
-            if (responseDoc.containsKey("animation_id")) {
-                int animId = responseDoc["animation_id"].as<int>();
-                petAge = (PetAge)animId;
-                Serial.printf("   ✅ Initial animation set to: %d (INFANT)\n", animId);
-            }
-            if (responseDoc.containsKey("show_home_icon")) {
-                showHomeIcon = responseDoc["show_home_icon"].as<bool>();
-                Serial.printf("   Home icon: %s\n", showHomeIcon ? "ENABLED" : "DISABLED");
-            }
-            if (responseDoc.containsKey("show_food_icon")) {
-                showFoodIcon = responseDoc["show_food_icon"].as<bool>();
-                Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
-            }
-        } else {
-            Serial.printf("⚠️  JSON parse error: %s\n", error.c_str());
-        }
-        
-        // Lock sync to INFANT for first 3 seconds after startup
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        lastDisplayCheckTime = millis();  // Reset sync timer to prevent early override
-        Serial.println("🔒 Startup complete - INFANT locked for 3 seconds");
+        lastDisplayCheckTime = millis();  // Reset sync timer
     } else {
         Serial.printf("⚠️  Server response: %d\n", httpCode);
     }
+    
+    // REMOVED 3-second blocking delay - OLED continues immediately
+    // REMOVED response parsing - not critical for startup
     
     http.end();
 }
