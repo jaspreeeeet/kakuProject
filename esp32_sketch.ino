@@ -93,7 +93,7 @@ const unsigned long ANIMATION_DISPLAY_INTERVAL = 100;  // Display animation ever
 uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
-bool showHomeIcon = false;  // NEW: Only show home icon when server says so
+bool showHomeIcon = true;   // ESP32 controls: Always show on MAIN screen
 bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
 bool showPoopIcon = false;  // NEW: Show poop icon when poop present
 String currentScreenType = "MAIN";  // NEW: Track current screen state from server
@@ -349,6 +349,7 @@ void setup() {
         
         // Mark startup as complete
         startupComplete = true;
+        showHomeIcon = true;  // ESP32 controls: Show home icon on MAIN screen by default
         Serial.println("✅ Startup complete! Main screen ready.");
     }
     
@@ -747,6 +748,15 @@ void cycleMenu() {
     
     // ✅ CHANGE MENU LOCALLY FIRST (instant, no server dependency)
     currentScreenType = newMenu;
+    
+    // ✅ ESP32 controls home icon based on menu (not server)
+    if (newMenu == "MAIN") {
+        showHomeIcon = true;   // Show home icon on MAIN screen
+        Serial.println("🏠 Home icon: ENABLED (MAIN screen)");
+    } else {
+        showHomeIcon = false;  // Hide home icon on other menus
+        Serial.println("🏠 Home icon: DISABLED (not MAIN)");
+    }
     
     // Reset image send flag when leaving FOOD_MENU
     if (newMenu != "FOOD_MENU") {
@@ -1536,13 +1546,12 @@ void getOLEDDisplayFromServer() {
                 Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
             }
             
-            // NEW: Handle show_home_icon flag
-            if (doc.containsKey("show_home_icon")) {
-                bool newShowIcon = doc["show_home_icon"].as<bool>();
-                if (showHomeIcon != newShowIcon) {
-                    showHomeIcon = newShowIcon;
-                    Serial.printf("🏠 Home Icon: %s\n", showHomeIcon ? "SHOW" : "HIDE");
-                }
+            // DISABLED: ESP32 controls home icon locally (always show on MAIN)
+            // showHomeIcon = true by default, not controlled by server
+            if (currentScreenType == "MAIN") {
+                showHomeIcon = true;  // Always show on MAIN screen
+            } else {
+                showHomeIcon = false; // Hide on other menus
             }
             
             // NEW: Handle show_food_icon flag
