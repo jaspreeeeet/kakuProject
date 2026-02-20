@@ -733,7 +733,7 @@ void drawStaticPlayIcon() {
     // Use second frame of play icon animation (the animated play symbol)
     for (uint16_t y = 0; y < PLAY_ICON_HEIGHT; y++) {
         for (uint16_t x = 0; x < PLAY_ICON_WIDTH; x++) {
-            uint16_t byteIndex = (y / 8) * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
+            uint16_t byteIndex = y * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
             uint8_t bitIndex = 7 - (x % 8);
             
             if (pgm_read_byte(&play_icon_frames[1][byteIndex]) & (1 << bitIndex)) {
@@ -752,7 +752,7 @@ void displayPlayMenu() {
     
     for (uint16_t y = 0; y < PLAY_ICON_HEIGHT; y++) {
         for (uint16_t x = 0; x < PLAY_ICON_WIDTH; x++) {
-            uint16_t byteIndex = (y / 8) * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
+            uint16_t byteIndex = y * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
             uint8_t bitIndex = 7 - (x % 8);
             
             if (pgm_read_byte(&play_icon_frames[playFrame][byteIndex]) & (1 << bitIndex)) {
