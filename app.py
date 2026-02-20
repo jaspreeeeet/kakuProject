@@ -971,7 +971,7 @@ def pet_engine_cycle():
                 hunger_increase = 0
                 current_stage = updates.get('stage', state['stage'])
                 
-               if current_stage == 'INFANT':
+                if current_stage == 'INFANT':
                     hunger_increase = 15
                 elif current_stage == 'CHILD':
                     hunger_increase = 10
