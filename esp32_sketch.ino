@@ -106,8 +106,8 @@ String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 
 // Camera cover detection for menu switching
-#define BLACK_BRIGHTNESS_TH 25     // Brightness threshold for black detection
-#define BLACK_CONTRAST_TH   25     // Contrast threshold for black detection
+#define BLACK_BRIGHTNESS_TH 100    // Brightness threshold for black detection (was 25 - too strict!)
+#define BLACK_CONTRAST_TH   80     // Contrast threshold for black detection (was 25 - too strict!)
 
 // NEW: Menu cycling via consecutive black frame detection (uses 5-sec captures only)
 int consecutiveBlackFrames = 0;        // Count consecutive black frames
