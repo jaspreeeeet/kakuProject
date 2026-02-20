@@ -246,11 +246,11 @@ PROGMEM const uint8_t egg_crack_frames[EGG_CRACK_FRAME_COUNT][256] = {
 };
 
 // Infant Cry Animation
-#define CRY_FRAME_COUNT 2
-#define CRY_WIDTH 64
-#define CRY_HEIGHT 32
-const uint16_t cry_delays[CRY_FRAME_COUNT] = {2000, 2000};
-PROGMEM const uint8_t cry_frames[CRY_FRAME_COUNT][256] = {
+#define INFANT_CRY_FRAME_COUNT 2
+#define INFANT_CRY_WIDTH 64
+#define INFANT_CRY_HEIGHT 32
+const uint16_t infant_cry_delays[INFANT_CRY_FRAME_COUNT] = {2000, 2000};
+PROGMEM const uint8_t infant_cry_frames[INFANT_CRY_FRAME_COUNT][256] = {
   {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
     0x00, 0x00, 0x00, 0x07, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0xFC, 0x00, 0x00, 0x00, 
@@ -292,11 +292,11 @@ PROGMEM const uint8_t cry_frames[CRY_FRAME_COUNT][256] = {
 };
 
 // Infant Surprise Animation
-#define SURPRISE_FRAME_COUNT 2
-#define SURPRISE_WIDTH 64
-#define SURPRISE_HEIGHT 32
-const uint16_t surprise_delays[SURPRISE_FRAME_COUNT] = {200, 1000};
-PROGMEM const uint8_t surprise_frames[SURPRISE_FRAME_COUNT][256] = {
+#define INFANT_SURPRISE_FRAME_COUNT 2
+#define INFANT_SURPRISE_WIDTH 64
+#define INFANT_SURPRISE_HEIGHT 32
+const uint16_t infant_surprise_delays[INFANT_SURPRISE_FRAME_COUNT] = {200, 1000};
+PROGMEM const uint8_t infant_surprise_frames[INFANT_SURPRISE_FRAME_COUNT][256] = {
   {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
     0x00, 0x00, 0x00, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F, 0xF8, 0x00, 0x00, 0x00, 
@@ -338,11 +338,11 @@ PROGMEM const uint8_t surprise_frames[SURPRISE_FRAME_COUNT][256] = {
 };
 
 // Infant Angry Animation
-#define ANGRY_FRAME_COUNT 2
-#define ANGRY_WIDTH 64
-#define ANGRY_HEIGHT 32
-const uint16_t angry_delays[ANGRY_FRAME_COUNT] = {2000, 2000};
-PROGMEM const uint8_t angry_frames[ANGRY_FRAME_COUNT][256] = {
+#define INFANT_ANGRY_FRAME_COUNT 2
+#define INFANT_ANGRY_WIDTH 64
+#define INFANT_ANGRY_HEIGHT 32
+const uint16_t infant_angry_delays[INFANT_ANGRY_FRAME_COUNT] = {2000, 2000};
+PROGMEM const uint8_t infant_angry_frames[INFANT_ANGRY_FRAME_COUNT][256] = {
   {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
     0x00, 0x00, 0x00, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F, 0xF8, 0x00, 0x00, 0x00, 
@@ -384,11 +384,11 @@ PROGMEM const uint8_t angry_frames[ANGRY_FRAME_COUNT][256] = {
 };
 
 // Infant Sad Animation
-#define SAD_FRAME_COUNT 2
-#define SAD_WIDTH 64
-#define SAD_HEIGHT 32
-const uint16_t sad_delays[SAD_FRAME_COUNT] = {2000, 2000};
-PROGMEM const uint8_t sad_frames[SAD_FRAME_COUNT][256] = {
+#define INFANT_SAD_FRAME_COUNT 2
+#define INFANT_SAD_WIDTH 64
+#define INFANT_SAD_HEIGHT 32
+const uint16_t infant_sad_delays[INFANT_SAD_FRAME_COUNT] = {2000, 2000};
+PROGMEM const uint8_t infant_sad_frames[INFANT_SAD_FRAME_COUNT][256] = {
   // ...sad frame data from animations file...
 {
     0x00, 0x00, 0x00, 0xff, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xf0, 0x00, 0x00,

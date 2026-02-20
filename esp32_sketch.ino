@@ -688,31 +688,50 @@ void displayFoodMenu() {
         switch (petAge) {
             case INFANT:
                 frameData = infant_frames[0];  // INFANT HAPPY
-                display.drawBitmap(20, 8, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+                display.drawBitmap(0, 0, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
                 break;
             case CHILD:
                 frameData = child_frames[0];  // CHILD HAPPY
-                display.drawBitmap(20, 8, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+                display.drawBitmap(0, 0, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
                 break;
             case ADULT:
                 frameData = adult_frames[0];  // ADULT HAPPY
-                display.drawBitmap(20, 8, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
+                display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
                 break;
             case OLD:
                 frameData = old_frames[0];  // OLD HAPPY
-                display.drawBitmap(20, 8, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
                 break;
         }
     } else if (showFoodIcon) {
         Serial.println("🍽️ FOOD_MENU: Pet HUNGRY - showing SAD animation");
         // Pet is HUNGRY - show SAD pet face (hungry, waiting for food)
-        uint8_t sadFrame = (millis() / sad_delays[0]) % SAD_FRAME_COUNT;
-        const uint8_t* frameData = sad_frames[sadFrame];  // SAD animation
-        display.drawBitmap(20, 8, frameData, SAD_WIDTH, SAD_HEIGHT, SSD1306_WHITE);
+        uint8_t sadFrame = (millis() / infant_sad_delays[0]) % INFANT_SAD_FRAME_COUNT;
+        const uint8_t* frameData = infant_sad_frames[sadFrame];  // INFANT SAD animation
+        display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
     } else {
-        Serial.println("🍽️ FOOD_MENU: Pet NOT hungry - empty screen (only menu icon)");
+        Serial.println("🍽️ FOOD_MENU: Pet NOT hungry - showing HAPPY face");
+        // Pet is NOT hungry - show HAPPY face (excited about food menu)
+        const uint8_t* frameData = nullptr;
+        switch (petAge) {
+            case INFANT:
+                frameData = infant_frames[0];  // INFANT HAPPY
+                display.drawBitmap(0, 0, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+                break;
+            case CHILD:
+                frameData = child_frames[0];  // CHILD HAPPY
+                display.drawBitmap(0, 0, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+                break;
+            case ADULT:
+                frameData = adult_frames[0];  // ADULT HAPPY
+                display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
+                break;
+            case OLD:
+                frameData = old_frames[0];  // OLD HAPPY
+                display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                break;
+        }
     }
-    // else: Pet is NOT hungry - show only food icon (empty screen)
     
     display.display();
 }
@@ -752,9 +771,16 @@ void displayPlayMenu() {
     // Draw STATIC play icon at top-left (not animated)
     drawStaticPlayIcon();
     
-    // TODO: Add play games or interactive features here
-    // For now, just show the static play icon
-    Serial.println("🎮 PLAY_MENU: Showing static play icon");
+    // NEW: Display "PLAY" text in center of screen
+    display.setTextSize(1);  // Small text (size 1 instead of size 2)
+    display.setTextColor(SSD1306_WHITE);
+    // Center text: "PLAY" is roughly 24 pixels wide (4 chars x 6 pixels each at size 1)
+    // Screen width is 64, so center X = (64 - 24) / 2 = 20
+    // Center Y = 14 (middle of screen)
+    display.setCursor(20, 14);
+    display.print("PLAY");
+    
+    Serial.println("🎮 PLAY_MENU: Showing play icon + PLAY text");
     
     display.display();
 }
@@ -941,17 +967,38 @@ void displayPetAnimation() {
         // EMOTION-BASED ANIMATION SELECTION
         // Priority: Emotion > Age (CRY/SAD override default animations)
         if (currentEmotion == "CRY" && petAge == INFANT) {
-            // Infant crying (hungry/needs care)
-            frameData = cry_frames[currentFrame % CRY_FRAME_COUNT];
-            frameCount = CRY_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, CRY_WIDTH, CRY_HEIGHT, SSD1306_WHITE);
+            // INFANT crying (hungry/needs care)
+            frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
+            frameCount = INFANT_CRY_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
         } else if (currentEmotion == "SAD") {
-            // Any age can be sad (low happiness)
-            frameData = sad_frames[currentFrame % SAD_FRAME_COUNT];
-            frameCount = SAD_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, SAD_WIDTH, SAD_HEIGHT, SSD1306_WHITE);
+            // INFANT sad (low happiness)
+            frameData = infant_sad_frames[currentFrame % INFANT_SAD_FRAME_COUNT];
+            frameCount = INFANT_SAD_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
+        } else if (currentEmotion == "IDLE") {
+            // IDLE face - pet is calm/relaxed (not hungry, not sick, not dirty)
+            // Show first frame only (static calm face)
+            switch (petAge) {
+                case INFANT:
+                    frameData = infant_frames[0];  // INFANT IDLE
+                    display.drawBitmap(0, 0, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+                    break;
+                case CHILD:
+                    frameData = child_frames[0];  // CHILD IDLE
+                    display.drawBitmap(0, 0, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+                    break;
+                case ADULT:
+                    frameData = adult_frames[0];  // ADULT IDLE
+                    display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
+                    break;
+                case OLD:
+                    frameData = old_frames[0];  // OLD IDLE
+                    display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                    break;
+            }
         } else {
-            // Default age-based animations (IDLE/HAPPY)
+            // Default age-based animations (normal/happy)
             switch (petAge) {
                 case INFANT:
                     frameData = infant_frames[currentFrame % INFANT_FRAME_COUNT];
