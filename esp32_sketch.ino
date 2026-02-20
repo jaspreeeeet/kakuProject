@@ -1481,6 +1481,8 @@ void loop() {
     static unsigned long networkScheduler = 0;  // FIX 5: Staggered network windows
     networkScheduler = millis();
     
+    // Read sensor data
+    SensorData data = readAllSensors();
     
     // FIX 5: Staggered Network Windows (no health check, queue-driven)
     // Time Window Distribution:
@@ -1619,9 +1621,6 @@ void loop() {
             }
         }
     }
-    
-    // Read sensor data
-    SensorData data = readAllSensors();
     
     // ========== CAMERA ON CORE 0 ==========
     // Check if camera image ready from Core 0
