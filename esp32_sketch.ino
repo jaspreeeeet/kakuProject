@@ -97,6 +97,7 @@ bool showHomeIcon = false;  // NEW: Only show home icon when server says so
 bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
 bool showPoopIcon = false;  // NEW: Show poop icon when poop present
 String currentScreenType = "MAIN";  // NEW: Track current screen state from server
+String currentEmotion = "IDLE";  // NEW: Track current emotion from server (IDLE, CRY, SAD, HAPPY, EATING, etc.)
 bool justFinishedEating = false;  // NEW: Track if just finished eating to show GOOD text
 unsigned long eatingFinishTime = 0;  // NEW: Track when eating finished
 
@@ -832,31 +833,46 @@ void displayPetAnimation() {
         // Default: MAIN screen with pet animation
         display.clearDisplay();
         
-        // Select frame based on pet age
+        // Select frame based on pet age AND current emotion
         const uint8_t* frameData = nullptr;
         uint8_t frameCount = 0;
         
-        switch (petAge) {
-            case INFANT:
-                frameData = infant_frames[currentFrame % INFANT_FRAME_COUNT];
-                frameCount = INFANT_FRAME_COUNT;
-                display.drawBitmap(0, 0, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
-                break;
-            case CHILD:
-                frameData = child_frames[currentFrame % CHILD_FRAME_COUNT];
-                frameCount = CHILD_FRAME_COUNT;
-                display.drawBitmap(0, 0, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
-                break;
-            case ADULT:
-                frameData = adult_frames[currentFrame % ADULT_FRAME_COUNT];
-                frameCount = ADULT_FRAME_COUNT;
-                display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
-                break;
-            case OLD:
-                frameData = old_frames[currentFrame % OLD_FRAME_COUNT];
-                frameCount = OLD_FRAME_COUNT;
-                display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
-                break;
+        // EMOTION-BASED ANIMATION SELECTION
+        // Priority: Emotion > Age (CRY/SAD override default animations)
+        if (currentEmotion == "CRY" && petAge == INFANT) {
+            // Infant crying (hungry/needs care)
+            frameData = cry_frames[currentFrame % CRY_FRAME_COUNT];
+            frameCount = CRY_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, CRY_WIDTH, CRY_HEIGHT, SSD1306_WHITE);
+        } else if (currentEmotion == "SAD") {
+            // Any age can be sad (low happiness)
+            frameData = sad_frames[currentFrame % SAD_FRAME_COUNT];
+            frameCount = SAD_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, SAD_WIDTH, SAD_HEIGHT, SSD1306_WHITE);
+        } else {
+            // Default age-based animations (IDLE/HAPPY)
+            switch (petAge) {
+                case INFANT:
+                    frameData = infant_frames[currentFrame % INFANT_FRAME_COUNT];
+                    frameCount = INFANT_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+                    break;
+                case CHILD:
+                    frameData = child_frames[currentFrame % CHILD_FRAME_COUNT];
+                    frameCount = CHILD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+                    break;
+                case ADULT:
+                    frameData = adult_frames[currentFrame % ADULT_FRAME_COUNT];
+                    frameCount = ADULT_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
+                    break;
+                case OLD:
+                    frameData = old_frames[currentFrame % OLD_FRAME_COUNT];
+                    frameCount = OLD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                    break;
+            }
         }
         
         // Draw home icon at top-left corner using pixel-by-pixel approach (no corruption)
@@ -1567,6 +1583,11 @@ void getOLEDDisplayFromServer() {
             // NEW: Handle current_emotion to trigger eating animation on FOOD_MENU
             if (doc.containsKey("current_emotion")) {
                 String emotion = doc["current_emotion"].as<String>();
+                if (currentEmotion != emotion) {
+                    currentEmotion = emotion;
+                    Serial.printf("😊 Emotion: %s\n", currentEmotion.c_str());
+                }
+                
                 if (emotion == "EATING" && currentScreenType == "FOOD_MENU") {
                     Serial.println("😋 Emotion: EATING - triggering animation on FOOD MENU!");
                     playEatingAnimation();  // Play 5-frame Pacman eating

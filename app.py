@@ -2203,7 +2203,7 @@ def get_oled_display():
                 'happiness': 100,
                 'energy': 100,
                 'poop_present': False,
-                'show_home_icon': False,
+                'show_home_icon': True,  # Show home icon on main screen
                 'show_food_icon': False,
                 'show_poop_icon': False,
                 'screen_type': 'MAIN',
@@ -2295,7 +2295,7 @@ def get_oled_display():
             'age': pet['age'],
             'mode': 'AUTOMATIC',
             'is_hungry': pet['hunger'] > 70,
-            'show_home_icon': False,
+            'show_home_icon': current_menu == 'MAIN',  # Show home icon on main screen
             'show_food_icon': pet['hunger'] > 70,
             'show_poop_icon': pet['poop_present'],
             'screen_type': current_menu,
