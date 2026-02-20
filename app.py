@@ -2516,6 +2516,7 @@ def device_startup_complete():
     """Handle ESP32 startup notification
     
     Called by ESP32 after infant animation completes.
+    RESETS pet to INFANT stage in database (fresh start on every boot).
     Returns initial display configuration.
     """
     try:
@@ -2527,37 +2528,91 @@ def device_startup_complete():
         print(f'✅ Device startup notification received from {device_id}')
         print(f'   Status: {status} | Pet Stage: {pet_stage}')
         
-        # Get initial display state to send back
-        animation_id = pet_stage
+        # RESET TO INFANT on every device startup
+        animation_id = 0  # INFANT
+        animation_name = 'INFANT'
         show_home_icon = False
         screen_type = 'MAIN'
         
-        # Check if manual selection exists
+        # UPDATE database to INFANT stage
         with db_lock:
             conn = get_db_connection()
             if conn:
                 try:
                     cursor = conn.cursor()
+                    
+                    # Reset OLED display state to INFANT
                     cursor.execute('''
-                        SELECT animation_id, show_home_icon, screen_type
-                        FROM oled_display_state
+                        UPDATE oled_display_state
+                        SET animation_id = ?, 
+                            animation_name = ?, 
+                            animation_type = 'pet',
+                            show_home_icon = ?,
+                            show_food_icon = 0,
+                            show_poop_icon = 0,
+                            screen_type = ?,
+                            updated_at = CURRENT_TIMESTAMP,
+                            updated_by = 'device_startup'
+                        WHERE device_id = ?
+                    ''', (animation_id, animation_name, show_home_icon, screen_type, device_id))
+                    
+                    if cursor.rowcount == 0:
+                        # Insert if not exists
+                        cursor.execute('''
+                            INSERT INTO oled_display_state
+                            (device_id, animation_id, animation_name, animation_type, show_home_icon, screen_type, updated_by)
+                            VALUES (?, ?, ?, 'pet', ?, ?, 'device_startup')
+                        ''', (device_id, animation_id, animation_name, show_home_icon, screen_type))
+                    
+                    # Reset pet_state to INFANT with fresh stats
+                    cursor.execute('''
+                        UPDATE pet_state
+                        SET age = 0,
+                            stage = 'INFANT',
+                            health = 100,
+                            hunger = 0,
+                            cleanliness = 100,
+                            happiness = 100,
+                            energy = 100,
+                            poop_present = 0,
+                            poop_timestamp = NULL,
+                            digestion_due_time = NULL,
+                            current_menu = 'MAIN',
+                            current_emotion = 'IDLE',
+                            emotion_expire_at = NULL,
+                            action_lock = 0,
+                            last_feed_time = NULL,
+                            last_play_time = NULL,
+                            last_sleep_time = NULL,
+                            last_clean_time = NULL,
+                            last_age_increment = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
                         WHERE device_id = ?
                     ''', (device_id,))
-                    result = cursor.fetchone()
-                    if result:
-                        animation_id = result[0]
-                        show_home_icon = result[1]
-                        screen_type = result[2]
+                    
+                    if cursor.rowcount == 0:
+                        # Insert if pet_state doesn't exist
+                        cursor.execute('''
+                            INSERT INTO pet_state 
+                            (device_id, age, stage, health, hunger, cleanliness, happiness, energy,
+                             current_menu, current_emotion, last_age_increment)
+                            VALUES (?, 0, 'INFANT', 100, 0, 100, 100, 100, 'MAIN', 'IDLE', CURRENT_TIMESTAMP)
+                        ''', (device_id,))
+                    
+                    conn.commit()
+                    print(f'🔄 Database RESET to INFANT for {device_id} (display + pet state)')
+                    
                 finally:
                     conn.close()
         
         return jsonify({
             'status': 'success',
             'animation_id': animation_id,
+            'animation_name': animation_name,
             'show_home_icon': show_home_icon,
             'screen_type': screen_type,
             'current_menu': 'MAIN',
-            'message': f'Initial display state sent to {device_id}'
+            'message': f'Pet reset to INFANT - initial display state sent to {device_id}'
         }), 200
         
     except Exception as e:
