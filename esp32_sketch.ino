@@ -530,8 +530,8 @@ void slideInfantSlowlyFromLeft() {
     petAge = INFANT;
     Serial.println("✅ Infant fully visible!");
     
-    // NEW: Notify server that startup is complete
-    notifyServerStartupComplete();
+    // REMOVED: Blocking server notification - too slow, not critical for ESP32 operation
+    // Menu cycling and OLED work independently now
 }
 
 // ================= HOME ICON DRAWING (PIXEL-BY-PIXEL) =================
@@ -743,47 +743,20 @@ void cycleMenu() {
         newMenu = "MAIN";
     }
     
-    Serial.printf("📡 Menu cycle attempt: %s → %s\n", currentScreenType.c_str(), newMenu.c_str());
+    Serial.printf("📡 Menu cycle: %s → %s\n", currentScreenType.c_str(), newMenu.c_str());
     
-    // Check WiFi first
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("❌ WiFi not connected - cannot update menu");
-        return;
+    // ✅ CHANGE MENU LOCALLY FIRST (instant, no server dependency)
+    currentScreenType = newMenu;
+    
+    // Reset image send flag when leaving FOOD_MENU
+    if (newMenu != "FOOD_MENU") {
+        imageAlreadySentThisSession = false;
+        Serial.println("🔄 Reset image send flag (left FOOD_MENU)");
     }
     
-    // Update server with new menu selection
-    HTTPClient http;
-    http.setConnectTimeout(2000);
-    http.setTimeout(2000);
+    Serial.printf("✅ Menu changed locally to: %s (OLED updates immediately)\n", newMenu.c_str());
     
-    String url = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/menu-switch";
-    Serial.printf("🔗 Connecting to: %s\n", url.c_str());
-    
-    if (http.begin(url)) {
-        Serial.println("✅ HTTP connection started");
-        http.addHeader("Content-Type", "application/json");
-        
-        String payload = "{\"device_id\":\"ESP32_001\",\"menu\":\"" + newMenu + "\"}";
-        Serial.printf("📤 Payload: %s\n", payload.c_str());
-        int httpCode = http.POST(payload);
-        
-        if (httpCode == 200) {
-            currentScreenType = newMenu;
-            
-            // Reset image send flag when leaving FOOD_MENU
-            if (newMenu != "FOOD_MENU") {
-                imageAlreadySentThisSession = false;
-                Serial.println("🔄 Reset image send flag (left FOOD_MENU)");
-            }
-            
-            Serial.printf("✅ Menu cycled to: %s\n", newMenu.c_str());
-        } else {
-            Serial.printf("❌ Menu switch failed: HTTP %d | Error: %s\n", httpCode, http.errorToString(httpCode).c_str());
-        }
-        http.end();
-    } else {
-        Serial.println("❌ http.begin() failed - connection error");
-    }
+    // ESP32 runs independently - no server notification needed
 }
 
 // ================= CAMERA COVER DETECTION (DISABLED - Moved to 5-sec capture) =================
