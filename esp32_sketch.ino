@@ -106,8 +106,8 @@ String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 
 // Camera cover detection for menu switching
-#define BLACK_BRIGHTNESS_TH 100    // Brightness threshold for black detection (was 25 - too strict!)
-#define BLACK_CONTRAST_TH   80     // Contrast threshold for black detection (was 25 - too strict!)
+#define BLACK_BRIGHTNESS_TH 150    // Brightness threshold (increased from 100 - need darker)
+#define BLACK_CONTRAST_TH   150    // Contrast threshold (increased from 80 - need more uniform)
 
 // NEW: Menu cycling via consecutive black frame detection (uses 5-sec captures only)
 int consecutiveBlackFrames = 0;        // Count consecutive black frames
@@ -1506,8 +1506,8 @@ SensorData readAllSensors() {
 // ================= SERVER HEALTH CHECK =================
 bool isServerAlive() {
     HTTPClient http;
-    http.setConnectTimeout(5000);  // Increased from 2000 to 5000ms
-    http.setTimeout(8000);         // Increased from 2000 to 8000ms
+    http.setConnectTimeout(2000);  // Reduced from 5s
+    http.setTimeout(3000);         // Reduced from 8s
 
     if (!http.begin("https://kakuproject-90943350924.asia-south1.run.app/api/health")) {
         return false;
@@ -1522,8 +1522,8 @@ bool isServerAlive() {
 // ================= OLED DISPLAY ANIMATION POLLING =================
 void getOLEDDisplayFromServer() {
     HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(5000);
+    http.setConnectTimeout(3000);  // Reduced from 5s
+    http.setTimeout(3000);  // Reduced from 5s
 
     if (!http.begin(oledDisplayUrl)) {
         return;  // Silently fail, keep showing current animation
@@ -1644,8 +1644,8 @@ void notifyServerStartupComplete() {
     }
     
     HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(5000);
+    http.setConnectTimeout(2000);  // Reduced from 5s
+    http.setTimeout(2000);  // Reduced from 5s
     
     const char* startupUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/startup-complete";
     
@@ -1744,8 +1744,8 @@ bool sendSensorDataOnly(SensorData data) {
     }
     
     HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(10000);
+    http.setConnectTimeout(2000);  // Reduced from 5s
+    http.setTimeout(5000);  // Reduced from 10s
     
     if (!http.begin(serverUrl)) {
         Serial.println("❌ Failed to begin HTTP connection");
@@ -1853,8 +1853,8 @@ void sendImageData(String imageBase64) {
     client.setInsecure();
 
     HTTPClient http;
-    http.setTimeout(30000);
-    http.setConnectTimeout(10000);
+    http.setTimeout(10000);  // Reduced from 30s
+    http.setConnectTimeout(5000);  // Reduced from 10s
 
     if (!http.begin(client, "https://kakuproject-90943350924.asia-south1.run.app/upload")) {
         Serial.println("❌ HTTP begin failed");
