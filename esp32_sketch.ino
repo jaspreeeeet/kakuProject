@@ -727,7 +727,14 @@ bool isFrameMostlyBlack(camera_fb_t * fb) {
     int avg = total / count;
     int contrast = maxB - minB;
     
-    return (avg <= BLACK_BRIGHTNESS_TH && contrast <= BLACK_CONTRAST_TH);
+    // DEBUG: Always print brightness/contrast values
+    Serial.printf("🔍 Frame analysis: avg_brightness=%d (threshold=%d) | contrast=%d (threshold=%d)\n", 
+                 avg, BLACK_BRIGHTNESS_TH, contrast, BLACK_CONTRAST_TH);
+    
+    bool isBlack = (avg <= BLACK_BRIGHTNESS_TH && contrast <= BLACK_CONTRAST_TH);
+    Serial.printf("   Result: %s\n", isBlack ? "✅ BLACK" : "❌ NOT BLACK");
+    
+    return isBlack;
 }
 
 // Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → MAIN
