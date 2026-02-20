@@ -615,6 +615,17 @@ def init_database():
             except Exception as e:
                 print(f"⚠️ Migration warning: {e}")
             
+            # ===== DATABASE MIGRATION: Add last_hunger_update to pet_state =====
+            try:
+                cursor.execute('PRAGMA table_info(pet_state)')
+                pet_columns = [column[1] for column in cursor.fetchall()]
+                
+                if 'last_hunger_update' not in pet_columns:
+                    cursor.execute('ALTER TABLE pet_state ADD COLUMN last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP')
+                    print("✅ Added last_hunger_update column to pet_state (hunger updates every 360 seconds)")
+            except Exception as e:
+                print(f"⚠️ Migration warning: {e}")
+            
             # Initialize default OLED state if not exists
             cursor.execute('SELECT COUNT(*) FROM oled_display_state')
             if cursor.fetchone()[0] == 0:
@@ -656,6 +667,7 @@ def init_database():
                     last_sleep_time DATETIME,
                     last_clean_time DATETIME,
                     last_age_increment DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP,
                     
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -715,7 +727,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                        poop_present, poop_timestamp, digestion_due_time,
                        current_menu, current_emotion,
                        last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment
+                       last_age_increment, last_hunger_update
                 FROM pet_state
                 WHERE device_id = ?
             ''', (device_id,))
@@ -747,7 +759,8 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                 'last_play_time': result[17],
                 'last_sleep_time': result[18],
                 'last_clean_time': result[19],
-                'last_age_increment': result[20]
+                'last_age_increment': result[20],
+                'last_hunger_update': result[21]
             }
             
             # Merge updates
@@ -764,7 +777,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                     current_menu = ?, current_emotion = ?, emotion_expire_at = ?,
                     action_lock = ?,
                     last_feed_time = ?, last_play_time = ?, last_sleep_time = ?, last_clean_time = ?,
-                    last_age_increment = ?, updated_at = CURRENT_TIMESTAMP
+                    last_age_increment = ?, last_hunger_update = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND version = ?
             ''', (
                 new_state['version'], new_state['age'], new_state['stage'],
@@ -775,7 +788,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                 new_state['action_lock'],
                 new_state['last_feed_time'], new_state['last_play_time'],
                 new_state['last_sleep_time'], new_state['last_clean_time'],
-                new_state['last_age_increment'],
+                new_state['last_age_increment'], new_state.get('last_hunger_update'),
                 current_state['id'], current_state['version']
             ))
             
@@ -934,21 +947,36 @@ def pet_engine_cycle():
                     
                     print(f"📊 Stage updated: {state['stage']} → {updates['stage']}")
             
-            # 2️⃣ HUNGER ENGINE (every 30 minutes)
-            hunger_increase = 0
-            current_stage = updates.get('stage', state['stage'])
+            # 2️⃣ HUNGER ENGINE (every 360 seconds = 6 minutes)
+            from datetime import datetime, timedelta
             
-            if current_stage == 'INFANT':
-                hunger_increase = 15
-            elif current_stage == 'CHILD':
-                hunger_increase = 10
-            elif current_stage == 'ADULT':
-                hunger_increase = 8
-            elif current_stage == 'OLD':
-                hunger_increase = 12
+            last_hunger = state.get('last_hunger_update')
+            if last_hunger:
+                if isinstance(last_hunger, str):
+                    last_hunger = datetime.fromisoformat(last_hunger)
+                time_since_hunger = (datetime.now() - last_hunger).total_seconds()
+            else:
+                time_since_hunger = 361  # Force first update
             
-            # Apply hunger increase (scaled for 60-second intervals)
-            updates['hunger'] = min(100, state['hunger'] + (hunger_increase / 30))
+            if time_since_hunger >= 360:  # 6 minutes passed
+                hunger_increase = 0
+                current_stage = updates.get('stage', state['stage'])
+                
+               if current_stage == 'INFANT':
+                    hunger_increase = 15
+                elif current_stage == 'CHILD':
+                    hunger_increase = 10
+                elif current_stage == 'ADULT':
+                    hunger_increase = 8
+                elif current_stage == 'OLD':
+                    hunger_increase = 12
+                
+                # Apply hunger increase (scaled for 360-second / 6-minute intervals)
+                updates['hunger'] = min(100, state['hunger'] + (hunger_increase / 5))  # 30min / 6min = 5 cycles
+                updates['last_hunger_update'] = datetime.now().isoformat()
+                print(f"🍽️  Hunger increased by {hunger_increase / 5:.1f}: {state['hunger']} → {updates['hunger']}")
+            else:
+                print(f"⏳ Hunger update in {360 - time_since_hunger:.0f} seconds")
             
             # 3️⃣ DIGESTION & POOP ENGINE
             if state.get('digestion_due_time'):
