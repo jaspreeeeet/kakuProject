@@ -467,6 +467,7 @@ def init_database():
                     gyro_z REAL,
                     mic_level REAL,
                     sound_data INTEGER,
+                    chip_temperature REAL,
                     camera_image BLOB,
                     audio_data BLOB,
                     image_filename TEXT,
@@ -510,6 +511,10 @@ def init_database():
             if 'calibrated_az' not in columns:
                 cursor.execute("ALTER TABLE sensor_readings ADD COLUMN calibrated_az REAL")
                 print("✅ Added calibrated_az column")
+            
+            if 'chip_temperature' not in columns:
+                cursor.execute("ALTER TABLE sensor_readings ADD COLUMN chip_temperature REAL")
+                print("✅ Added chip_temperature column for ESP32-S3 internal temperature")
             
             # Add step_count column for step tracking
             cursor.execute("PRAGMA table_info(sensor_readings)")
@@ -1301,7 +1306,8 @@ def receive_sensor_data():
                         'gyro_y': data.get('gyro_y', 0),
                         'gyro_z': data.get('gyro_z', 0),
                         'mic_level': data.get('mic_level', 0),
-                        'sound_data': data.get('sound_data', 0)
+                        'sound_data': data.get('sound_data', 0),
+                        'chip_temperature': data.get('chip_temperature', 0)
                     })
             
             def emit_orientation():
@@ -2195,8 +2201,8 @@ def store_sensor_data(data):
             cursor.execute('''
                 INSERT INTO sensor_readings 
                 (device_id, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mic_level,
-                 device_orientation, orientation_confidence, calibrated_ax, calibrated_ay, calibrated_az, step_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 chip_temperature, device_orientation, orientation_confidence, calibrated_ax, calibrated_ay, calibrated_az, step_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 data.get('device_id', 'ESP32_001'),
                 data.get('accel_x', 0),
@@ -2206,6 +2212,7 @@ def store_sensor_data(data):
                 data.get('gyro_y', 0),
                 data.get('gyro_z', 0),
                 data.get('mic_level', 0),
+                data.get('chip_temperature', 0),
                 data.get('device_orientation', 'UNKNOWN'),
                 data.get('orientation_confidence', 0),
                 data.get('calibrated_ax', 0),

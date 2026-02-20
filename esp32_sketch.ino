@@ -241,6 +241,7 @@ struct SensorData {
     float gyro_x, gyro_y, gyro_z;
     float mic_level;
     int sound_data;
+    float chip_temperature;  // ESP32-S3 internal temperature in °C
     String camera_image_b64;  // Base64 encoded image
     String audio_data_b64;    // Base64 encoded audio
     bool has_new_image;
@@ -2049,6 +2050,9 @@ SensorData readAllSensors() {
         data.sound_data = 0;
     }
     
+    // Read ESP32-S3 internal chip temperature
+    data.chip_temperature = temperatureRead();  // Built-in Arduino function
+    
     // Initialize image/audio fields
     data.camera_image_b64 = "";
     data.audio_data_b64 = "";
@@ -2323,6 +2327,7 @@ bool sendSensorDataOnly(SensorData data) {
     jsonDoc["gyro_z"] = data.gyro_z;
     jsonDoc["mic_level"] = data.mic_level;
     jsonDoc["sound_data"] = data.sound_data;
+    jsonDoc["chip_temperature"] = data.chip_temperature;  // ESP32-S3 internal temp
     
     // Add sensor batch with all buffered readings
     JsonObject batchObj = jsonDoc.createNestedObject("sensor_batch");
@@ -2356,6 +2361,8 @@ bool sendSensorDataOnly(SensorData data) {
                      data.accel_x, data.accel_y, data.accel_z);
         Serial.printf("    Gyro:  X=%.2f, Y=%.2f, Z=%.2f °/s\n", 
                      data.gyro_x, data.gyro_y, data.gyro_z);
+        Serial.printf("    Temp:  %.2f °C (ESP32-S3 internal)\n", 
+                     data.chip_temperature);
         Serial.printf("    Orient: %s (%.1f%% confidence)\n", 
                      data.device_orientation.c_str(), data.orientation_confidence);
         digitalWrite(LED_PIN, HIGH);
