@@ -412,65 +412,20 @@
         </header>
 
         <div class="dashboard">
-            <!-- Pet Animation Control Card -->
+            <!-- Pet Status (Automatic Mode) -->
             <div class="card" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E72 100%); grid-column: 1 / -1;">
-                <h2><span class="card-icon">🐣</span> Pet Animation Control</h2>
-                <div class="sensor-label">Click a button to manually display pet animation on ESP32 OLED screen</div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-top: 15px;">
-                    <button id="petInfant" class="pet-btn" onclick="setOLEDDisplay(0)" style="background: #FFE5E5;">
-                        <span style="font-size: 1.8em;">🐣</span>
-                        <span>INFANT</span>
-                    </button>
-                    <button id="petChild" class="pet-btn" onclick="setOLEDDisplay(1)" style="background: #B4E7FF;">
-                        <span style="font-size: 1.8em;">👶</span>
-                        <span>CHILD</span>
-                    </button>
-                    <button id="petAdult" class="pet-btn" onclick="setOLEDDisplay(2)" style="background: #D4F4DD;">
-                        <span style="font-size: 1.8em;">👨</span>
-                        <span>ADULT</span>
-                    </button>
-                    <button id="petOld" class="pet-btn" onclick="setOLEDDisplay(3)" style="background: #F4E4D4;">
-                        <span style="font-size: 1.8em;">👴</span>
-                        <span>OLD</span>
-                    </button>
+                <h2><span class="card-icon">🐣</span> Pet Status</h2>
+                <div class="sensor-label">🤖 AUTOMATIC MODE - Pet evolves based on your care!</div>
+                <div id="petStatus" style="color: white; font-weight: bold; font-size: 1.1em; margin-top: 10px; text-align: center;">
+                    Loading pet status...
                 </div>
-                <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
-                    <div id="petStatus" style="color: white; font-weight: bold; flex: 1; min-width: 200px;">
-                        Loading current pet age...
-                    </div>
-                    <button id="homeIconBtn" onclick="toggleHomeIcon()" style="background: #FFD700; color: #333; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em; display: flex; align-items: center; gap: 8px; transition: all 0.3s ease;">
-                        🏠 <span id="homeIconStatus">Home Off</span>
-                    </button>
-                    <button id="foodIconBtn" onclick="toggleFoodIcon()" style="background: #C0C0C0; color: #333; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em; display: flex; align-items: center; gap: 8px; transition: all 0.3s ease;">
-                        🍽️ <span id="foodIconStatus">Food Off</span>
-                    </button>
-                    <button id="poopIconBtn" onclick="togglePoopIcon()" style="background: #8B6F47; color: #FFF; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em; display: flex; align-items: center; gap: 8px; transition: all 0.3s ease;">
-                        💩 <span id="poopIconStatus">Poop Off</span>
-                    </button>
+                <div style="margin-top: 15px; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
                     <button onclick="feedPet()" style="background: #FF9500; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
                         🍕 Feed Pet
                     </button>
                     <button onclick="cleanPet()" style="background: #5AC8FA; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
                         🧹 Clean Pet
                     </button>
-                </div>
-                <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
-                    <div style="color: white; font-weight: bold; font-size: 0.9em;">Menu Control:</div>
-                    <button onclick="switchMenu('MAIN')" style="background: #34C759; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.85em;">
-                        🏠 Main Screen
-                    </button>
-                    <button onclick="switchMenu('FOOD_MENU')" style="background: #FF9500; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.85em;">
-                        🍽️ Food Menu
-                    </button>
-                    <button onclick="switchMenu('TOILET_MENU')" style="background: #5AC8FA; color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.85em;">
-                        🚽 Toilet Menu
-                    </button>
-                    <button onclick="resetOLEDToAI()" style="background: #4ECDC4; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
-                        🤖 Reset to AI Mode
-                    </button>
-                </div>
-                <div id="oledMode" style="margin-top: 10px; text-align: center; padding: 8px; border-radius: 8px; background: rgba(255,255,255,0.2); color: white; font-size: 0.9em;">
-                    Mode: <span id="oledModeText">Loading...</span>
                 </div>
             </div>
 
@@ -747,200 +702,9 @@
         // ==================== OLED DISPLAY ANIMATION CONTROL ====================
         const animationNames = ["🐣 INFANT", "👶 CHILD", "👨 ADULT", "👴 OLD"];
         
-        function setOLEDDisplay(animationId) {
-            fetch(API_BASE +'/api/oled-display/set', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ animation_id: animationId, animation_type: 'pet' })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ OLED display changed to:', data.animation_name);
-                    updateOLEDDisplayUI(animationId, 'MANUAL');
-                    updateOLEDModeDisplay('MANUAL');
-                    // Show visual feedback
-                    alert('🎬 OLED display changed to: ' + data.animation_name + ' (Manual Mode)');
-                } else {
-                    console.error('❌ Failed to set OLED display:', data.message);
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error setting OLED display:', error);
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
-        function resetOLEDToAI() {
-            if (!confirm('Reset OLED display to AI automatic mode?')) {
-                return;
-            }
-            
-            fetch(API_BASE +'/api/oled-display/reset', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ OLED display reset to AI mode');
-                    updateOLEDModeDisplay('AI');
-                    alert('🤖 OLED display reset to AI automatic mode');
-                    // Refresh to show AI pet state
-                    getOLEDDisplay();
-                } else {
-                    console.error('❌ Failed to reset OLED display:', data.message);
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error resetting OLED display:', error);
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
-        // Global variable to track home icon state
-        let homeIconState = false;
-        let foodIconState = false;  // NEW: Track food icon state
-        let poopIconState = false;  // NEW: Track poop icon state
-        
-        function toggleHomeIcon() {
-            // Toggle the state
-            homeIconState = !homeIconState;
-            
-            fetch(API_BASE + '/api/oled-display/home-icon-toggle', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ show_home_icon: homeIconState })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ Home icon toggled:', homeIconState);
-                    updateHomeIconUI(homeIconState);
-                    alert('🏠 Home icon ' + (homeIconState ? 'enabled' : 'disabled'));
-                } else {
-                    console.error('❌ Failed to toggle home icon:', data.message);
-                    homeIconState = !homeIconState; // Revert on error
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error toggling home icon:', error);
-                homeIconState = !homeIconState; // Revert on error
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
-        function updateHomeIconUI(isShowing) {
-            const btn = document.getElementById('homeIconBtn');
-            const status = document.getElementById('homeIconStatus');
-            if (isShowing) {
-                btn.style.background = '#FFD700';
-                btn.style.boxShadow = '0 0 10px rgba(255, 215, 0, 0.5)';
-                status.textContent = 'Home On';
-            } else {
-                btn.style.background = '#999';
-                btn.style.boxShadow = 'none';
-                status.textContent = 'Home Off';
-            }
-        }
-        
-        function toggleFoodIcon() {
-            // Toggle the state
-            foodIconState = !foodIconState;
-            
-            fetch(API_BASE + '/api/oled-display/food-icon-toggle', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ show_food_icon: foodIconState })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ Food icon toggled:', foodIconState);
-                    updateFoodIconUI(foodIconState);
-                    alert('🍽️ Food icon ' + (foodIconState ? 'enabled' : 'disabled'));
-                } else {
-                    console.error('❌ Failed to toggle food icon:', data.message);
-                    foodIconState = !foodIconState; // Revert on error
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error toggling food icon:', error);
-                foodIconState = !foodIconState; // Revert on error
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
-        function updateFoodIconUI(isShowing) {
-            const btn = document.getElementById('foodIconBtn');
-            const status = document.getElementById('foodIconStatus');
-            if (isShowing) {
-                btn.style.background = '#FF6B6B';
-                btn.style.boxShadow = '0 0 10px rgba(255, 107, 107, 0.5)';
-                status.textContent = 'Food On';
-            } else {
-                btn.style.background = '#C0C0C0';
-                btn.style.boxShadow = 'none';
-                status.textContent = 'Food Off';
-            }
-        }
-        
-        function togglePoopIcon() {
-            // Toggle the state
-            poopIconState = !poopIconState;
-            
-            fetch(API_BASE + '/api/oled-display/poop-icon-toggle', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ show_poop_icon: poopIconState })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ Poop icon toggled:', poopIconState);
-                    updatePoopIconUI(poopIconState);
-                    alert('💩 Poop icon ' + (poopIconState ? 'enabled' : 'disabled'));
-                } else {
-                    console.error('❌ Failed to toggle poop icon:', data.message);
-                    poopIconState = !poopIconState; // Revert on error
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error toggling poop icon:', error);
-                poopIconState = !poopIconState; // Revert on error
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
-        function updatePoopIconUI(isShowing) {
-            const btn = document.getElementById('poopIconBtn');
-            const status = document.getElementById('poopIconStatus');
-            if (isShowing) {
-                btn.style.background = '#8B4513';
-                btn.style.boxShadow = '0 0 10px rgba(139, 69, 19, 0.5)';
-                status.textContent = 'Poop On';
-            } else {
-                btn.style.background = '#8B6F47';
-                btn.style.boxShadow = 'none';
-                status.textContent = 'Poop Off';
-            }
-        }
+        // AUTOMATIC MODE ONLY
+        // Pet animation controlled by AI based on pet state (health, hunger, care)
+        // No manual controls
         
         function feedPet() {
             fetch(API_BASE + '/api/pet/feed', {
@@ -990,33 +754,6 @@
             });
         }
         
-        function switchMenu(menuType) {
-            fetch(API_BASE + '/api/oled-display/menu-switch', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ 
-                    device_id: 'ESP32_001',
-                    menu: menuType 
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ Menu switched to:', menuType);
-                    alert('📱 Switched to ' + menuType);
-                } else {
-                    console.error('❌ Failed to switch menu:', data.message);
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error switching menu:', error);
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
         function getOLEDDisplay() {
             // Add timeout to fetch request
             const controller = new AbortController();
@@ -1029,68 +766,37 @@
                 })
                 .then(data => {
                     if (data.status === 'success') {
-                        console.log('Current OLED animation:', data.animation_name, 'Mode:', data.mode || 'UNKNOWN');
-                        updateOLEDDisplayUI(data.animation_id, data.mode);
-                        updateOLEDModeDisplay(data.mode || 'UNKNOWN');
-                        // Sync home icon state from server
-                        if (data.show_home_icon !== undefined) {
-                            homeIconState = data.show_home_icon;
-                            updateHomeIconUI(homeIconState);
-                        }
-                        // Sync food icon state from server
-                        if (data.show_food_icon !== undefined) {
-                            foodIconState = data.show_food_icon;
-                            updateFoodIconUI(foodIconState);
-                        }
-                        // Sync poop icon state from server
-                        if (data.show_poop_icon !== undefined) {
-                            poopIconState = data.show_poop_icon;
-                            updatePoopIconUI(poopIconState);
+                        console.log('🤖 AUTOMATIC MODE - Pet:', data.animation_name, 'Health:', data.health, 'Hunger:', data.hunger);
+                        
+                        // Update pet status display
+                        const petStatusDiv = document.getElementById('petStatus');
+                        if (petStatusDiv) {
+                            const stageEmoji = {
+                                'INFANT': '🐣',
+                                'CHILD': '👶',
+                                'ADULT': '👨',
+                                'OLD': '👴'
+                            }[data.stage] || '🐣';
+                            
+                            petStatusDiv.textContent = `${stageEmoji} ${data.stage} | Health: ${data.health}% | Hunger: ${data.hunger}% | Happiness: ${data.happiness}%`;
                         }
                     } else {
                         // Server returned error
-                        document.getElementById('petStatus').textContent = '❌ Error loading pet state';
+                        const petStatusDiv = document.getElementById('petStatus');
+                        if (petStatusDiv) {
+                            petStatusDiv.textContent = '❌ Error loading pet state';
+                        }
                     }
                 })
                 .catch(error => {
                     clearTimeout(timeoutId);
                     console.error('❌ Error getting OLED display:', error);
-                    // Update UI to show error instead of staying on "Loading..."
-                    document.getElementById('petStatus').textContent = '⚠️ Server not responding';
-                    document.getElementById('oledModeText').textContent = '⚠️ Offline';
+                    const petStatusDiv = document.getElementById('petStatus');
+                    if (petStatusDiv) {
+                        petStatusDiv.textContent = '⚠️ Server not responding';
+                    }
                 });
         }
-        
-        function updateOLEDDisplayUI(animationId, mode) {
-            // Remove active class from all buttons
-            document.getElementById('petInfant').classList.remove('active');
-            document.getElementById('petChild').classList.remove('active');
-            document.getElementById('petAdult').classList.remove('active');
-            document.getElementById('petOld').classList.remove('active');
-            
-            // Add active class to selected button
-            const buttons = ['petInfant', 'petChild', 'petAdult', 'petOld'];
-            if (buttons[animationId]) {
-                document.getElementById(buttons[animationId]).classList.add('active');
-            }
-            
-            // Update status text with mode indicator
-            const modeEmoji = mode === 'MANUAL' ? '👆' : mode === 'AI' || mode === 'AI_PET' || mode === 'AUTOMATIC' ? '🤖' : '📡';
-            document.getElementById('petStatus').textContent = modeEmoji + ' Current: ' + animationNames[animationId];
-        }
-        
-        function updateOLEDModeDisplay(mode) {
-            const modeText = document.getElementById('oledModeText');
-            if (mode === 'MANUAL') {
-                modeText.innerHTML = '👆 <strong>MANUAL</strong> (Button Control)';
-                modeText.parentElement.style.background = 'rgba(255, 193, 7, 0.3)'; // Yellow
-            } else if (mode === 'AI' || mode === 'AI_PET' || mode === 'AUTOMATIC') {
-                modeText.innerHTML = '🤖 <strong>AI AUTOMATIC</strong> (Based on Health/Hunger)';
-                modeText.parentElement.style.background = 'rgba(76, 175, 80, 0.3)'; // Green
-            } else if (mode === 'DEFAULT') {
-                modeText.innerHTML = '📡 <strong>DEFAULT</strong> (No Pet State)';
-                modeText.parentElement.style.background = 'rgba(158, 158, 158, 0.3)'; // Gray
-            } else {
                 modeText.innerHTML = '❓ <strong>UNKNOWN</strong>';
                 modeText.parentElement.style.background = 'rgba(255, 255, 255, 0.2)';
             }
@@ -1218,8 +924,8 @@
             
             // Listen for OLED display changes from other clients
             socket.on('oled_display_changed', function(data) {
-                console.log('🎬 OLED display changed by another client:', data.animation_name);
-                updateOLEDDisplayUI(data.animation_id);
+                console.log('🎬 Pet state changed by system:', data.animation_name);
+                // Pet automatically reflects state from server - no UI update needed
             });
 
             // 👟 Listen for step counter updates

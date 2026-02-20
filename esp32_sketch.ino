@@ -85,7 +85,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // ================= OLED ANIMATION DISPLAY =================
 enum PetAge { INFANT = 0, CHILD = 1, ADULT = 2, OLD = 3 };
-PetAge petAge = CHILD;              // Default to child
+PetAge petAge = INFANT;             // Default to INFANT - server manages aging
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
 const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds

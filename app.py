@@ -2179,116 +2179,21 @@ def store_sensor_data(data):
 def get_oled_display():
     """ESP32 polls this endpoint to get what animation to display on OLED
     
-    PRIORITY ORDER:
-    1. Recent device startup reset (within 5 seconds) → ALWAYS return INFANT
-    2. Manual button selection from web UI (oled_display_state table)
-    3. AI Tamagotchi pet state (pet_state table with health/hunger)
-    4. Default fallback
-    
-    Includes backward compatibility with animation_id field
+    AUTOMATIC MODE ONLY - Displays based on AI Tamagotchi pet_state
+    No manual control - pet evolves based on gameplay (health, hunger, care)
     """
     try:
         device_id = request.args.get('device_id', 'ESP32_001')
         
-        # FIRST: Check if device just booted (reset timestamp recent)
-        startup_reset = False
-        with db_lock:
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        SELECT animation_id, animation_name, updated_at, updated_by
-                        FROM oled_display_state
-                        WHERE device_id = ?
-                    ''', (device_id,))
-                    result = cursor.fetchone()
-                    if result:
-                        updated_by = result[3]  # Check who updated it
-                        updated_at = result[2]
-                        
-                        # If updated by device_startup, check if it's recent (within 5 seconds)
-                        if updated_by == 'device_startup' and updated_at:
-                            try:
-                                from datetime import datetime, timedelta
-                                updated_time = datetime.fromisoformat(updated_at)
-                                current_time = datetime.utcnow()
-                                time_diff = (current_time - updated_time).total_seconds()
-                                
-                                if time_diff < 5:  # Within 5 seconds of startup
-                                    startup_reset = True
-                                    print(f'🔄 INFANT locked - device startup {time_diff:.1f}s ago')
-                                    return jsonify({
-                                        'status': 'success',
-                                        'animation_id': 0,
-                                        'animation_name': 'INFANT',
-                                        'animation_type': 'pet',
-                                        'stage': 'INFANT',
-                                        'mode': 'STARTUP_RESET',
-                                        'show_home_icon': False,
-                                        'show_food_icon': False,
-                                        'show_poop_icon': False,
-                                        'screen_type': 'MAIN',
-                                        'message': f'Device startup - INFANT locked for {5 - time_diff:.1f}s'
-                                    }), 200
-                            except Exception as e:
-                                print(f'⚠️  Timestamp parse error: {e}')
-                finally:
-                    conn.close()
-        
-        # SECOND: Check if user manually selected an animation via web UI buttons
-        manual_selection = None
-        with db_lock:
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        SELECT animation_id, animation_name, animation_type, show_home_icon, show_food_icon, show_poop_icon, screen_type, updated_at
-                        FROM oled_display_state
-                        WHERE device_id = ?
-                    ''', (device_id,))
-                    result = cursor.fetchone()
-                    if result:
-                        manual_selection = {
-                            'animation_id': result[0],
-                            'animation_name': result[1],
-                            'animation_type': result[2],
-                            'show_home_icon': result[3],
-                            'show_food_icon': result[4],
-                            'show_poop_icon': result[5],
-                            'screen_type': result[6],
-                            'updated_at': result[7]
-                        }
-                finally:
-                    conn.close()
-        
-        # If manual selection exists AND not during startup, use it (user pressed a button!)
-        if manual_selection and not startup_reset:
-            print(f'📡 OLED: MANUAL SELECTION → {manual_selection["animation_name"]} (ID: {manual_selection["animation_id"]})')
-            return jsonify({
-                'status': 'success',
-                'animation_id': manual_selection['animation_id'],
-                'animation_name': manual_selection['animation_name'],
-                'animation_type': manual_selection['animation_type'],
-                'stage': manual_selection['animation_name'],
-                'mode': 'MANUAL',
-                'show_home_icon': bool(manual_selection.get('show_home_icon')) if manual_selection.get('show_home_icon') is not None else False,
-                'show_food_icon': bool(manual_selection.get('show_food_icon')) if manual_selection.get('show_food_icon') is not None else False,
-                'show_poop_icon': bool(manual_selection.get('show_poop_icon')) if manual_selection.get('show_poop_icon') is not None else False,
-                'screen_type': manual_selection.get('screen_type') or 'MAIN',
-                'message': f'Manual selection: {manual_selection["animation_name"]}'
-            }), 200
-        
-        # THIRD: Fall back to AI pet state
+        # Get pet state (automatically determines animation)
         pet = get_pet_state(device_id)
         
         if not pet:
             # Fallback if no pet state exists
             return jsonify({
                 'status': 'success',
-                'animation_id': 1,
-                'stage': 'CHILD',
+                'animation_id': 0,
+                'stage': 'INFANT',
                 'emotion': 'IDLE',
                 'current_emotion': 'IDLE',
                 'current_menu': 'MAIN',
@@ -2298,12 +2203,12 @@ def get_oled_display():
                 'happiness': 100,
                 'energy': 100,
                 'poop_present': False,
-                'show_home_icon': True,
+                'show_home_icon': False,
                 'show_food_icon': False,
                 'show_poop_icon': False,
                 'screen_type': 'MAIN',
-                'mode': 'DEFAULT',
-                'message': 'Default pet state'
+                'mode': 'AUTOMATIC',
+                'message': 'Default INFANT state'
             }), 200
         
         # Map stage to animation_id for backward compatibility
@@ -2315,32 +2220,22 @@ def get_oled_display():
             'END': 3
         }
         
-        animation_id = stage_to_id.get(pet['stage'], 1)
-        
-        # NEW: Menu state management
-        # Menu is controlled by USER ONLY (frontend buttons or camera cover)
-        # NO auto-switching based on hunger/poop
+        animation_id = stage_to_id.get(pet['stage'], 0)
         current_menu = pet['current_menu']
         play_eating = False
         play_cleaning = False
         
-        # Only handle eating/cleaning logic when user is already on menu
-        
+        # Handle menu state transitions based on pet state
         if pet['hunger'] <= 50 and current_menu == 'FOOD_MENU':
-            # Pet is no longer hungry, trigger eating animation on FOOD_MENU
-            play_eating = True  # Trigger eating animation on FOOD_MENU
-            # DON'T return to MAIN yet - let eating animation play on FOOD_MENU
-            # Current menu stays FOOD_MENU to show eating animation
-            # After animation, next poll will return to MAIN
+            # Pet just ate - trigger eating animation
+            play_eating = True
             with db_lock:
                 conn = get_db_connection()
                 if conn:
                     try:
                         cursor = conn.cursor()
-                        # Set emotion to EATING for animation trigger
                         cursor.execute('UPDATE pet_state SET current_emotion = ? WHERE device_id = ?', ('EATING', device_id))
                         conn.commit()
-                        # Re-fetch pet state to get updated emotion
                         pet = get_pet_state(device_id)
                     except Exception as e:
                         print(f'Error updating emotion: {e}')
@@ -2348,7 +2243,7 @@ def get_oled_display():
                         conn.close()
         
         elif pet['current_emotion'] == 'EATING' and current_menu == 'FOOD_MENU':
-            # Eating animation finished, return to MAIN with IDLE emotion
+            # Eating animation finished, return to MAIN
             current_menu = 'MAIN'
             with db_lock:
                 conn = get_db_connection()
@@ -2358,7 +2253,6 @@ def get_oled_display():
                         cursor.execute('UPDATE pet_state SET current_menu = ?, current_emotion = ? WHERE device_id = ?', 
                                      ('MAIN', 'IDLE', device_id))
                         conn.commit()
-                        # Re-fetch pet state to get updated values
                         pet = get_pet_state(device_id)
                     except Exception as e:
                         print(f'Error updating menu: {e}')
@@ -2366,7 +2260,7 @@ def get_oled_display():
                         conn.close()
         
         elif not pet['poop_present'] and current_menu == 'TOILET_MENU':
-            # Pet is clean, return to MAIN with IDLE emotion
+            # Pet is clean, return to MAIN
             current_menu = 'MAIN'
             with db_lock:
                 conn = get_db_connection()
@@ -2376,22 +2270,18 @@ def get_oled_display():
                         cursor.execute('UPDATE pet_state SET current_menu = ?, current_emotion = ? WHERE device_id = ?', 
                                      ('MAIN', 'IDLE', device_id))
                         conn.commit()
-                        # Re-fetch pet state to get updated values
                         pet = get_pet_state(device_id)
                     except Exception as e:
                         print(f'Error updating menu: {e}')
                     finally:
                         conn.close()
         
-        print(f'📡 OLED: AI PET STATE → {pet["stage"]} | {pet["current_emotion"]} | Menu: {current_menu} | H:{pet["health"]} F:{pet["hunger"]}')
+        print(f'🤖 OLED AUTOMATIC: {pet["stage"]} | Emotion:{pet["current_emotion"]} | Menu:{current_menu} | Health:{pet["health"]} Hunger:{pet["hunger"]}')
         
         return jsonify({
             'status': 'success',
-            # Backward compatibility
             'animation_id': animation_id,
             'animation_name': pet['stage'],
-            
-            # Full pet state for AI Tamagotchi
             'stage': pet['stage'],
             'emotion': pet['current_emotion'],
             'current_emotion': pet['current_emotion'],
@@ -2403,15 +2293,15 @@ def get_oled_display():
             'energy': pet['energy'],
             'poop_present': pet['poop_present'],
             'age': pet['age'],
-            'mode': 'AUTOMATIC',  # NEW: AI mode is always AUTOMATIC
-            'is_hungry': pet['hunger'] > 70,  # NEW: Boolean flag for conditional camera send
-            'show_home_icon': True,
-            'show_food_icon': pet['hunger'] > 70,  # Show food icon when hungry
-            'show_poop_icon': pet['poop_present'],  # Show poop icon when poop present
+            'mode': 'AUTOMATIC',
+            'is_hungry': pet['hunger'] > 70,
+            'show_home_icon': False,
+            'show_food_icon': pet['hunger'] > 70,
+            'show_poop_icon': pet['poop_present'],
             'screen_type': current_menu,
-            'play_eating_animation': play_eating,  # Trigger eating animation when fed
-            'play_cleaning_animation': play_cleaning,  # Trigger cleaning when cleaned
-            'message': f'Pet: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
+            'play_eating_animation': play_eating,
+            'play_cleaning_animation': play_cleaning,
+            'message': f'Auto: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
     
     except Exception as e:
