@@ -299,6 +299,22 @@ bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
 void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET → PLAY)
 // void checkCameraCover();  // DISABLED: Check camera cover for menu switching (now uses 5-sec intervals)
 void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
+void networkTask(void *parameter);  // NEW: Network task on Core 1
+
+// ================= GLOBAL JSON DOCUMENTS (FIX 6: Reuse) =================
+StaticJsonDocument<768> oledDoc;      // For OLED display responses
+StaticJsonDocument<4096> sensorDoc;   // For sensor data transmission
+StaticJsonDocument<2048> eventDoc;    // For event polling
+StaticJsonDocument<256> rewardDoc;    // For game rewards
+
+// ================= NETWORK TASK QUEUE (FIX 3) =================
+enum NetworkTaskType { TASK_SENSOR, TASK_OLED, TASK_EVENTS, TASK_IMAGE };
+struct NetworkTask {
+    NetworkTaskType type;
+    SensorData* data;
+};
+QueueHandle_t networkQueue = NULL;
+TaskHandle_t networkTaskHandle = NULL;
 
 // ================= OLED ANIMATION TASK (Core 0) =================
 // Independent FreeRTOS task runs OLED animation on Core 0
@@ -310,7 +326,7 @@ void oledTask(void *parameter) {
         if (displayReady && startupComplete) {
             displayPetAnimation();  // Draw animation (non-blocking)
         }
-        vTaskDelay(pdMS_TO_TICKS(16));  // ~60 FPS refresh rate (every 16ms)
+        vTaskDelay(pdMS_TO_TICKS(33));  // ~30 FPS refresh rate (every 33ms) - power optimized
     }
 }
 
@@ -346,13 +362,17 @@ void setup() {
         Serial.println("⚠️  Server communication disabled - running in offline mode");
     }
     
-    // FIX 6: Enable WiFi modem sleep for power savings
-    WiFi.setSleep(true);
-    Serial.println("💤 WiFi sleep mode enabled");
+    // OPTIMIZATION: Disable WiFi sleep for stable connection
+    WiFi.setSleep(false);
+    Serial.println("📡 WiFi sleep mode disabled for stability");
     
-    // FIX 4: Lower CPU frequency from 240MHz to 160MHz
-    setCpuFrequencyMhz(160);
-    Serial.println("⚡ CPU frequency reduced to 160MHz");
+    // OPTIMIZATION: Reduce WiFi TX power for power savings
+    WiFi.setTxPower(WIFI_POWER_15dBm);
+    Serial.println("📡 WiFi TX power set to 15dBm");
+    
+    // OPTIMIZATION: Start at 80MHz (will boost to 160MHz for heavy tasks)
+    setCpuFrequencyMhz(80);
+    Serial.println("⚡ CPU frequency set to 80MHz (idle mode)");
     
     // Initialize I2C and MPU6050 with timeout protection
     Serial.println("Initializing I2C...");
@@ -469,9 +489,29 @@ void setup() {
         0                  // Core 0 (opposite of WiFi heavy Core 1)
     );
     
+    // Create network queue and task (FIX 3)
+    networkQueue = xQueueCreate(10, sizeof(NetworkTask));
+    if (networkQueue == NULL) {
+        Serial.println("❌ Failed to create network queue!");
+    } else {
+        Serial.println("✅ Network queue created");
+        
+        // Start network task on Core 1 (dedicated to HTTP/WiFi)
+        xTaskCreatePinnedToCore(
+            networkTask,        // Task function
+            "Network",         // Task name
+            8192,              // Stack size
+            NULL,              // Parameters
+            1,                 // Priority
+            &networkTaskHandle, // Task handle
+            1                  // Core 1 (WiFi core)
+        );
+        Serial.println("✅ Network task started on Core 1");
+    }
+    
     Serial.println("System Ready!");
-    Serial.println("🎤 Core 0: Audio + Camera monitoring");
-    Serial.println("🌐 Core 1: Sensors, WiFi transmission, OLED");
+    Serial.println("🎤 Core 0: Audio + Camera + OLED");
+    Serial.println("🌐 Core 1: Sensors + Network Queue");
 }
 
 void scanI2CDevices() {
@@ -1037,6 +1077,7 @@ void sendKakuCoinReward(int score, float kakucoin) {
     }
     
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     http.setConnectTimeout(2000);
     http.setTimeout(5000);
     
@@ -1389,20 +1430,117 @@ void displayPetAnimation() {
     }
 }
 
-void loop() {
-    // This loop runs on Core 1 - handles sensors, camera, WiFi, HTTP I/O
-    // OLED animation runs independently on Core 0 task
+// ================= NETWORK TASK (FIX 3: Queue-Driven HTTP) =================
+void networkTask(void *parameter) {
+    Serial.println("🌐 Network Task started on Core 1");
     
-    // Only poll server after startup is complete
-    if (startupComplete) {
-        // Poll server for OLED display state every 2 seconds (non-blocking)
-        if (millis() - lastDisplayCheckTime >= DISPLAY_CHECK_INTERVAL) {
-            lastDisplayCheckTime = millis();
-            getOLEDDisplayFromServer();  // Let it fail silently if server down
+    NetworkTask task;
+    
+    while (true) {
+        // Wait for network tasks from queue
+        if (xQueueReceive(networkQueue, &task, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Boost CPU for network operations
+            setCpuFrequencyMhz(160);
+            
+            switch (task.type) {
+                case TASK_SENSOR:
+                    if (task.data != NULL) {
+                        sendSensorDataOnly(*task.data);
+                        delete task.data;
+                    }
+                    break;
+                    
+                case TASK_OLED:
+                    getOLEDDisplayFromServer();
+                    break;
+                    
+                case TASK_EVENTS:
+                    pollForEvents();
+                    break;
+                    
+                case TASK_IMAGE:
+                    if (task.data != NULL && task.data->has_new_image) {
+                        sendImageData("");
+                        delete task.data;
+                    }
+                    break;
+            }
+            
+            // Return to low power CPU after network task
+            setCpuFrequencyMhz(80);
         }
         
-        // NOTE: Camera cover detection moved to 5-second capture interval
-        // No continuous checking - reduces hardware heating
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void loop() {
+    // This loop runs on Core 1 - handles sensors, staggered network scheduling
+    // OLED animation and network tasks run independently in FreeRTOS tasks
+    
+    static unsigned long networkScheduler = 0;  // FIX 5: Staggered network windows
+    networkScheduler = millis();
+    
+    
+    // FIX 5: Staggered Network Windows (no health check, queue-driven)
+    // Time Window Distribution:
+    // t % 2000 == 0     → Send sensor data
+    // t % 2000 == 1000  → OLED display update
+    // t % 5000 == 2500  → Poll events
+    
+    unsigned long t = networkScheduler % 5000;
+    
+    // Window 1: Sensor data (every 2 seconds at t=0)
+    if (t % 2000 < 100 && millis() - lastSendTime >= SEND_INTERVAL && !isUploadingImage) {
+        lastSendTime = millis();
+        
+        // Prepare sensor batch
+        data.sensor_batch = sensorBatch;
+        if (micReadingCount > 0) {
+            data.sensor_batch.avg_mic_level = totalMicLevel / micReadingCount;
+            data.sensor_batch.sound_data = audioEnergyLevel;
+        } else {
+            data.sensor_batch.avg_mic_level = 0.0;
+            data.sensor_batch.sound_data = 0;
+        }
+        
+        // Queue sensor task
+        NetworkTask task;
+        task.type = TASK_SENSOR;
+        task.data = new SensorData(data);
+        xQueueSend(networkQueue, &task, 0);
+        
+        // Reset batch
+        sensorBatch.reading_count = 0;
+        totalMicLevel = 0.0;
+        micReadingCount = 0;
+        
+        Serial.println("📤 Queued: Sensor data task");
+    }
+    
+    // Window 2: OLED update (every 2 seconds at t=1000)
+    if (startupComplete && t >= 1000 && t < 1100 && millis() - lastDisplayCheckTime >= DISPLAY_CHECK_INTERVAL) {
+        lastDisplayCheckTime = millis();
+        
+        NetworkTask task;
+        task.type = TASK_OLED;
+        task.data = NULL;
+        xQueueSend(networkQueue, &task, 0);
+        
+        Serial.println("📤 Queued: OLED display task");
+    }
+    
+    // Window 3: Event polling (every 5 seconds at t=2500)
+    if (!isUploadingImage && t >= 2500 && t < 2600 && millis() - lastEventPoll >= dynamicEventPollInterval) {
+        lastEventPoll = millis();
+        
+        NetworkTask task;
+        task.type = TASK_EVENTS;
+        task.data = NULL;
+        xQueueSend(networkQueue, &task, 0);
+        
+        Serial.println("📤 Queued: Event polling task");
+        dynamicEventPollInterval = 5000;
     }
     
     // Check WiFi connection with timeout protection
@@ -1535,82 +1673,17 @@ void loop() {
     // }
     // ========== AUDIO STILL DISABLED ==========
     
-    // Send all data every 2 seconds ONLY if server is alive AND not uploading image
-    if (millis() - lastSendTime >= SEND_INTERVAL) {
-        // NEW: PAUSE SENSOR DATA while image is uploading (to avoid interference)
-        if (isUploadingImage) {
-            Serial.println("⏸️  Image uploading... PAUSING sensor data transmission");
-        } else {
-            lastSendTime = millis();
-
-            if (!isServerAlive()) {
-                Serial.println("🛑 Server offline. Skipping data send cycle.");
-            } else {
-                // NEW: Prepare batch with collected readings
-                data.sensor_batch = sensorBatch;
-                
-                // Calculate average microphone level
-                if (micReadingCount > 0) {
-                    data.sensor_batch.avg_mic_level = totalMicLevel / micReadingCount;
-                    data.sensor_batch.sound_data = audioEnergyLevel;
-                } else {
-                    data.sensor_batch.avg_mic_level = 0.0;
-                    data.sensor_batch.sound_data = 0;
-                }
-                
-                // Print batch summary before sending
-                Serial.printf("📤 Sending BATCH: %d readings | Avg mic: %.1f dB | Time span: %ld ms\\n",
-                             sensorBatch.reading_count,
-                             data.sensor_batch.avg_mic_level,
-                             sensorBatch.reading_count > 1 ? 
-                             (sensorBatch.readings[sensorBatch.reading_count-1].timestamp_ms - 
-                              sensorBatch.readings[0].timestamp_ms) : 0);
-                
-                // Send sensor data (includes batch of readings)
-                bool serverAccepted = sendSensorDataOnly(data);
-                
-                // RESET batch after sending
-                sensorBatch.reading_count = 0;
-                totalMicLevel = 0.0;
-                micReadingCount = 0;
-                
-                // ========== CONDITIONAL IMAGE SENDING ==========
-                // Send image ONLY if:
-                // 1. On FOOD_MENU screen
-                // 2. In AUTOMATIC mode (not manual override)
-                // 3. Image not already sent for this food session
-                if (serverAccepted && data.has_new_image && 
-                    currentScreenType == "FOOD_MENU" && 
-                    !imageAlreadySentThisSession) {
-                    
-                    Serial.println("🍽️  Conditions met: Sending image for food detection");
-                    sendImageData("");  // Binary data passed via shared buffer
-                    imageAlreadySentThisSession = true;  // Mark as sent
-                    Serial.println("✅ Image sent flag set - won't send again until menu changes");
-                }
-                
-                // Send audio only if sensor data was accepted and speech detected
-                // if (serverAccepted && data.has_new_audio && !data.audio_data_b64.isEmpty()) {
-                //     sendAudioData(data.audio_data_b64);
-                //     Serial.println("🎵 Speech audio sent to server!");
-                // }
-                // ========== AUDIO STILL DISABLED ==========
-            }
-        }
+    // Image sending (queue-based, no server health check)
+    if (data.has_new_image && currentScreenType == "FOOD_MENU" && !imageAlreadySentThisSession) {
+        NetworkTask task;
+        task.type = TASK_IMAGE;
+        task.data = new SensorData(data);
+        xQueueSend(networkQueue, &task, 0);
+        imageAlreadySentThisSession = true;
+        Serial.println("📤 Queued: Image upload task");
     }
     
-    // FIX 5: Poll for events with optimized intervals (PAUSE during image upload)
-    if (!isUploadingImage && millis() - lastEventPoll >= dynamicEventPollInterval) {
-        lastEventPoll = millis();
-        pollForEvents();
-        dynamicEventPollInterval = 5000;  // Standard interval
-    } else if (isUploadingImage && millis() - lastEventPoll >= dynamicEventPollInterval) {
-        // Skip event polling during upload
-        lastEventPoll = millis();  // Update time to prevent immediate poll after upload
-        Serial.println("⏸️  Image uploading... PAUSING event polling");
-    }
-    
-    vTaskDelay(pdMS_TO_TICKS(10));  // Small delay for Core 1 (non-blocking)
+    vTaskDelay(pdMS_TO_TICKS(20));  // Optimized delay for Core 1 (power savings)
 }
 
 // ================= CAMERA INITIALIZATION =================
@@ -1637,7 +1710,7 @@ bool initCamera() {
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
     
-    config.xclk_freq_hz = 20000000;
+    config.xclk_freq_hz = 10000000;       // 10MHz - reduced from 20MHz for power savings
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size = FRAMESIZE_QQVGA; // 160x120 - reduced for power
     config.jpeg_quality = 20;             // Lower quality = less heat
@@ -1989,8 +2062,9 @@ SensorData readAllSensors() {
 // ================= SERVER HEALTH CHECK =================
 bool isServerAlive() {
     HTTPClient http;
-    http.setConnectTimeout(2000);  // Reduced from 5s
-    http.setTimeout(3000);         // Reduced from 8s
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
+    http.setConnectTimeout(5000);  // 5 seconds - allow Cloud Run cold start
+    http.setTimeout(15000);        // 15 seconds - Cloud Run can take 10-30s to wake
 
     if (!http.begin("https://kakuproject-90943350924.asia-south1.run.app/api/health")) {
         return false;
@@ -2005,8 +2079,9 @@ bool isServerAlive() {
 // ================= OLED DISPLAY ANIMATION POLLING =================
 void getOLEDDisplayFromServer() {
     HTTPClient http;
-    http.setConnectTimeout(3000);  // Reduced from 5s
-    http.setTimeout(3000);  // Reduced from 5s
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
+    http.setConnectTimeout(5000);  // 5 seconds - allow Cloud Run cold start
+    http.setTimeout(8000);  // 8 seconds - enough for server response
 
     if (!http.begin(oledDisplayUrl)) {
         return;  // Silently fail, keep showing current animation
@@ -2126,6 +2201,7 @@ void notifyServerStartupComplete() {
     }
     
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     http.setConnectTimeout(2000);  // Reduced from 5s
     http.setTimeout(2000);  // Reduced from 5s
     
@@ -2226,6 +2302,7 @@ bool sendSensorDataOnly(SensorData data) {
     }
     
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     http.setConnectTimeout(2000);  // Reduced from 5s
     http.setTimeout(5000);  // Reduced from 10s
     
@@ -2335,6 +2412,7 @@ void sendImageData(String imageBase64) {
     client.setInsecure();
 
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     http.setTimeout(10000);  // Reduced from 30s
     http.setConnectTimeout(5000);  // Reduced from 10s
 
@@ -2382,6 +2460,7 @@ void sendAudioData(String audioBase64) {
     Serial.printf("🎵 Sending audio: %d bytes base64\n", audioBase64.length());
     
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     http.setConnectTimeout(5000);
     http.setTimeout(15000);  // Shorter timeout for smaller audio
     
@@ -2520,6 +2599,7 @@ void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample
 // ================= EVENT POLLING FUNCTIONS =================
 void pollForEvents() {
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     
     Serial.println("🔍 Polling for important events...");
     
@@ -2647,6 +2727,7 @@ void processEvent(const char* event_type, const char* message) {
 
 void acknowledgeEvent(int event_id) {
     HTTPClient http;
+    http.setReuse(true);  // FIX 4: Reuse TCP connection
     
     Serial.printf("📤 Acknowledging event #%d...\n", event_id);
     
