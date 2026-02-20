@@ -1543,7 +1543,7 @@ def get_latest_data():
         if has_audio_column:
             cursor.execute('''
                 SELECT id, timestamp, accel_x, accel_y, accel_z, 
-                       gyro_x, gyro_y, gyro_z, mic_level, sound_data, image_filename,
+                       gyro_x, gyro_y, gyro_z, mic_level, sound_data, chip_temperature, image_filename,
                        CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                        CASE WHEN audio_data IS NOT NULL THEN 1 ELSE 0 END as has_audio
                 FROM sensor_readings 
@@ -1553,7 +1553,7 @@ def get_latest_data():
         else:
             cursor.execute('''
                 SELECT id, timestamp, accel_x, accel_y, accel_z, 
-                       gyro_x, gyro_y, gyro_z, mic_level, sound_data, image_filename,
+                       gyro_x, gyro_y, gyro_z, mic_level, sound_data, chip_temperature, image_filename,
                        CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                        0 as has_audio
                 FROM sensor_readings 
@@ -1671,7 +1671,7 @@ def export_data():
         # Export only JSON-serializable data
         cursor.execute('''
             SELECT id, timestamp, accel_x, accel_y, accel_z, 
-                   gyro_x, gyro_y, gyro_z, mic_level, sound_data,
+                   gyro_x, gyro_y, gyro_z, mic_level, sound_data, chip_temperature,
                    CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                    CASE WHEN audio_data IS NOT NULL THEN 1 ELSE 0 END as has_audio
             FROM sensor_readings 

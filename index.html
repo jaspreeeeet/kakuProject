@@ -495,6 +495,14 @@
                 <div class="sensor-label">Samples/sec</div>
             </div>
 
+            <!-- Temperature Card -->
+            <div class="card">
+                <h2><span class="card-icon">🌡️</span> Chip Temperature</h2>
+                <div class="sensor-label">ESP32-S3 Internal</div>
+                <div class="sensor-value" id="chipTempValue" style="font-size:2em; color:#ff7043;">--</div>
+                <div class="sensor-label">&deg;C</div>
+            </div>
+
             <!-- Accelerometer Card -->
             <div class="card">
                 <h2><span class="card-icon">⚡</span> Accelerometer</h2>
@@ -665,11 +673,12 @@
                             <th style="cursor: pointer;" onclick="sortTable(5)">Gyro Y ↕</th>
                             <th style="cursor: pointer;" onclick="sortTable(6)">Gyro Z ↕</th>
                             <th style="cursor: pointer;" onclick="sortTable(7)">Sound ↕</th>
+                            <th style="cursor: pointer;" onclick="sortTable(8)">Chip Temp ↕</th>
                         </tr>
                     </thead>
                     <tbody id="tableBody">
                         <tr>
-                            <td colspan="8" class="loading">Waiting for data...</td>
+                            <td colspan="9" class="loading">Waiting for data...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -1062,6 +1071,11 @@
                 document.getElementById('soundValue').textContent = data.sound_data;
             }
 
+            // Update chip temperature
+            if (data.chip_temperature !== undefined && data.chip_temperature !== null) {
+                document.getElementById('chipTempValue').textContent = parseFloat(data.chip_temperature).toFixed(1);
+            }
+
             // Update camera image
             if (data.camera_image) {
                 document.getElementById('cameraImage').src = 'data:image/jpeg;base64,' + data.camera_image;
@@ -1127,6 +1141,7 @@
                 <td>${(data.gyro_y || 0).toFixed(2)}</td>
                 <td>${(data.gyro_z || 0).toFixed(2)}</td>
                 <td>${(data.mic_level || 0).toFixed(1)}</td>
+                <td>${(data.chip_temperature != null ? parseFloat(data.chip_temperature).toFixed(1) : '--')}&deg;C</td>
             `;
 
             // Keep only last 50 rows
@@ -1207,6 +1222,7 @@
                     <td>${(record.gyro_y || 0).toFixed(2)}</td>
                     <td>${(record.gyro_z || 0).toFixed(2)}</td>
                     <td>${(record.mic_level || 0).toFixed(1)}</td>
+                    <td>${(record.chip_temperature != null ? parseFloat(record.chip_temperature).toFixed(1) : '--')}&deg;C</td>
                 `;
             });
 
@@ -1316,7 +1332,7 @@
         }
 
         function convertToCSV(data) {
-            const headers = ['Timestamp', 'Accel X', 'Accel Y', 'Accel Z', 'Gyro X', 'Gyro Y', 'Gyro Z', 'Mic Level', 'Sound Data'];
+            const headers = ['Timestamp', 'Accel X', 'Accel Y', 'Accel Z', 'Gyro X', 'Gyro Y', 'Gyro Z', 'Mic Level', 'Sound Data', 'Chip Temp'];
             const rows = data.map(d => [
                 d.timestamp,
                 d.accel_x,
@@ -1326,7 +1342,8 @@
                 d.gyro_y,
                 d.gyro_z,
                 d.mic_level,
-                d.sound_data
+                d.sound_data,
+                d.chip_temperature != null ? d.chip_temperature : ''
             ]);
 
             let csv = headers.join(',') + '\n';
@@ -1357,6 +1374,17 @@
             
             // Setup event listeners
             document.getElementById('recordLimit').addEventListener('change', refreshData);
+            
+            // ✅ FIX: Periodic polling for pet status (every 5 seconds)
+            // This ensures pet status always updates even if socket misses an event
+            setInterval(function() {
+                getOLEDDisplay();
+            }, 5000);
+            
+            // ✅ FIX: Periodic polling for step counter (every 10 seconds)
+            setInterval(function() {
+                getStepCounter();
+            }, 10000);
             
             // Fallback: Try to load data even if WebSocket fails to connect within 3 seconds
             setTimeout(function() {
