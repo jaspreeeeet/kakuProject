@@ -106,7 +106,7 @@ String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 
 // Camera cover detection for menu switching
-#define BLACK_BRIGHTNESS_TH 100    // Brightness threshold (JPEG avg when covered ~70-85)
+#define BLACK_BRIGHTNESS_TH 90    // Brightness threshold (JPEG avg when covered ~70-85)
 
 // NEW: Menu cycling via consecutive black frame detection (uses 5-sec captures only)
 int consecutiveBlackFrames = 0;        // Count consecutive black frames
@@ -661,28 +661,52 @@ void displayFoodMenu() {
     // The captured frame IS the food - no AI detection needed
     if (isUploadingImage) {
         // Show looping eating animation (Pacman) - full screen, no food icon
+        Serial.println("🍽️ FOOD_MENU: Showing EATING animation");
         display.clearDisplay();  // Clear to show full eating animation
         uint8_t eatingFrame = (millis() / 100) % EATING_FRAME_COUNT;  // 100ms per frame
         display.drawBitmap(0, 0, eating_frames[eatingFrame], EATING_WIDTH, EATING_HEIGHT, SSD1306_WHITE);
-        // Removed Serial.println to reduce clutter during animation loop
     }
     // Check if just finished eating (show GOOD for 3 seconds)
     else if (justFinishedEating && (millis() - eatingFinishTime < 3000)) {
+        Serial.println("🍽️ FOOD_MENU: Showing GOOD text");
         // Show "GOOD" text after eating (NO newline to prevent cursor artifacts)
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
         display.setCursor(18, 12);
         display.print("GOOD!");  // Changed from println to print - prevents unwanted cursor movement
     } else if (justFinishedEating) {
-        // After GOOD text expires, show HAPPY face
+        Serial.println("🍽️ FOOD_MENU: Showing age-based HAPPY face after eating");
+        // After GOOD text expires, show age-appropriate HAPPY face
         justFinishedEating = false;  // Reset flag
-        const uint8_t* frameData = child_frames[0];  // HAPPY face
-        display.drawBitmap(20, 8, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+        
+        // FIX: Use age-based HAPPY frame instead of hardcoded child_frames
+        const uint8_t* frameData = nullptr;
+        switch (petAge) {
+            case INFANT:
+                frameData = infant_frames[0];  // INFANT HAPPY
+                display.drawBitmap(20, 8, frameData, INFANT_WIDTH, INFANT_HEIGHT, SSD1306_WHITE);
+                break;
+            case CHILD:
+                frameData = child_frames[0];  // CHILD HAPPY
+                display.drawBitmap(20, 8, frameData, CHILD_WIDTH, CHILD_HEIGHT, SSD1306_WHITE);
+                break;
+            case ADULT:
+                frameData = adult_frames[0];  // ADULT HAPPY
+                display.drawBitmap(20, 8, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
+                break;
+            case OLD:
+                frameData = old_frames[0];  // OLD HAPPY
+                display.drawBitmap(20, 8, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                break;
+        }
     } else if (showFoodIcon) {
+        Serial.println("🍽️ FOOD_MENU: Pet HUNGRY - showing SAD animation");
         // Pet is HUNGRY - show SAD pet face (hungry, waiting for food)
         uint8_t sadFrame = (millis() / sad_delays[0]) % SAD_FRAME_COUNT;
         const uint8_t* frameData = sad_frames[sadFrame];  // SAD animation
         display.drawBitmap(20, 8, frameData, SAD_WIDTH, SAD_HEIGHT, SSD1306_WHITE);
+    } else {
+        Serial.println("🍽️ FOOD_MENU: Pet NOT hungry - empty screen (only menu icon)");
     }
     // else: Pet is NOT hungry - show only food icon (empty screen)
     
@@ -812,6 +836,14 @@ void displayPetAnimation() {
     // Display animation every 150ms
     if (millis() - lastAnimationTime >= ANIMATION_DISPLAY_INTERVAL) {
         lastAnimationTime = millis();
+        
+        // Debug: Print current screen type every 3 seconds
+        static unsigned long lastScreenDebug = 0;
+        if (millis() - lastScreenDebug >= 3000) {
+            Serial.printf("📺 Current Screen: %s | Age: %d | Emotion: %s\n", 
+                         currentScreenType.c_str(), petAge, currentEmotion.c_str());
+            lastScreenDebug = millis();
+        }
         
         // Check which screen to display
         if (currentScreenType == "FOOD_MENU") {
