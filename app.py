@@ -675,6 +675,20 @@ def init_database():
             ''')
             print("✅ Created pet_state table")
             
+            # Game rewards table for catch-food game
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS game_rewards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT DEFAULT 'ESP32_001',
+                    game_type TEXT DEFAULT 'CATCH_FOOD',
+                    score INTEGER DEFAULT 0,
+                    kakucoin INTEGER DEFAULT 0,
+                    play_duration INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            print("✅ Created game_rewards table")
+            
             # Initialize one pet_state row if not exists
             cursor.execute('SELECT COUNT(*) FROM pet_state')
             if cursor.fetchone()[0] == 0:
@@ -2021,6 +2035,49 @@ def pet_play_result():
             
     except Exception as e:
         print(f'❌ Error processing play result: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/game/reward', methods=['POST'])
+def game_reward():
+    """Process catch-food game reward - store score and KakuCoin"""
+    try:
+        data = request.get_json() or {}
+        device_id = data.get('device_id', 'ESP32_001')
+        score = data.get('score', 0)
+        kakucoin = data.get('kakucoin', 0)
+        play_duration = data.get('play_duration', 0)
+        game_type = data.get('game_type', 'CATCH_FOOD')
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO game_rewards (device_id, game_type, score, kakucoin, play_duration)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (device_id, game_type, score, kakucoin, play_duration))
+            conn.commit()
+            
+            print(f"🎮 Game reward stored: {game_type} - Score: {score}, KakuCoin: {kakucoin}, Duration: {play_duration}s")
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Game reward stored successfully',
+                'score': score,
+                'kakucoin': kakucoin,
+                'game_type': game_type
+            }), 200
+            
+        except sqlite3.Error as e:
+            print(f'❌ Database error storing game reward: {e}')
+            return jsonify({'status': 'error', 'message': f'Database error: {str(e)}'}), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f'❌ Error processing game reward: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/pet/menu', methods=['POST'])

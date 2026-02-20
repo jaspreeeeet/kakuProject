@@ -116,6 +116,48 @@ const unsigned long MENU_CYCLE_COOLDOWN = 3000;  // 3 seconds cooldown
 volatile bool cameraCapturing = false;  // Flag to prevent camera access conflicts
 bool imageAlreadySentThisSession = false;  // Track if image sent for current food session
 
+// ================= PLAY MENU GAME STATE =================
+enum GameState {
+  GAME_IDLE,      // Not playing (shows static PLAY screen)
+  GAME_PLAYING,   // Actively playing
+  GAME_OVER_ANIM  // Game over animation with coins
+};
+
+GameState playGameState = GAME_IDLE;
+
+// Game variables
+float playerX = 28;
+const int playerWidth = 12;
+const int playerHeight = 3;
+const int playerY = 28;
+
+int foodX = 10;
+int foodY = 0;
+const int foodSize = 4;
+
+int gameScore = 0;
+int missCount = 0;
+int comboCount = 0;
+int scoreIncrement = 1;
+
+unsigned long lastFallTime = 0;
+const int fallSpeed = 120;
+
+unsigned long gameOverStartTime = 0;
+unsigned long gameStartTime = 0;
+unsigned long holdStartTime = 0;
+bool holdingLeft = false;
+
+// Smooth control
+float filteredX = 0;
+float velocity = 0;
+
+// Falling coins animation
+#define COIN_COUNT 6
+int coinX[COIN_COUNT];
+int coinY[COIN_COUNT];
+int coinSpeed[COIN_COUNT];
+
 // MPU6050 sensor
 MPU6050 mpu;
 bool mpuAvailable = false;  // Track if MPU6050 is working
@@ -654,6 +696,26 @@ void drawStaticToiletIcon() {
     }
 }
 
+// Helper function to draw simple sad face (circle with frown) for ages without SAD animation
+void drawSimpleSadFace() {
+    // Draw large sad circle at center of screen
+    int centerX = SCREEN_WIDTH / 2;  // 32
+    int centerY = SCREEN_HEIGHT / 2; // 16
+    
+    // Outer circle (face outline)
+    display.drawCircle(centerX, centerY, 12, SSD1306_WHITE);
+    
+    // Eyes (small filled circles)
+    display.fillCircle(centerX - 5, centerY - 3, 2, SSD1306_WHITE);  // Left eye
+    display.fillCircle(centerX + 5, centerY - 3, 2, SSD1306_WHITE);  // Right eye
+    
+    // Sad frown (small arc - drawn with pixels)
+    for (int x = -5; x <= 5; x++) {
+        int y = 5 + (x * x) / 8;  // Parabola for frown
+        display.drawPixel(centerX + x, centerY + y, SSD1306_WHITE);
+    }
+}
+
 // Display food menu screen
 void displayFoodMenu() {
     display.clearDisplay();
@@ -704,11 +766,24 @@ void displayFoodMenu() {
                 break;
         }
     } else if (showFoodIcon) {
-        Serial.println("🍽️ FOOD_MENU: Pet HUNGRY - showing SAD animation");
-        // Pet is HUNGRY - show SAD pet face (hungry, waiting for food)
-        uint8_t sadFrame = (millis() / infant_sad_delays[0]) % INFANT_SAD_FRAME_COUNT;
-        const uint8_t* frameData = infant_sad_frames[sadFrame];  // INFANT SAD animation
-        display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
+        // Pet is HUNGRY - show age-appropriate SAD animation or fallback
+        Serial.printf("🍽️ FOOD_MENU: Pet HUNGRY (Age: %d) - showing SAD\n", petAge);
+        
+        switch (petAge) {
+            case INFANT: {
+                // INFANT has SAD animation
+                uint8_t sadFrame = (millis() / infant_sad_delays[0]) % INFANT_SAD_FRAME_COUNT;
+                const uint8_t* frameData = infant_sad_frames[sadFrame];
+                display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
+                break;
+            }
+            case CHILD:
+            case ADULT:
+            case OLD:
+                // These ages don't have SAD animations yet - use simple sad face
+                drawSimpleSadFace();
+                break;
+        }
     } else {
         Serial.println("🍽️ FOOD_MENU: Pet NOT hungry - showing HAPPY face");
         // Pet is NOT hungry - show HAPPY face (excited about food menu)
@@ -764,25 +839,281 @@ void drawStaticPlayIcon() {
     }
 }
 
-// Display play menu screen 🎮
-void displayPlayMenu() {
+// ================= PLAY MENU GAME FUNCTIONS =================
+
+// Calculate KakuCoin reward
+float calculateKakuCoin(int scoreValue) {
+    return scoreValue * 0.80;
+}
+
+// Read tilt for game control
+void readTiltForGame() {
+    if (!mpuAvailable) return;
+    
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    
+    float accelX = ax / 16384.0;
+    
+    filteredX = 0.9 * filteredX + 0.1 * accelX;
+    
+    if (abs(filteredX) < 0.3) {
+        velocity = 0;
+    } else {
+        velocity = filteredX * 3.0;
+    }
+    
+    playerX += velocity;
+    
+    if (playerX < 0) playerX = 0;
+    if (playerX > SCREEN_WIDTH - playerWidth)
+        playerX = SCREEN_WIDTH - playerWidth;
+}
+
+// Update food falling
+void updateFoodFalling() {
+    if (millis() - lastFallTime > fallSpeed) {
+        foodY += 2;
+        lastFallTime = millis();
+    }
+    
+    if (foodY > SCREEN_HEIGHT) {
+        missCount++;
+        comboCount = 0;
+        scoreIncrement = 1;
+        
+        resetFood();
+        
+        if (missCount >= 3) {
+            playGameState = GAME_OVER_ANIM;
+            gameOverStartTime = millis();
+        }
+    }
+}
+
+// Check collision
+void checkGameCollision() {
+    if (foodY + foodSize >= playerY &&
+        foodX + foodSize >= playerX &&
+        foodX <= playerX + playerWidth) {
+        
+        comboCount++;
+        
+        if (comboCount >= 5)
+            scoreIncrement = 5;
+        else
+            scoreIncrement = 1;
+        
+        gameScore += scoreIncrement;
+        
+        resetFood();
+    }
+}
+
+// Reset food position
+void resetFood() {
+    foodY = 0;
+    foodX = random(0, SCREEN_WIDTH - foodSize);
+}
+
+// Draw game play screen
+void drawGamePlay() {
     display.clearDisplay();
     
-    // Draw STATIC play icon at top-left (not animated)
-    drawStaticPlayIcon();
+    display.fillRect(playerX, playerY, playerWidth, playerHeight, SSD1306_WHITE);
+    display.fillRect(foodX, foodY, foodSize, foodSize, SSD1306_WHITE);
     
-    // NEW: Display "PLAY" text in center of screen
-    display.setTextSize(1);  // Small text (size 1 instead of size 2)
+    display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    // Center text: "PLAY" is roughly 24 pixels wide (4 chars x 6 pixels each at size 1)
-    // Screen width is 64, so center X = (64 - 24) / 2 = 20
-    // Center Y = 14 (middle of screen)
-    display.setCursor(20, 14);
-    display.print("PLAY");
     
-    Serial.println("🎮 PLAY_MENU: Showing play icon + PLAY text");
+    display.setCursor(0, 0);
+    display.print("S:");
+    display.print(gameScore);
+    
+    display.setCursor(40, 0);
+    display.print("M:");
+    display.print(missCount);
     
     display.display();
+}
+
+// Update coins animation
+void updateCoins() {
+    for (int i = 0; i < COIN_COUNT; i++) {
+        coinY[i] += coinSpeed[i];
+        
+        if (coinY[i] > SCREEN_HEIGHT) {
+            coinY[i] = 0;
+            coinX[i] = random(0, SCREEN_WIDTH);
+            coinSpeed[i] = random(1, 3);
+        }
+    }
+}
+
+// Draw coins
+void drawCoins() {
+    for (int i = 0; i < COIN_COUNT; i++) {
+        display.drawCircle(coinX[i], coinY[i], 2, SSD1306_WHITE);
+        display.drawPixel(coinX[i], coinY[i], SSD1306_WHITE);
+    }
+}
+
+// Draw game over screen
+void drawGameOverScreen() {
+    updateCoins();
+    
+    display.clearDisplay();
+    drawCoins();
+    
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    
+    display.setCursor(6, 6);
+    display.print("GAME OVER");
+    
+    display.setCursor(10, 16);
+    display.print("Score:");
+    display.print(gameScore);
+    
+    float kakuCoin = calculateKakuCoin(gameScore);
+    
+    display.setCursor(10, 24);
+    display.print("KC:");
+    display.print(kakuCoin, 1);
+    
+    display.display();
+}
+
+// Check start gesture (hold left tilt for 3 seconds)
+void checkStartGesture() {
+    if (!mpuAvailable) return;
+    
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    
+    float accelX = ax / 16384.0;
+    
+    if (accelX < -0.8) {
+        if (!holdingLeft) {
+            holdingLeft = true;
+            holdStartTime = millis();
+        }
+        
+        if (millis() - holdStartTime > 3000) {
+            resetGameState();
+            playGameState = GAME_PLAYING;
+            gameStartTime = millis();
+            Serial.println("🎮 Game started!");
+        }
+    } else {
+        holdingLeft = false;
+    }
+}
+
+// Reset game state
+void resetGameState() {
+    gameScore = 0;
+    missCount = 0;
+    comboCount = 0;
+    scoreIncrement = 1;
+    
+    playerX = 28;
+    foodY = 0;
+    foodX = random(0, SCREEN_WIDTH - foodSize);
+    
+    // Initialize coins
+    for (int i = 0; i < COIN_COUNT; i++) {
+        coinX[i] = random(0, SCREEN_WIDTH);
+        coinY[i] = random(0, SCREEN_HEIGHT);
+        coinSpeed[i] = random(1, 3);
+    }
+}
+
+// Send KakuCoin reward to server
+void sendKakuCoinReward(int score, float kakucoin) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected, can't send reward");
+        return;
+    }
+    
+    HTTPClient http;
+    http.setConnectTimeout(2000);
+    http.setTimeout(5000);
+    
+    const char* rewardUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/game/reward";
+    
+    if (!http.begin(rewardUrl)) {
+        Serial.println("❌ Failed to begin reward HTTP");
+        return;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    
+    StaticJsonDocument<256> doc;
+    doc["device_id"] = "ESP32_001";
+    doc["score"] = score;
+    doc["kakucoin"] = kakucoin;
+    doc["play_duration"] = (millis() - gameStartTime) / 1000;  // seconds
+    doc["game_type"] = "catch_food";
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    Serial.printf("🎮 Sending game reward: Score=%d, KC=%.1f\n", score, kakucoin);
+    
+    int httpCode = http.POST(payload);
+    
+    if (httpCode == 200) {
+        Serial.println("✅ Game reward sent!");
+    } else {
+        Serial.printf("❌ Reward send failed: %d\n", httpCode);
+    }
+    
+    http.end();
+}
+
+// Display play menu screen 🎮
+void displayPlayMenu() {
+    switch (playGameState) {
+        case GAME_IDLE:
+            // Show static PLAY screen and check for start gesture
+            display.clearDisplay();
+            drawStaticPlayIcon();
+            
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(20, 14);
+            display.print("PLAY");
+            
+            display.display();
+            
+            // Check if user wants to start game
+            checkStartGesture();
+            break;
+        
+        case GAME_PLAYING:
+            // Active gameplay
+            readTiltForGame();
+            updateFoodFalling();
+            checkGameCollision();
+            drawGamePlay();
+            break;
+        
+        case GAME_OVER_ANIM:
+            // Game over animation
+            drawGameOverScreen();
+            
+            if (millis() - gameOverStartTime > 5000) {
+                // Send reward to server
+                float kakuCoin = calculateKakuCoin(gameScore);
+                sendKakuCoinReward(gameScore, kakuCoin);
+                
+                // Resume normal operations
+                playGameState = GAME_IDLE;
+                Serial.println("🎮 Game ended, resuming normal operations");
+            }
+            break;
+    }
 }
 
 // Draw static heart icon at top-left (for health menu)
@@ -971,11 +1302,23 @@ void displayPetAnimation() {
             frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
             frameCount = INFANT_CRY_FRAME_COUNT;
             display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
-        } else if (currentEmotion == "SAD") {
-            // INFANT sad (low happiness)
-            frameData = infant_sad_frames[currentFrame % INFANT_SAD_FRAME_COUNT];
-            frameCount = INFANT_SAD_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
+        } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER") {
+            // SAD/HUNGER - show age-appropriate SAD animation or fallback
+            switch (petAge) {
+                case INFANT: {
+                    // INFANT has SAD animation
+                    frameData = infant_sad_frames[currentFrame % INFANT_SAD_FRAME_COUNT];
+                    frameCount = INFANT_SAD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case CHILD:
+                case ADULT:
+                case OLD:
+                    // These ages don't have SAD animations - use simple sad face
+                    drawSimpleSadFace();
+                    break;
+            }
         } else if (currentEmotion == "IDLE") {
             // IDLE face - pet is calm/relaxed (not hungry, not sick, not dirty)
             // Show first frame only (static calm face)
@@ -1375,6 +1718,13 @@ void cameraMonitorTask(void *parameter) {
             continue;
         }
         
+        // PAUSE camera capture during game
+        if (currentScreenType == "PLAY_MENU" && playGameState == GAME_PLAYING) {
+            Serial.println("🎮 Game active - PAUSING camera capture");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        
         // Capture image every 5 seconds (continuous background)
         if (millis() - lastCapture >= IMAGE_INTERVAL) {
             lastCapture = millis();
@@ -1397,7 +1747,11 @@ void cameraMonitorTask(void *parameter) {
                 bool isBlack = isFrameMostlyBlack(fb);
                 unsigned long now = millis();
                 
-                if (isBlack) {
+                // PAUSE cover detection during game
+                if (playGameState == GAME_PLAYING) {
+                    Serial.println("🎮 Game active - PAUSING cover detection");
+                    consecutiveBlackFrames = 0;  // Reset counter
+                } else if (isBlack) {
                     consecutiveBlackFrames++;
                     Serial.printf("🖤 Black frame detected (%d/1) | Cooldown: %lu / %lu ms\n", 
                                  consecutiveBlackFrames,
