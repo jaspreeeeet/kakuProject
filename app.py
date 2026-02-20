@@ -923,29 +923,38 @@ def pet_engine_cycle():
             
             updates = {}
             
-            # 1️⃣ AGE PROGRESSION (every 24 hours)
+            # 1️⃣ AGE PROGRESSION (every 24 hours with catch-up for offline periods)
             if state.get('last_age_increment'):
                 from datetime import datetime, timedelta
                 last_age_time = datetime.fromisoformat(state['last_age_increment']) if isinstance(state['last_age_increment'], str) else state['last_age_increment']
-                if last_age_time and (datetime.now() - last_age_time) > timedelta(hours=24):
-                    updates['age'] = state['age'] + 1
-                    updates['last_age_increment'] = datetime.now().isoformat()
-                    print(f"🎂 Age increased: {state['age']} → {updates['age']}")
+                
+                if last_age_time:
+                    # Calculate how many 24-hour periods have passed (handles offline server)
+                    hours_passed = (datetime.now() - last_age_time).total_seconds() / 3600
+                    age_increments = int(hours_passed / 24)
                     
-                    # Update stage based on age
-                    new_age = updates['age']
-                    if new_age <= 5:
-                        updates['stage'] = 'INFANT'
-                    elif new_age <= 10:
-                        updates['stage'] = 'CHILD'
-                    elif new_age <= 17:
-                        updates['stage'] = 'ADULT'
-                    elif new_age <= 21:
-                        updates['stage'] = 'OLD'
-                    else:
-                        updates['stage'] = 'END'
-                    
-                    print(f"📊 Stage updated: {state['stage']} → {updates['stage']}")
+                    if age_increments > 0:
+                        updates['age'] = state['age'] + age_increments
+                        updates['last_age_increment'] = datetime.now().isoformat()
+                        
+                        if age_increments > 1:
+                            print(f"🎂 Age catch-up! Server was offline for {age_increments} days")
+                        print(f"🎂 Age increased by {age_increments}: {state['age']} → {updates['age']}")
+                        
+                        # Update stage based on age
+                        new_age = updates['age']
+                        if new_age <= 5:
+                            updates['stage'] = 'INFANT'
+                        elif new_age <= 10:
+                            updates['stage'] = 'CHILD'
+                        elif new_age <= 17:
+                            updates['stage'] = 'ADULT'
+                        elif new_age <= 21:
+                            updates['stage'] = 'OLD'
+                        else:
+                            updates['stage'] = 'END'
+                        
+                        print(f"📊 Stage updated: {state['stage']} → {updates['stage']}")
             
             # 2️⃣ HUNGER ENGINE (every 360 seconds = 6 minutes)
             from datetime import datetime, timedelta
