@@ -156,5 +156,169 @@ BACKEND SERVER TESTING (app.py):
 5. Monitor hunger updates every 6 minutes
 
 ═══════════════════════════════════════════════════════════════════════════════
+                           DAILY LOG - February 21, 2026
+═══════════════════════════════════════════════════════════════════════════════
+
+🎮 COMPLETE CATCH-FOOD GAME INTEGRATION
+
+─────────────────────────────────────────────────────────────────────────────
+3. GAME STATE & VARIABLES 🎮
+─────────────────────────────────────────────────────────────────────────────
+
+ADDED TO esp32_sketch.ino (Lines 119-161):
+- enum GameState: GAME_IDLE, GAME_PLAYING, GAME_OVER_ANIM
+- Game variables:
+  * playerX (paddle position) - float with velocity
+  * foodX, foodY (falling food position)
+  * gameScore, missCount, comboCount, scoreIncrement
+  * lastFallTime, gameOverStartTime, gameStartTime
+  * holdStartTime, holdingLeft (for gesture detection)
+  * filteredX, velocity (smooth paddle control)
+  * coinX[6], coinY[6], coinSpeed[6] (KakuCoin animation)
+
+KEY FEATURES:
+✅ Smooth control with acceleration (0.9 filter)
+✅ Combo system (5 consecutive catches = 5x points)
+✅ Falling coins animation on game over
+✅ Hold gesture detection (left tilt 3 seconds to start)
+
+─────────────────────────────────────────────────────────────────────────────
+4. GAME LOGIC FUNCTIONS (9 Total) 🎯
+─────────────────────────────────────────────────────────────────────────────
+
+calculateKakuCoin(score): Score × 0.80 = KakuCoin reward
+readTiltForGame(): Convert MPU6050 tilt to paddle movement (smooth filter)
+updateFoodFalling(): Drop food 2px every 120ms, miss on screen exit
+checkGameCollision(): Pixel-perfect collision, increment score on catch
+resetFood(): Random X, Y=0 (top of screen)
+drawGamePlay(): Render paddle, food, score "S:XX M:Y"
+drawGameOverScreen(): Falling coins + "GAME OVER" + final score + KakuCoin
+checkStartGesture(): Hold left tilt 3 seconds to start game
+resetGameState(): Clear variables, randomize coin positions
+sendKakuCoinReward(): POST reward to /api/game/reward endpoint
+
+─────────────────────────────────────────────────────────────────────────────
+5. PLAY MENU STATE MACHINE 🎪
+─────────────────────────────────────────────────────────────────────────────
+
+State: GAME_IDLE
+  - Display: Static "PLAY" text
+  - Logic: Check for start gesture
+  - Transition: → GAME_PLAYING on hold gesture
+
+State: GAME_PLAYING
+  - Display: Live game (paddle, food, score)
+  - Logic: Tilt control, food falling, collision check
+  - Transition: → GAME_OVER_ANIM when 3 misses reached
+
+State: GAME_OVER_ANIM
+  - Display: Coins falling 5 seconds
+  - Shows: Final score + KakuCoin amount
+  - Sends reward to /api/game/reward
+  - Transition: → GAME_IDLE after animation
+
+─────────────────────────────────────────────────────────────────────────────
+6. CAMERA & COVER DETECTION PAUSE 📸 🔒
+─────────────────────────────────────────────────────────────────────────────
+
+Modified cameraMonitorTask() to add game pause checks:
+
+1. CAMERA PAUSE:
+   if (currentScreenType == "PLAY_MENU" && playGameState == GAME_PLAYING)
+   → Skip image capture during game
+   → Still transmit sensor data (no interruption)
+
+2. COVER DETECTION PAUSE:
+   if (playGameState == GAME_PLAYING)
+   → Reset consecutiveBlackFrames counter
+   → Prevent menu cycling during game
+   → Resume when game ends
+
+Benefits:
+✅ No wasted camera captures during game
+✅ Smoother gameplay (less CPU heat)
+✅ Sensor data still sends every 2 seconds
+✅ No accidental menu cycling during play
+
+─────────────────────────────────────────────────────────────────────────────
+7. BACKEND GAME REWARDS 🏆
+─────────────────────────────────────────────────────────────────────────────
+
+NEW TABLE: game_rewards
+  - device_id: Which ESP32 (default ESP32_001)
+  - game_type: Game name (CATCH_FOOD)
+  - score: Raw points earned (0-999)
+  - kakucoin: Reward points (score × 0.80)
+  - play_duration: Game length in seconds
+  - created_at: Timestamp
+
+NEW ENDPOINT: POST /api/game/reward
+  Request: {device_id, score, kakucoin, play_duration, game_type}
+  Response: {status: "success", score, kakucoin, game_type}
+  Called: After game over animation by sendKakuCoinReward()
+
+─────────────────────────────────────────────────────────────────────────────
+8. AGE-APPROPRIATE SAD FACE FALLBACK 😢
+─────────────────────────────────────────────────────────────────────────────
+
+Added drawSimpleSadFace() function for ages without SAD animations:
+
+Design:
+- Large circle (face outline)
+- Two filled circles (eyes)
+- Pixel-based frown (parabola curve)
+- Fits 64×32 OLED screen
+
+Used in:
+- INFANT: Uses infant_sad_frames (animated)
+- CHILD/ADULT/OLD: Uses drawSimpleSadFace() (fallback)
+
+Applied to:
+- displayFoodMenu() when pet hungry
+- displayPetAnimation() when emotion is SAD
+
+═══════════════════════════════════════════════════════════════════════════════
+                              FILES MODIFIED
+═══════════════════════════════════════════════════════════════════════════════
+
+esp32_sketch.ino: +441 lines, -87 lines
+  ✓ Game variables (enum + 19 vars)
+  ✓ 9 game functions (264 lines)
+  ✓ displayPlayMenu() state machine (102 lines)
+  ✓ Camera pause in cameraMonitorTask() (6 lines)
+  ✓ Cover detection pause (4 lines)
+  ✓ drawSimpleSadFace() (21 lines)
+  ✓ SAD animation age check
+
+app.py: +59 lines, -23 lines
+  ✓ game_rewards table creation (18 lines)
+  ✓ /api/game/reward endpoint (49 lines)
+
+═══════════════════════════════════════════════════════════════════════════════
+                              GIT COMMIT
+═══════════════════════════════════════════════════════════════════════════════
+
+Commit: 92117ee
+Message: "🎮 Complete game integration: Add camera/cover pause + KakuCoin rewards backend"
+Files: 2 changed, 434 insertions(+), 23 deletions(-)
+Pushed: main branch
+
+═══════════════════════════════════════════════════════════════════════════════
+                              GAME CONTROLS
+═══════════════════════════════════════════════════════════════════════════════
+
+Tilt LEFT → Move paddle left
+Tilt RIGHT → Move paddle right
+Hold LEFT (3 sec) → Start game
+
+Scoring:
+- Base: 1 point per catch
+- Combo: 5 consecutive catches = 5x multiplier
+- KakuCoin: Score × 0.80
+
+Game Over At: 3 missed foods
+Animation Duration: 5 seconds
+
+═══════════════════════════════════════════════════════════════════════════════
                                 END OF LOG
 ═══════════════════════════════════════════════════════════════════════════════
