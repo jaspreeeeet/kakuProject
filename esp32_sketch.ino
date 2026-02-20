@@ -742,17 +742,28 @@ void cycleMenu() {
         newMenu = "MAIN";
     }
     
+    Serial.printf("📡 Menu cycle attempt: %s → %s\n", currentScreenType.c_str(), newMenu.c_str());
+    
+    // Check WiFi first
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected - cannot update menu");
+        return;
+    }
+    
     // Update server with new menu selection
     HTTPClient http;
-    http.setConnectTimeout(3000);
-    http.setTimeout(3000);
+    http.setConnectTimeout(2000);
+    http.setTimeout(2000);
     
     String url = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/menu-switch";
+    Serial.printf("🔗 Connecting to: %s\n", url.c_str());
     
     if (http.begin(url)) {
+        Serial.println("✅ HTTP connection started");
         http.addHeader("Content-Type", "application/json");
         
         String payload = "{\"device_id\":\"ESP32_001\",\"menu\":\"" + newMenu + "\"}";
+        Serial.printf("📤 Payload: %s\n", payload.c_str());
         int httpCode = http.POST(payload);
         
         if (httpCode == 200) {
@@ -764,12 +775,13 @@ void cycleMenu() {
                 Serial.println("🔄 Reset image send flag (left FOOD_MENU)");
             }
             
-            Serial.printf("📱 Menu cycled to: %s\n", newMenu.c_str());
+            Serial.printf("✅ Menu cycled to: %s\n", newMenu.c_str());
         } else {
-            Serial.printf("❌ Menu switch failed: %d\n", httpCode);
+            Serial.printf("❌ Menu switch failed: HTTP %d | Error: %s\n", httpCode, http.errorToString(httpCode).c_str());
         }
-        
         http.end();
+    } else {
+        Serial.println("❌ http.begin() failed - connection error");
     }
 }
 
@@ -1251,14 +1263,21 @@ void cameraMonitorTask(void *parameter) {
                 
                 if (isBlack) {
                     consecutiveBlackFrames++;
-                    Serial.printf("🖤 Black frame detected (%d/2)\n", consecutiveBlackFrames);
+                    Serial.printf("🖤 Black frame detected (%d/1) | Cooldown: %lu / %lu ms\n", 
+                                 consecutiveBlackFrames,
+                                 now - lastMenuCycleTime,
+                                 MENU_CYCLE_COOLDOWN);
                     
-                    // If 2 consecutive black frames (10 seconds total) → Cycle menu
-                    if (consecutiveBlackFrames >= 2 && (now - lastMenuCycleTime) > MENU_CYCLE_COOLDOWN) {
-                        Serial.println("🔄 Camera covered for 10 seconds → Cycling menu...");
+                    // If 1 black frame detected AND cooldown passed → Cycle menu
+                    if (consecutiveBlackFrames >= 1 && (now - lastMenuCycleTime) > MENU_CYCLE_COOLDOWN) {
+                        Serial.println("🔄 Black frame detected → Attempting to cycle menu...");
+                        Serial.printf("   Current menu: %s\n", currentScreenType.c_str());
                         cycleMenu();  // MAIN → FOOD_MENU → TOILET_MENU → MAIN
                         lastMenuCycleTime = now;
                         consecutiveBlackFrames = 0;  // Reset counter
+                    } else if (consecutiveBlackFrames >= 1) {
+                        Serial.printf("   ⏳ Cooldown active: %lu ms remaining\n", 
+                                     MENU_CYCLE_COOLDOWN - (now - lastMenuCycleTime));
                     }
                 } else {
                     // Frame not black - reset counter
@@ -1618,8 +1637,8 @@ void notifyServerStartupComplete() {
     }
     
     HTTPClient http;
-    http.setConnectTimeout(2000);  // Reduced from 5s
-    http.setTimeout(2000);  // Reduced from 5s
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
     
     const char* startupUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/startup-complete";
     
@@ -1645,14 +1664,39 @@ void notifyServerStartupComplete() {
     int httpCode = http.POST(payload);
     
     if (httpCode == 200) {
+        String response = http.getString();
         Serial.println("✅ Server acknowledged startup!");
-        lastDisplayCheckTime = millis();  // Reset sync timer
+        Serial.printf("   Response: %s\n", response.c_str());
+        
+        // Parse response - server might send initial state
+        DynamicJsonDocument responseDoc(768);
+        DeserializationError error = deserializeJson(responseDoc, response);
+        
+        if (!error) {
+            if (responseDoc.containsKey("animation_id")) {
+                int animId = responseDoc["animation_id"].as<int>();
+                petAge = (PetAge)animId;
+                Serial.printf("   ✅ Initial animation set to: %d (INFANT)\n", animId);
+            }
+            if (responseDoc.containsKey("show_home_icon")) {
+                showHomeIcon = responseDoc["show_home_icon"].as<bool>();
+                Serial.printf("   Home icon: %s\n", showHomeIcon ? "ENABLED" : "DISABLED");
+            }
+            if (responseDoc.containsKey("show_food_icon")) {
+                showFoodIcon = responseDoc["show_food_icon"].as<bool>();
+                Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
+            }
+        } else {
+            Serial.printf("⚠️  JSON parse error: %s\n", error.c_str());
+        }
+        
+        // Lock sync to INFANT for first 3 seconds after startup
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        lastDisplayCheckTime = millis();  // Reset sync timer to prevent early override
+        Serial.println("🔒 Startup complete - INFANT locked for 3 seconds");
     } else {
         Serial.printf("⚠️  Server response: %d\n", httpCode);
     }
-    
-    // REMOVED 3-second blocking delay - OLED continues immediately
-    // REMOVED response parsing - not critical for startup
     
     http.end();
 }
