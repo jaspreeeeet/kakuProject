@@ -247,10 +247,12 @@ void drawPoopIcon();  // NEW: Draw poop icon pixel-by-pixel (bottom-right)
 void playEatingAnimation();  // NEW: Play eating animation
 void drawStaticFoodIcon();  // NEW: Draw static food icon at top-left (food menu)
 void drawStaticToiletIcon();  // NEW: Draw static toilet icon at top-left (toilet menu)
+void drawStaticPlayIcon();  // NEW: Draw static play icon at top-left (play menu)
 void displayFoodMenu();  // NEW: Display food menu screen
 void displayToiletMenu();  // NEW: Display toilet menu screen
+void displayPlayMenu();  // NEW: Display play menu screen
 bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
-void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET)
+void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET → PLAY)
 // void checkCameraCover();  // DISABLED: Check camera cover for menu switching (now uses 5-sec intervals)
 void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
 
@@ -723,6 +725,49 @@ void displayToiletMenu() {
     display.display();
 }
 
+// Draw static play icon at top-left (for play menu)
+void drawStaticPlayIcon() {
+    int xOffset = 0;  // Top-left corner
+    int yOffset = 0;
+    
+    // Use second frame of play icon animation (the animated play symbol)
+    for (uint16_t y = 0; y < PLAY_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < PLAY_ICON_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
+            uint8_t bitIndex = 7 - (x % 8);
+            
+            if (pgm_read_byte(&play_icon_frames[1][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
+// Display play menu screen 🎮
+void displayPlayMenu() {
+    display.clearDisplay();
+    
+    // Draw animated play icon at top-left (blinking/animating)
+    uint8_t playFrame = (millis() / play_icon_delays[0]) % PLAY_ICON_FRAME_COUNT;
+    
+    for (uint16_t y = 0; y < PLAY_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < PLAY_ICON_WIDTH; x++) {
+            uint16_t byteIndex = (y / 8) * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
+            uint8_t bitIndex = 7 - (x % 8);
+            
+            if (pgm_read_byte(&play_icon_frames[playFrame][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x, y, SSD1306_WHITE);
+            }
+        }
+    }
+    
+    // TODO: Add play games or interactive features here
+    // For now, just show the animated play icon
+    Serial.println("🎮 PLAY_MENU: Showing animated play icon");
+    
+    display.display();
+}
+
 // ================= CAMERA COVER DETECTION FOR MENU SWITCHING =================
 // Check if camera frame is mostly black (covered)
 bool isFrameMostlyBlack(camera_fb_t * fb) {
@@ -752,7 +797,7 @@ bool isFrameMostlyBlack(camera_fb_t * fb) {
     return isBlack;
 }
 
-// Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → MAIN
+// Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → PLAY_MENU → MAIN
 void cycleMenu() {
     String newMenu;
     
@@ -760,6 +805,8 @@ void cycleMenu() {
         newMenu = "FOOD_MENU";
     } else if (currentScreenType == "FOOD_MENU") {
         newMenu = "TOILET_MENU";
+    } else if (currentScreenType == "TOILET_MENU") {
+        newMenu = "PLAY_MENU";
     } else {
         newMenu = "MAIN";
     }
@@ -851,6 +898,9 @@ void displayPetAnimation() {
             return;  // Exit early
         } else if (currentScreenType == "TOILET_MENU") {
             displayToiletMenu();
+            return;  // Exit early
+        } else if (currentScreenType == "PLAY_MENU") {
+            displayPlayMenu();
             return;  // Exit early
         }
         
