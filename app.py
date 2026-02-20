@@ -2180,16 +2180,63 @@ def get_oled_display():
     """ESP32 polls this endpoint to get what animation to display on OLED
     
     PRIORITY ORDER:
-    1. Manual button selection from web UI (oled_display_state table)
-    2. AI Tamagotchi pet state (pet_state table with health/hunger)
-    3. Default fallback
+    1. Recent device startup reset (within 5 seconds) → ALWAYS return INFANT
+    2. Manual button selection from web UI (oled_display_state table)
+    3. AI Tamagotchi pet state (pet_state table with health/hunger)
+    4. Default fallback
     
     Includes backward compatibility with animation_id field
     """
     try:
         device_id = request.args.get('device_id', 'ESP32_001')
         
-        # FIRST: Check if user manually selected an animation via web UI buttons
+        # FIRST: Check if device just booted (reset timestamp recent)
+        startup_reset = False
+        with db_lock:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT animation_id, animation_name, updated_at, updated_by
+                        FROM oled_display_state
+                        WHERE device_id = ?
+                    ''', (device_id,))
+                    result = cursor.fetchone()
+                    if result:
+                        updated_by = result[3]  # Check who updated it
+                        updated_at = result[2]
+                        
+                        # If updated by device_startup, check if it's recent (within 5 seconds)
+                        if updated_by == 'device_startup' and updated_at:
+                            try:
+                                from datetime import datetime, timedelta
+                                updated_time = datetime.fromisoformat(updated_at)
+                                current_time = datetime.utcnow()
+                                time_diff = (current_time - updated_time).total_seconds()
+                                
+                                if time_diff < 5:  # Within 5 seconds of startup
+                                    startup_reset = True
+                                    print(f'🔄 INFANT locked - device startup {time_diff:.1f}s ago')
+                                    return jsonify({
+                                        'status': 'success',
+                                        'animation_id': 0,
+                                        'animation_name': 'INFANT',
+                                        'animation_type': 'pet',
+                                        'stage': 'INFANT',
+                                        'mode': 'STARTUP_RESET',
+                                        'show_home_icon': False,
+                                        'show_food_icon': False,
+                                        'show_poop_icon': False,
+                                        'screen_type': 'MAIN',
+                                        'message': f'Device startup - INFANT locked for {5 - time_diff:.1f}s'
+                                    }), 200
+                            except Exception as e:
+                                print(f'⚠️  Timestamp parse error: {e}')
+                finally:
+                    conn.close()
+        
+        # SECOND: Check if user manually selected an animation via web UI buttons
         manual_selection = None
         with db_lock:
             conn = get_db_connection()
@@ -2216,8 +2263,8 @@ def get_oled_display():
                 finally:
                     conn.close()
         
-        # If manual selection exists, use it (user pressed a button!)
-        if manual_selection:
+        # If manual selection exists AND not during startup, use it (user pressed a button!)
+        if manual_selection and not startup_reset:
             print(f'📡 OLED: MANUAL SELECTION → {manual_selection["animation_name"]} (ID: {manual_selection["animation_id"]})')
             return jsonify({
                 'status': 'success',
@@ -2233,7 +2280,7 @@ def get_oled_display():
                 'message': f'Manual selection: {manual_selection["animation_name"]}'
             }), 200
         
-        # SECOND: Fall back to AI pet state
+        # THIRD: Fall back to AI pet state
         pet = get_pet_state(device_id)
         
         if not pet:

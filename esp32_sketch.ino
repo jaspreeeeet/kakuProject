@@ -1626,6 +1626,7 @@ void notifyServerStartupComplete() {
     if (httpCode == 200) {
         String response = http.getString();
         Serial.println("✅ Server acknowledged startup!");
+        Serial.printf("   Response: %s\n", response.c_str());
         
         // Parse response - server might send initial state
         DynamicJsonDocument responseDoc(768);
@@ -1635,7 +1636,7 @@ void notifyServerStartupComplete() {
             if (responseDoc.containsKey("animation_id")) {
                 int animId = responseDoc["animation_id"].as<int>();
                 petAge = (PetAge)animId;
-                Serial.printf("   Initial animation set to: %d\n", animId);
+                Serial.printf("   ✅ Initial animation set to: %d (INFANT)\n", animId);
             }
             if (responseDoc.containsKey("show_home_icon")) {
                 showHomeIcon = responseDoc["show_home_icon"].as<bool>();
@@ -1645,7 +1646,14 @@ void notifyServerStartupComplete() {
                 showFoodIcon = responseDoc["show_food_icon"].as<bool>();
                 Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
             }
+        } else {
+            Serial.printf("⚠️  JSON parse error: %s\n", error.c_str());
         }
+        
+        // Lock sync to INFANT for first 3 seconds after startup
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        lastDisplayCheckTime = millis();  // Reset sync timer to prevent early override
+        Serial.println("🔒 Startup complete - INFANT locked for 3 seconds");
     } else {
         Serial.printf("⚠️  Server response: %d\n", httpCode);
     }
