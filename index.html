@@ -420,14 +420,6 @@
                 <div id="petStatus" style="color: white; font-weight: bold; font-size: 1.1em; margin-top: 10px; text-align: center;">
                     Loading pet status...
                 </div>
-                <div style="margin-top: 15px; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
-                    <button onclick="feedPet()" style="background: #FF9500; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
-                        🍕 Feed Pet
-                    </button>
-                    <button onclick="cleanPet()" style="background: #5AC8FA; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 0.9em;">
-                        🧹 Clean Pet
-                    </button>
-                </div>
             </div>
 
             <!-- Step Counter Card -->
@@ -494,6 +486,14 @@
                 <div class="sensor-label">Frequency Analysis</div>
                 <div class="sensor-value" id="soundValue">0</div>
                 <div class="sensor-label">Samples/sec</div>
+            </div>
+
+            <!-- Chip Temperature Card -->
+            <div class="card">
+                <h2><span class="card-icon">🌡️</span> Chip Temperature</h2>
+                <div class="sensor-label">ESP32 Internal Sensor</div>
+                <div class="sensor-value" id="chipTemp">0.0<span style="font-size: 0.6em;"> °C</span></div>
+                <div class="sensor-label">Chip Temperature</div>
             </div>
 
             <!-- Accelerometer Card -->
@@ -706,54 +706,6 @@
         // AUTOMATIC MODE ONLY
         // Pet animation controlled by AI based on pet state (health, hunger, care)
         // No manual controls
-        
-        function feedPet() {
-            fetch(API_BASE + '/api/pet/feed', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ device_id: 'ESP32_001' })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ Pet fed successfully!');
-                    alert('🍕 Pet is eating! Hunger: ' + data.hunger + '%');
-                } else {
-                    console.error('❌ Failed to feed pet:', data.message);
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error feeding pet:', error);
-                alert('❌ Connection error: ' + error);
-            });
-        }
-        
-        function cleanPet() {
-            fetch(API_BASE + '/api/pet/clean', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ device_id: 'ESP32_001' })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('✅ Pet cleaned successfully!');
-                    alert('🧹 Pet area cleaned! Cleanliness: ' + data.cleanliness + '%');
-                } else {
-                    console.error('❌ Failed to clean pet:', data.message);
-                    alert('❌ Error: ' + data.message);
-                }
-            })
-            .catch(error => {
-                console.error('❌ Error cleaning pet:', error);
-                alert('❌ Connection error: ' + error);
-            });
-        }
         
         function getOLEDDisplay() {
             // Add timeout to fetch request
@@ -1057,6 +1009,11 @@
             // Update sound data
             if (data.sound_data !== undefined) {
                 document.getElementById('soundValue').textContent = data.sound_data;
+            }
+
+            // Update chip temperature
+            if (data.chip_temperature !== undefined) {
+                document.getElementById('chipTemp').innerHTML = data.chip_temperature.toFixed(1) + '<span style="font-size: 0.6em;"> °C</span>';
             }
 
             // Update camera image

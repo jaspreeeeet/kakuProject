@@ -148,6 +148,15 @@ unsigned long gameStartTime = 0;
 unsigned long holdStartTime = 0;
 bool holdingLeft = false;
 
+// Health Menu Medicine Variables
+bool petIsSick = false;  // Track if pet is sick (to be managed by backend in future)
+bool givingMedicine = false;  // Track if medicine animation is playing
+int medicineAnimLoopCount = 0;  // Count how many times animation has looped
+unsigned long medicineHoldStartTime = 0;  // Track when tilt started for medicine
+bool holdingLeftForMedicine = false;  // Track if holding left tilt for medicine
+unsigned long medicineAnimStartTime = 0;  // Track animation start time
+int currentInjectionFrame = 0;  // Current frame in injection animation
+
 // Smooth control
 float filteredX = 0;
 float velocity = 0;
@@ -250,6 +259,9 @@ struct SensorData {
     String device_orientation;
     float orientation_confidence;
     float calibrated_ax, calibrated_ay, calibrated_az;
+    
+    // ESP32 internal temperature
+    float chip_temperature;  // Internal chip temperature in °C
     
     // NEW: Batch of sensor readings for better step detection
     SensorDataBatch sensor_batch;
@@ -1170,15 +1182,121 @@ void drawStaticHealthIcon() {
 
 // Display health menu screen ❤️
 void displayHealthMenu() {
+    // If currently giving medicine (animation playing)
+    if (givingMedicine) {
+        playInjectionAnimation();
+        return;
+    }
+    
     display.clearDisplay();
     
     // Draw static heart icon at top-left
     drawStaticHealthIcon();
     
-    // TODO: Add health status display (bar, percentage, etc.) in future
-    Serial.println("❤️ HEALTH_MENU: Showing health heart icon");
+    // Display text based on pet health status
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    
+    if (petIsSick) {
+        // Show "Give Medicine" text at center
+        display.setCursor(4, 12);
+        display.print("Give Med");
+        
+        // Check for tilt gesture to give medicine
+        checkMedicineGesture();
+        Serial.println("❤️ HEALTH_MENU: Pet is SICK - Give Medicine");
+    } else {
+        // Show "All Good" text at center
+        display.setCursor(10, 12);
+        display.print("All Good");
+        Serial.println("❤️ HEALTH_MENU: Pet is healthy - All Good");
+    }
     
     display.display();
+}
+
+// Check for medicine gesture (hold left tilt for 3 seconds)
+void checkMedicineGesture() {
+    if (!mpuAvailable || !petIsSick) return;
+    
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    
+    float accelX = ax / 16384.0;
+    
+    // Check if tilting left (same threshold as game)
+    if (accelX < -0.8) {
+        if (!holdingLeftForMedicine) {
+            holdingLeftForMedicine = true;
+            medicineHoldStartTime = millis();
+            Serial.println("💊 Medicine gesture started...");
+        }
+        
+        // Check if held for 3 seconds
+        if (millis() - medicineHoldStartTime > 3000) {
+            // Start medicine animation
+            givingMedicine = true;
+            medicineAnimLoopCount = 0;
+            currentInjectionFrame = 0;
+            medicineAnimStartTime = millis();
+            holdingLeftForMedicine = false;
+            Serial.println("💉 Starting medicine injection animation!");
+        }
+    } else {
+        holdingLeftForMedicine = false;
+    }
+}
+
+// Play injection animation (34 frames, loop 3 times)
+void playInjectionAnimation() {
+    display.clearDisplay();
+    
+    // Draw current frame of injection animation
+    for (uint16_t y = 0; y < INJECTION_HEIGHT; y++) {
+        for (uint16_t x = 0; x < INJECTION_WIDTH; x++) {
+            uint16_t byteIndex = y * ((INJECTION_WIDTH + 7) / 8) + (x / 8);
+            uint8_t bitIndex = 7 - (x % 8);
+            
+            if (pgm_read_byte(&injection_frames[currentInjectionFrame][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x, y, SSD1306_WHITE);
+            }
+        }
+    }
+    
+    display.display();
+    
+    // Check if it's time to advance to next frame
+    if (millis() - medicineAnimStartTime > pgm_read_word(&injection_delays[currentInjectionFrame])) {
+        currentInjectionFrame++;
+        medicineAnimStartTime = millis();
+        
+        // Check if one loop is complete
+        if (currentInjectionFrame >= INJECTION_FRAME_COUNT) {
+            currentInjectionFrame = 0;
+            medicineAnimLoopCount++;
+            Serial.printf("💊 Medicine animation loop %d/3 complete\n", medicineAnimLoopCount);
+            
+            // Check if all 3 loops are done
+            if (medicineAnimLoopCount >= 3) {
+                // Animation complete - cure the pet
+                givingMedicine = false;
+                petIsSick = false;
+                medicineAnimLoopCount = 0;
+                currentInjectionFrame = 0;
+                Serial.println("✅ Medicine given! Pet is now healthy!");
+                
+                // Show "All Good" message for a moment
+                display.clearDisplay();
+                drawStaticHealthIcon();
+                display.setTextSize(1);
+                display.setTextColor(SSD1306_WHITE);
+                display.setCursor(10, 12);
+                display.print("All Good");
+                display.display();
+                delay(2000);  // Show for 2 seconds
+            }
+        }
+    }
 }
 
 // ================= CAMERA COVER DETECTION FOR MENU SWITCHING =================
@@ -1951,6 +2069,9 @@ SensorData readAllSensors() {
         data.sound_data = 0;
     }
     
+    // Read ESP32 internal chip temperature
+    data.chip_temperature = temperatureRead();
+    
     // Initialize image/audio fields
     data.camera_image_b64 = "";
     data.audio_data_b64 = "";
@@ -2210,6 +2331,7 @@ bool sendSensorDataOnly(SensorData data) {
     g_sensorDoc["gyro_z"] = data.gyro_z;
     g_sensorDoc["mic_level"] = data.mic_level;
     g_sensorDoc["sound_data"] = data.sound_data;
+    g_sensorDoc["chip_temperature"] = data.chip_temperature;  // ESP32 internal temperature
     
     // Add sensor batch with all buffered readings
     JsonObject batchObj = g_sensorDoc.createNestedObject("sensor_batch");
@@ -2243,6 +2365,7 @@ bool sendSensorDataOnly(SensorData data) {
                      data.accel_x, data.accel_y, data.accel_z);
         Serial.printf("    Gyro:  X=%.2f, Y=%.2f, Z=%.2f °/s\n", 
                      data.gyro_x, data.gyro_y, data.gyro_z);
+        Serial.printf("    Chip Temp: %.1f °C\n", data.chip_temperature);
         Serial.printf("    Orient: %s (%.1f%% confidence)\n", 
                      data.device_orientation.c_str(), data.orientation_confidence);
         digitalWrite(LED_PIN, HIGH);

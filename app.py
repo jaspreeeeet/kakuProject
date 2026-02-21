@@ -475,7 +475,8 @@ def init_database():
                     orientation_confidence REAL,
                     calibrated_ax REAL,
                     calibrated_ay REAL,
-                    calibrated_az REAL
+                    calibrated_az REAL,
+                    chip_temperature REAL
                 )
             ''')
             
@@ -517,6 +518,11 @@ def init_database():
             if 'step_count' not in columns:
                 cursor.execute("ALTER TABLE sensor_readings ADD COLUMN step_count INTEGER DEFAULT 0")
                 print("✅ Added step_count column")
+            
+            # Add chip_temperature column for ESP32 internal temperature
+            if 'chip_temperature' not in columns:
+                cursor.execute("ALTER TABLE sensor_readings ADD COLUMN chip_temperature REAL")
+                print("✅ Added chip_temperature column")
             
             # Create step_statistics table for aggregated step data
             cursor.execute('''
@@ -1301,7 +1307,8 @@ def receive_sensor_data():
                         'gyro_y': data.get('gyro_y', 0),
                         'gyro_z': data.get('gyro_z', 0),
                         'mic_level': data.get('mic_level', 0),
-                        'sound_data': data.get('sound_data', 0)
+                        'sound_data': data.get('sound_data', 0),
+                        'chip_temperature': data.get('chip_temperature', 0)
                     })
             
             def emit_orientation():
@@ -1833,107 +1840,6 @@ def mark_event_received():
 
 # ==================== PET ACTION ENDPOINTS ====================
 
-@app.route('/api/pet/feed', methods=['POST'])
-def pet_feed():
-    """Feed the pet - reduces hunger, schedules digestion/poop"""
-    try:
-        data = request.get_json() or {}
-        device_id = data.get('device_id', 'ESP32_001')
-        
-        state = get_pet_state(device_id)
-        if not state:
-            return jsonify({'status': 'error', 'message': 'Pet not found'}), 404
-        
-        from datetime import datetime, timedelta
-        
-        # Set action lock
-        updates = {
-            'action_lock': 1
-        }
-        update_pet_state_atomic(device_id, updates)
-        
-        # Feed logic
-        updates = {
-            'hunger': max(0, state['hunger'] - 40),
-            'last_feed_time': datetime.now().isoformat(),
-            'digestion_due_time': (datetime.now() + timedelta(minutes=30)).isoformat(),
-            'current_emotion': 'EATING',
-            'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat(),
-            'action_lock': 0
-        }
-        
-        result = update_pet_state_atomic(device_id, updates)
-        
-        if result:
-            print(f"🍔 Pet fed: hunger {state['hunger']} → {result['hunger']}")
-            return jsonify({
-                'status': 'success',
-                'message': 'Pet fed successfully',
-                'hunger': result['hunger'],
-                'emotion': result['current_emotion'],
-                'digestion_due': result['digestion_due_time']
-            }), 200
-        else:
-            return jsonify({'status': 'error', 'message': 'Failed to feed pet'}), 500
-            
-    except Exception as e:
-        print(f'❌ Error feeding pet: {e}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/api/pet/clean', methods=['POST'])
-def pet_clean():
-    """Clean the pet - removes poop, restores cleanliness, boosts health"""
-    try:
-        data = request.get_json() or {}
-        device_id = data.get('device_id', 'ESP32_001')
-        
-        state = get_pet_state(device_id)
-        if not state:
-            return jsonify({'status': 'error', 'message': 'Pet not found'}), 404
-        
-        from datetime import datetime, timedelta
-        
-        if not state['poop_present']:
-            return jsonify({
-                'status': 'success',
-                'message': 'Already clean',
-                'emotion': 'IDLE'
-            }), 200
-        
-        # Set action lock
-        updates = {'action_lock': 1}
-        update_pet_state_atomic(device_id, updates)
-        
-        # Clean logic
-        updates = {
-            'poop_present': 0,
-            'poop_timestamp': None,
-            'cleanliness': 100,
-            'health': min(100, state['health'] + 5),
-            'last_clean_time': datetime.now().isoformat(),
-            'current_emotion': 'CLEAN_SUCCESS',
-            'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat(),
-            'action_lock': 0
-        }
-        
-        result = update_pet_state_atomic(device_id, updates)
-        
-        if result:
-            print(f"🧹 Pet cleaned: health {state['health']} → {result['health']}")
-            return jsonify({
-                'status': 'success',
-                'message': 'Pet cleaned successfully',
-                'cleanliness': result['cleanliness'],
-                'health': result['health'],
-                'emotion': result['current_emotion']
-            }), 200
-        else:
-            return jsonify({'status': 'error', 'message': 'Failed to clean pet'}), 500
-            
-    except Exception as e:
-        print(f'❌ Error cleaning pet: {e}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
 @app.route('/api/pet/inject', methods=['POST'])
 def pet_inject():
     """Give pet injection - restores health when sick"""
@@ -2195,8 +2101,8 @@ def store_sensor_data(data):
             cursor.execute('''
                 INSERT INTO sensor_readings 
                 (device_id, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mic_level,
-                 device_orientation, orientation_confidence, calibrated_ax, calibrated_ay, calibrated_az, step_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 device_orientation, orientation_confidence, calibrated_ax, calibrated_ay, calibrated_az, step_count, chip_temperature)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 data.get('device_id', 'ESP32_001'),
                 data.get('accel_x', 0),
@@ -2211,7 +2117,8 @@ def store_sensor_data(data):
                 data.get('calibrated_ax', 0),
                 data.get('calibrated_ay', 0),
                 data.get('calibrated_az', 0),
-                data.get('step_count', 0)
+                data.get('step_count', 0),
+                data.get('chip_temperature', 0)
             ))
             
             # 🚨 EVENT DETECTION LOGIC
@@ -3145,8 +3052,6 @@ if __name__ == '__main__':
     print('   • POST /upload (Binary, ~1-3KB)')  
     print('   • POST /upload-audio (JSON, ~32KB+)')
     print('   • GET  /api/oled-display/get (Pet AI state)')
-    print('   • POST /api/pet/feed')
-    print('   • POST /api/pet/clean')
     print('   • POST /api/pet/inject')
     print('   • POST /api/pet/play-result')
     print('   • POST /api/pet/menu')
