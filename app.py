@@ -1500,6 +1500,7 @@ def upload_binary_image():
             updates = {
                 'hunger': max(0, state['hunger'] - 40),
                 'last_feed_time': datetime.now().isoformat(),
+                'last_hunger_update': datetime.now().isoformat(),  # CRITICAL: Reset hunger timer to prevent immediate re-increase
                 'digestion_due_time': (datetime.now() + timedelta(minutes=30)).isoformat(),
                 'current_emotion': 'EATING',
                 'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat()
