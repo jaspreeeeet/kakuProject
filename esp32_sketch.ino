@@ -157,6 +157,16 @@ bool holdingLeftForMedicine = false;  // Track if holding left tilt for medicine
 unsigned long medicineAnimStartTime = 0;  // Track animation start time
 int currentInjectionFrame = 0;  // Current frame in injection animation
 
+// Food Menu Feeding Gesture Variables
+bool holdingLeftForFeeding = false;  // Track if holding left tilt for feeding
+unsigned long feedingHoldStartTime = 0;  // Track when tilt started for feeding
+bool capturingForFeeding = false;  // Flag to pause cover detection during feeding
+unsigned long feedingGestureStartTime = 0;  // Track when feeding gesture was triggered
+#define FEEDING_TIMEOUT 30000  // 30 second timeout for feeding gesture
+bool justFedPet = false;  // Flag to ignore server hunger updates after feeding
+unsigned long lastFeedTime = 0;  // Track when pet was last fed
+#define FEED_IGNORE_DURATION 10000  // Ignore server hunger updates for 10 seconds after feeding
+
 // Smooth control
 float filteredX = 0;
 float velocity = 0;
@@ -812,21 +822,24 @@ void displayFoodMenu() {
                 break;
         }
     } else if (showFoodIcon) {
-        // Pet is HUNGRY - show age-appropriate SAD animation or fallback
-        Serial.printf("🍽️ FOOD_MENU: Pet HUNGRY (Age: %d) - showing SAD\n", petAge);
+        // Pet is HUNGRY - show CRYING animation and check for feeding gesture
+        Serial.printf("🍽️ FOOD_MENU: Pet HUNGRY (Age: %d) - showing CRYING\n", petAge);
+        
+        // Check for tilt gesture to trigger feeding
+        checkFeedingGesture();
         
         switch (petAge) {
             case INFANT: {
-                // INFANT has SAD animation
-                uint8_t sadFrame = (millis() / infant_sad_delays[0]) % INFANT_SAD_FRAME_COUNT;
-                const uint8_t* frameData = infant_sad_frames[sadFrame];
-                display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
+                // INFANT has CRYING animation
+                uint8_t cryFrame = (millis() / infant_cry_delays[0]) % INFANT_CRY_FRAME_COUNT;
+                const uint8_t* frameData = infant_cry_frames[cryFrame];
+                display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
                 break;
             }
             case CHILD:
             case ADULT:
             case OLD:
-                // These ages don't have SAD animations yet - use simple sad face
+                // These ages don't have CRY animations yet - use simple sad face
                 drawSimpleSadFace();
                 break;
         }
@@ -1247,6 +1260,45 @@ void checkMedicineGesture() {
     }
 }
 
+// Check for feeding gesture (tilt left + hold 3 seconds)
+void checkFeedingGesture() {
+    if (!mpuAvailable) return;
+    
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    
+    float accelX = ax / 16384.0;
+    
+    // Check if tilting left (same threshold as game)
+    if (accelX < -0.8) {
+        if (!holdingLeftForFeeding) {
+            holdingLeftForFeeding = true;
+            feedingHoldStartTime = millis();
+            Serial.println("🍽️ Feeding gesture started...");
+        }
+        
+        // Check if held for 3 seconds
+        if (millis() - feedingHoldStartTime > 3000) {
+            // Trigger image capture for feeding
+            capturingForFeeding = true;
+            feedingGestureStartTime = millis();  // Start timeout timer
+            holdingLeftForFeeding = false;
+            imageAlreadySentThisSession = true;
+            
+            // Start eating animation immediately
+            isUploadingImage = true;
+            Serial.println("📸 Triggering food image capture!");
+            Serial.println("🍴 Starting eating animation!");
+            
+            // Queue image send
+            uint8_t req = NET_IMAGE;
+            xQueueSend(networkQueue, &req, 0);
+        }
+    } else {
+        holdingLeftForFeeding = false;
+    }
+}
+
 // Play injection animation (34 frames, loop 3 times)
 void playInjectionAnimation() {
     display.clearDisplay();
@@ -1644,19 +1696,15 @@ void loop() {
         }
     }
     
-    // ── CAMERA IMAGE CHECK (non-blocking: just inspect mutex buffer) ───────────
-    if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (cameraImageReady && capturedImageBuffer != NULL &&
-            currentMode == "AUTOMATIC" && currentScreenType == "FOOD_MENU" &&
-            petIsHungry && !imageAlreadySentThisSession) {
-            imageAlreadySentThisSession = true;
-            xSemaphoreGive(cameraMutex);
-            Serial.println("📸 Queue: NET_IMAGE (food detection)");
-            uint8_t req = NET_IMAGE;
-            xQueueSend(networkQueue, &req, 0);
-        } else {
-            xSemaphoreGive(cameraMutex);
-        }
+    // ── CAMERA IMAGE CHECK (DISABLED - Manual feeding via tilt gesture) ───────────
+    // Auto-send removed: User must tilt+hold left for 3 seconds to feed
+    
+    // ── FEEDING GESTURE TIMEOUT CHECK ─────────────────────────────────────────
+    // Reset feeding flag if stuck for more than 30 seconds
+    if (capturingForFeeding && (millis() - feedingGestureStartTime > FEEDING_TIMEOUT)) {
+        Serial.println("⚠️ Feeding gesture timeout - resetting flags");
+        capturingForFeeding = false;
+        isUploadingImage = false;  // Also reset eating animation
     }
     
     // ── STAGGERED NETWORK SCHEDULER (FIX 5) ───────────────────────────────────
@@ -1839,9 +1887,12 @@ void cameraMonitorTask(void *parameter) {
                 bool isBlack = isFrameMostlyBlack(fb);
                 unsigned long now = millis();
                 
-                // PAUSE cover detection during game
+                // PAUSE cover detection during game or feeding
                 if (playGameState == GAME_PLAYING) {
                     Serial.println("🎮 Game active - PAUSING cover detection");
+                    consecutiveBlackFrames = 0;  // Reset counter
+                } else if (capturingForFeeding) {
+                    Serial.println("🍽️ Feeding in progress - PAUSING cover detection");
                     consecutiveBlackFrames = 0;  // Reset counter
                 } else if (isBlack) {
                     consecutiveBlackFrames++;
@@ -2131,7 +2182,9 @@ void getOLEDDisplayFromServer() {
                 }
             }
             
-            // NEW: Handle screen_type / screen_state
+            // NEW: Handle screen_type / screen_state (DISABLED - ESP32 controls menu locally)
+            // Server menu override disabled to allow local camera cover menu navigation
+            /*
             if (g_oledDoc.containsKey("screen_type")) {
                 String newScreenType = g_oledDoc["screen_type"].as<String>();
                 if (currentScreenType == "FOOD_MENU" && newScreenType != "FOOD_MENU") {
@@ -2147,6 +2200,7 @@ void getOLEDDisplayFromServer() {
                 currentScreenType = newScreenState;
                 Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
             }
+            */
             
             if (currentScreenType == "MAIN") {
                 showHomeIcon = true;
@@ -2156,9 +2210,17 @@ void getOLEDDisplayFromServer() {
             
             if (g_oledDoc.containsKey("show_food_icon")) {
                 bool newShowFood = g_oledDoc["show_food_icon"].as<bool>();
-                if (showFoodIcon != newShowFood) {
-                    showFoodIcon = newShowFood;
-                    Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
+                
+                // Ignore server food icon updates for 10 seconds after feeding
+                // This gives server time to process image and reduce hunger
+                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+                    Serial.println("🍽️  Ignoring server food icon (just fed, waiting for sync)");
+                } else {
+                    justFedPet = false;  // Resume accepting server updates
+                    if (showFoodIcon != newShowFood) {
+                        showFoodIcon = newShowFood;
+                        Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
+                    }
                 }
             }
             
@@ -2170,8 +2232,13 @@ void getOLEDDisplayFromServer() {
             Serial.println("🤖 Mode: AUTOMATIC (forced)");
             
             if (g_oledDoc.containsKey("is_hungry")) {
-                petIsHungry = g_oledDoc["is_hungry"].as<bool>();
-                Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
+                // Ignore server hunger updates for 10 seconds after feeding
+                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+                    Serial.println("🍽️  Ignoring server hunger status (just fed, waiting for sync)");
+                } else {
+                    petIsHungry = g_oledDoc["is_hungry"].as<bool>();
+                    Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
+                }
             }
             
             if (g_oledDoc.containsKey("current_emotion")) {
@@ -2188,13 +2255,20 @@ void getOLEDDisplayFromServer() {
                 }
             }
             
+            // DISABLED: Server menu control removed - ESP32 controls menu locally via camera cover
+            /*
             if (g_oledDoc.containsKey("current_menu")) {
                 String menu = g_oledDoc["current_menu"].as<String>();
-                if (currentScreenType != menu) {
+                
+                // Don't allow server to override menu during feeding gesture
+                if (capturingForFeeding) {
+                    Serial.println("🍽️ Feeding in progress - ignoring server menu override");
+                } else if (currentScreenType != menu) {
                     currentScreenType = menu;
                     Serial.printf("📱 Menu Changed: %s\n", currentScreenType.c_str());
                 }
             }
+            */
         }
     }
     
@@ -2255,8 +2329,13 @@ void notifyServerStartupComplete() {
                 Serial.printf("   Home icon: %s\n", showHomeIcon ? "ENABLED" : "DISABLED");
             }
             if (responseDoc.containsKey("show_food_icon")) {
-                showFoodIcon = responseDoc["show_food_icon"].as<bool>();
-                Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
+                // Ignore during startup or if just fed
+                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+                    Serial.println("🍽️  Ignoring startup food icon (just fed)");
+                } else {
+                    showFoodIcon = responseDoc["show_food_icon"].as<bool>();
+                    Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
+                }
             }
         } else {
             Serial.printf("⚠️  JSON parse error: %s\n", error.c_str());
@@ -2382,10 +2461,12 @@ bool sendSensorDataOnly(SensorData data) {
 void sendImageData(String imageBase64) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("⚠️ WiFi not connected");
+        isUploadingImage = false;  // Reset upload flag
+        capturingForFeeding = false;  // Reset feeding flag
         return;
     }
 
-    isUploadingImage = true;
+    isUploadingImage = true;  // Ensure flag is set (may already be set from gesture)
     
     // Get binary data from Core 0 with mutex protection
     uint8_t* binary_data = NULL;
@@ -2412,6 +2493,7 @@ void sendImageData(String imageBase64) {
     if (!binary_data || data_length == 0) {
         Serial.println("⚠️ No image data to send");
         isUploadingImage = false;
+        capturingForFeeding = false;  // Reset feeding flag
         return;
     }
 
@@ -2428,15 +2510,27 @@ void sendImageData(String imageBase64) {
         Serial.println("❌ HTTP begin failed");
         free(binary_data);
         isUploadingImage = false;
+        capturingForFeeding = false;  // Reset feeding flag
         return;
     }
 
     http.addHeader("Content-Type", "application/octet-stream");
+    http.addHeader("X-Feeding-Action", "true");  // Tell server this is a feeding action
 
     int httpCode = http.sendRequest("POST", binary_data, data_length);
 
     if (httpCode == 200) {
         Serial.println("✅ Image uploaded successfully");
+        
+        // Reset feeding flag
+        capturingForFeeding = false;
+        
+        // Reset hunger indicators locally (server will sync)
+        showFoodIcon = false;
+        petIsHungry = false;
+        justFedPet = true;  // Ignore server updates for 10 seconds
+        lastFeedTime = millis();
+        Serial.println("🍽️ Feeding complete - hunger reset locally (ignoring server for 10s)");
         
         // NEW: Trigger "eating finished" state to show GOOD! text
         // Image upload = feeding complete (the frame IS the food)
@@ -2449,6 +2543,9 @@ void sendImageData(String imageBase64) {
         Serial.printf("❌ Upload failed: %d (%s)\n",
                       httpCode,
                       http.errorToString(httpCode).c_str());
+        
+        // Reset feeding flag even on failure
+        capturingForFeeding = false;
     }
 
     http.end();
