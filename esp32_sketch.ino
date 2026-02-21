@@ -167,6 +167,14 @@ bool justFedPet = false;  // Flag to ignore server hunger updates after feeding
 unsigned long lastFeedTime = 0;  // Track when pet was last fed
 #define FEED_IGNORE_DURATION 10000  // Ignore server hunger updates for 10 seconds after feeding
 
+// Toilet Menu Cleaning Gesture Variables
+bool holdingLeftForCleaning = false;  // Track if holding left tilt for cleaning
+unsigned long cleaningHoldStartTime = 0;  // Track when tilt started for cleaning
+bool isCleaningPoop = false;  // Flag for cleaning in progress
+int cleaningFadeStep = 0;  // Fade animation step (0-10)
+unsigned long cleaningStartTime = 0;  // When cleaning animation started
+bool justCleanedPet = false;  // Flag to show "Cleared" after cleaning
+
 // Smooth control
 float filteredX = 0;
 float velocity = 0;
@@ -283,7 +291,8 @@ enum NetReqType : uint8_t {
     NET_SENSOR = 0,  // Send sensor batch to server
     NET_OLED   = 1,  // Poll OLED display state from server
     NET_EVENTS = 2,  // Poll server for events
-    NET_IMAGE  = 3   // Upload camera image to server
+    NET_IMAGE  = 3,  // Upload camera image to server
+    NET_CLEAN  = 4   // Send cleaning request to server
 };
 
 QueueHandle_t networkQueue;           // Queue: loop() → networkTask
@@ -877,6 +886,48 @@ void displayToiletMenu() {
     // Draw static toilet icon at top-left (no blinking)
     drawStaticToiletIcon();
     
+    // Display text based on poop status
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    
+    if (isCleaningPoop) {
+        // Fade out "Clean me" text during cleaning animation
+        if (cleaningFadeStep < 10) {
+            // Draw fading text (skip pixels based on fade step)
+            display.setCursor(10, 12);
+            
+            // Simple fade by drawing text with varying brightness simulation
+            // (SSD1306 doesn't support grayscale, so we skip pixels)
+            if (cleaningFadeStep % 2 == 0) {
+                display.print("Clean me");
+            }
+            
+            // Update fade step
+            if (millis() - cleaningStartTime > 200) {
+                cleaningFadeStep++;
+                cleaningStartTime = millis();
+            }
+        } else {
+            // Show "Cleared" after fade complete
+            display.setCursor(10, 12);
+            display.print("Cleared");
+            
+            // Stop cleaning animation after showing message
+            if (millis() - cleaningStartTime > 2000) {
+                isCleaningPoop = false;
+                justCleanedPet = true;
+            }
+        }
+    } else if (showPoopIcon) {
+        // Poop present - show "Clean me" prompt
+        display.setCursor(10, 12);
+        display.print("Clean me");
+    } else {
+        // No poop - show "Cleared" status
+        display.setCursor(10, 12);
+        display.print("Cleared");
+    }
+    
     display.display();
 }
 
@@ -1299,6 +1350,48 @@ void checkFeedingGesture() {
     }
 }
 
+// Check for cleaning gesture in toilet menu (tilt left + hold 3 seconds)
+void checkCleaningGesture() {
+    if (!mpuAvailable) return;
+    if (!showPoopIcon) return;  // Only clean if poop present
+    
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    
+    float accelX = ax / 16384.0;
+    
+    // Check if tilting left
+    if (accelX < -0.8) {
+        if (!holdingLeftForCleaning) {
+            holdingLeftForCleaning = true;
+            cleaningHoldStartTime = millis();
+            Serial.println("🚽 Cleaning gesture started...");
+        }
+        
+        // Check if held for 3 seconds
+        if (millis() - cleaningHoldStartTime > 3000 && !isCleaningPoop) {
+            // Start cleaning animation
+            isCleaningPoop = true;
+            cleaningFadeStep = 0;
+            cleaningStartTime = millis();
+            holdingLeftForCleaning = false;
+            
+            Serial.println("🧹 Starting cleaning animation!");
+            
+            // Send cleaning request to server
+            uint8_t req = NET_CLEAN;
+            xQueueSend(networkQueue, &req, 0);
+        }
+    } else {
+        holdingLeftForCleaning = false;
+    }
+}
+        }
+    } else {
+        holdingLeftForFeeding = false;
+    }
+}
+
 // Play injection animation (34 frames, loop 3 times)
 void playInjectionAnimation() {
     display.clearDisplay();
@@ -1482,6 +1575,8 @@ void displayPetAnimation() {
             displayFoodMenu();
             return;  // Exit early
         } else if (currentScreenType == "TOILET_MENU") {
+            // Check for cleaning gesture in toilet menu
+            checkCleaningGesture();
             displayToiletMenu();
             return;  // Exit early
         } else if (currentScreenType == "PLAY_MENU") {
@@ -1633,6 +1728,11 @@ void networkTask(void *parameter) {
                     setCpuFrequencyMhz(160);  // Boost for binary image upload
                     sendImageData("");         // Uses shared capturedImageBuffer
                     setCpuFrequencyMhz(80);
+                    break;
+                
+                case NET_CLEAN:
+                    // Lightweight cleaning request
+                    sendCleanRequest();
                     break;
             }
             vTaskDelay(pdMS_TO_TICKS(20));  // Brief settle between requests
@@ -2208,21 +2308,22 @@ void getOLEDDisplayFromServer() {
                 showHomeIcon = false;
             }
             
-            if (g_oledDoc.containsKey("show_food_icon")) {
-                bool newShowFood = g_oledDoc["show_food_icon"].as<bool>();
-                
-                // Ignore server food icon updates for 10 seconds after feeding
-                // This gives server time to process image and reduce hunger
-                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
-                    Serial.println("🍽️  Ignoring server food icon (just fed, waiting for sync)");
-                } else {
-                    justFedPet = false;  // Resume accepting server updates
-                    if (showFoodIcon != newShowFood) {
-                        showFoodIcon = newShowFood;
-                        Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
-                    }
-                }
-            }
+            // DISABLED: Server hunger state (controlled locally by feeding gesture)
+            // if (g_oledDoc.containsKey("show_food_icon")) {
+            //     bool newShowFood = g_oledDoc["show_food_icon"].as<bool>();
+            //     
+            //     // Ignore server food icon updates for 10 seconds after feeding
+            //     // This gives server time to process image and reduce hunger
+            //     if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+            //         Serial.println("🍽️  Ignoring server food icon (just fed, waiting for sync)");
+            //     } else {
+            //         justFedPet = false;  // Resume accepting server updates
+            //         if (showFoodIcon != newShowFood) {
+            //             showFoodIcon = newShowFood;
+            //             Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
+            //         }
+            //     }
+            // }
             
             if (g_oledDoc.containsKey("show_poop_icon")) {
                 showPoopIcon = g_oledDoc["show_poop_icon"].as<bool>();
@@ -2231,15 +2332,16 @@ void getOLEDDisplayFromServer() {
             
             Serial.println("🤖 Mode: AUTOMATIC (forced)");
             
-            if (g_oledDoc.containsKey("is_hungry")) {
-                // Ignore server hunger updates for 10 seconds after feeding
-                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
-                    Serial.println("🍽️  Ignoring server hunger status (just fed, waiting for sync)");
-                } else {
-                    petIsHungry = g_oledDoc["is_hungry"].as<bool>();
-                    Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
-                }
-            }
+            // DISABLED: Server hunger state (controlled locally by feeding gesture)
+            // if (g_oledDoc.containsKey("is_hungry")) {
+            //     // Ignore server hunger updates for 10 seconds after feeding
+            //     if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+            //         Serial.println("🍽️  Ignoring server hunger status (just fed, waiting for sync)");
+            //     } else {
+            //         petIsHungry = g_oledDoc["is_hungry"].as<bool>();
+            //         Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
+            //     }
+            // }
             
             if (g_oledDoc.containsKey("current_emotion")) {
                 String emotion = g_oledDoc["current_emotion"].as<String>();
@@ -2328,15 +2430,17 @@ void notifyServerStartupComplete() {
                 showHomeIcon = responseDoc["show_home_icon"].as<bool>();
                 Serial.printf("   Home icon: %s\n", showHomeIcon ? "ENABLED" : "DISABLED");
             }
-            if (responseDoc.containsKey("show_food_icon")) {
-                // Ignore during startup or if just fed
-                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
-                    Serial.println("🍽️  Ignoring startup food icon (just fed)");
-                } else {
-                    showFoodIcon = responseDoc["show_food_icon"].as<bool>();
-                    Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
-                }
-            }
+            
+            // DISABLED: Server hunger state (controlled locally by feeding gesture)
+            // if (responseDoc.containsKey("show_food_icon")) {
+            //     // Ignore during startup or if just fed
+            //     if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+            //         Serial.println("🍽️  Ignoring startup food icon (just fed)");
+            //     } else {
+            //         showFoodIcon = responseDoc["show_food_icon"].as<bool>();
+            //         Serial.printf("   Food icon: %s\n", showFoodIcon ? "ENABLED" : "DISABLED");
+            //     }
+            // }
         } else {
             Serial.printf("⚠️  JSON parse error: %s\n", error.c_str());
         }
@@ -2794,6 +2898,51 @@ void pollForEvents() {
     
     http.end();
     Serial.println("");
+}
+
+// Send cleaning request to server (remove poop)
+void sendCleanRequest() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected, cannot send cleaning request");
+        return;
+    }
+    
+    HTTPClient http;
+    http.setReuse(true);
+    http.setTimeout(5000);
+    
+    String cleanUrl = String(serverBaseUrl) + "/api/pet/clean";
+    Serial.println("🧹 Sending cleaning request to server...");
+    
+    if (!http.begin(cleanUrl)) {
+        Serial.println("❌ Failed to initialize HTTP client for cleaning");
+        return;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    
+    // Empty POST body
+    int httpCode = http.POST("{}");
+    
+    if (httpCode > 0) {
+        Serial.printf("📡 Server response: %d\n", httpCode);
+        
+        if (httpCode == HTTP_CODE_OK) {
+            String response = http.getString();
+            Serial.println("✅ Cleaning successful!");
+            Serial.println(response);
+            
+            // Reset local poop icon
+            showPoopIcon = false;
+            Serial.println("💩 Poop icon cleared locally");
+        } else {
+            Serial.printf("⚠️ Unexpected response code: %d\n", httpCode);
+        }
+    } else {
+        Serial.printf("❌ Cleaning request failed: %s\n", http.errorToString(httpCode).c_str());
+    }
+    
+    http.end();
 }
 
 void processEvent(const char* event_type, const char* message) {

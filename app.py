@@ -1890,6 +1890,54 @@ def pet_inject():
         print(f'❌ Error injecting pet: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/pet/clean', methods=['POST'])
+def pet_clean():
+    """Clean poop - removes poop_present and resets cleanliness"""
+    try:
+        data = request.get_json() or {}
+        device_id = data.get('device_id', 'ESP32_001')
+        
+        state = get_pet_state(device_id)
+        if not state:
+            return jsonify({'status': 'error', 'message': 'Pet not found'}), 404
+        
+        from datetime import datetime
+        
+        if not state['poop_present']:
+            return jsonify({
+                'status': 'success',
+                'message': 'No poop to clean',
+                'poop_present': False,
+                'cleanliness': state['cleanliness']
+            }), 200
+        
+        # Cleaning logic
+        updates = {
+            'poop_present': 0,
+            'poop_timestamp': None,
+            'cleanliness': 100,
+            'last_clean_time': datetime.now().isoformat(),
+            'current_emotion': 'HAPPY',
+            'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat()
+        }
+        
+        result = update_pet_state_atomic(device_id, updates)
+        
+        if result:
+            print(f"🧹 Pet cleaned: poop removed, cleanliness → 100")
+            return jsonify({
+                'status': 'success',
+                'message': 'Pet cleaned successfully',
+                'poop_present': False,
+                'cleanliness': 100
+            }), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Failed to clean pet'}), 500
+            
+    except Exception as e:
+        print(f'❌ Error cleaning pet: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/pet/play-result', methods=['POST'])
 def pet_play_result():
     """Process play game result - affects happiness"""
