@@ -902,8 +902,8 @@ void displayFoodMenu() {
                 display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
                 break;
             case OLD:
-                frameData = old_frames[0];  // OLD HAPPY
-                display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                frameData = old_happy[0];  // OLD HAPPY
+                display.drawBitmap(0, 0, frameData, OLD_HAPPY_WIDTH, OLD_HAPPY_HEIGHT, SSD1306_WHITE);
                 break;
         }
     } else if (showFoodIcon) {
@@ -921,10 +921,14 @@ void displayFoodMenu() {
                 display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
                 break;
             }
+            case OLD: {
+                uint8_t cryFrame = (millis() / old_cry_delays[0]) % OLD_CRY_FRAME_COUNT;
+                const uint8_t* frameData = old_cry[cryFrame];
+                display.drawBitmap(0, 0, frameData, OLD_CRY_WIDTH, OLD_CRY_HEIGHT, SSD1306_WHITE);
+                break;
+            }
             case CHILD:
             case ADULT:
-            case OLD:
-                // These ages don't have CRY animations yet - use simple sad face
                 drawSimpleSadFace();
                 break;
         }
@@ -946,8 +950,8 @@ void displayFoodMenu() {
                 display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
                 break;
             case OLD:
-                frameData = old_frames[0];  // OLD HAPPY
-                display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                frameData = old_happy[0];  // OLD HAPPY
+                display.drawBitmap(0, 0, frameData, OLD_HAPPY_WIDTH, OLD_HAPPY_HEIGHT, SSD1306_WHITE);
                 break;
         }
     }
@@ -1943,20 +1947,28 @@ void displayPetAnimation() {
             frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
             frameCount = INFANT_CRY_FRAME_COUNT;
             display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
+        } else if (currentEmotion == "CRY" && petAge == OLD) {
+            // OLD crying
+            frameData = old_cry[currentFrame % OLD_CRY_FRAME_COUNT];
+            frameCount = OLD_CRY_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, OLD_CRY_WIDTH, OLD_CRY_HEIGHT, SSD1306_WHITE);
         } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER" || currentEmotion == "POOP") {
             // SAD/HUNGER/POOP - sad animation (poop present = pet is uncomfortable)
             switch (petAge) {
                 case INFANT: {
-                    // INFANT has SAD animation
                     frameData = infant_sad_frames[currentFrame % INFANT_SAD_FRAME_COUNT];
                     frameCount = INFANT_SAD_FRAME_COUNT;
                     display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
                     break;
                 }
+                case OLD: {
+                    frameData = old_sad[currentFrame % OLD_SAD_FRAME_COUNT];
+                    frameCount = OLD_SAD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, OLD_SAD_WIDTH, OLD_SAD_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
                 case CHILD:
                 case ADULT:
-                case OLD:
-                    // These ages don't have SAD animations - use simple sad face
                     drawSimpleSadFace();
                     break;
             }
@@ -1977,8 +1989,8 @@ void displayPetAnimation() {
                     display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
                     break;
                 case OLD:
-                    frameData = old_frames[0];  // OLD IDLE
-                    display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                    frameData = old_happy[0];  // OLD IDLE (first happy frame, static)
+                    display.drawBitmap(0, 0, frameData, OLD_HAPPY_WIDTH, OLD_HAPPY_HEIGHT, SSD1306_WHITE);
                     break;
             }
         } else {
@@ -2000,9 +2012,9 @@ void displayPetAnimation() {
                     display.drawBitmap(0, 0, frameData, ADULT_WIDTH, ADULT_HEIGHT, SSD1306_WHITE);
                     break;
                 case OLD:
-                    frameData = old_frames[currentFrame % OLD_FRAME_COUNT];
-                    frameCount = OLD_FRAME_COUNT;
-                    display.drawBitmap(0, 0, frameData, OLD_WIDTH, OLD_HEIGHT, SSD1306_WHITE);
+                    frameData = old_happy[currentFrame % OLD_HAPPY_FRAME_COUNT];
+                    frameCount = OLD_HAPPY_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, OLD_HAPPY_WIDTH, OLD_HAPPY_HEIGHT, SSD1306_WHITE);
                     break;
             }
         }
