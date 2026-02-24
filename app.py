@@ -2253,6 +2253,7 @@ def get_oled_display():
                 'happiness': 100,
                 'energy': 100,
                 'poop_present': False,
+                'age': 0,
                 'show_home_icon': True,  # Show home icon on main screen
                 'show_food_icon': False,
                 'show_poop_icon': False,

@@ -1,0 +1,1228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KAKU — System Documentation &amp; Flow Reference</title>
+  <style>
+    /* ===== PRINT / SCREEN BASE ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-size: 11pt;
+      color: #1a1a2e;
+      background: #f0f4ff;
+      line-height: 1.5;
+    }
+
+    /* ===== PRINT STYLES ===== */
+    @media print {
+      body { background: #fff; font-size: 9.5pt; }
+      .page { box-shadow: none; margin: 0; padding: 14mm 16mm; page-break-after: always; }
+      .page:last-child { page-break-after: auto; }
+      .no-print { display: none; }
+      h1 { font-size: 18pt; }
+      h2 { font-size: 13pt; }
+      h3 { font-size: 10.5pt; }
+      .node { min-width: 110px; font-size: 8.5pt; }
+    }
+
+    /* ===== PAGES ===== */
+    .page {
+      background: #fff;
+      max-width: 960px;
+      margin: 24px auto;
+      padding: 36px 48px;
+      border-radius: 10px;
+      box-shadow: 0 4px 28px rgba(0,0,0,.10);
+    }
+
+    /* ===== HEADER ===== */
+    .doc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 3px solid #3a86ff;
+      padding-bottom: 14px;
+      margin-bottom: 28px;
+    }
+    .doc-header .brand { font-size: 2rem; font-weight: 900; color: #3a86ff; letter-spacing: -1px; }
+    .doc-header .subtitle { font-size: 0.82rem; color: #666; margin-top: 2px; }
+    .badge {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 20px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .badge-green  { background: #d4edda; color: #155724; }
+    .badge-orange { background: #fff3cd; color: #856404; }
+    .badge-blue   { background: #cce5ff; color: #004085; }
+    .badge-red    { background: #f8d7da; color: #721c24; }
+    .badge-gray   { background: #e9ecef; color: #343a40; }
+
+    /* ===== SECTIONS ===== */
+    h2 {
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: #1a1a2e;
+      margin: 28px 0 10px;
+      padding-left: 10px;
+      border-left: 4px solid #3a86ff;
+    }
+    h3 {
+      font-size: 0.98rem;
+      font-weight: 700;
+      color: #2d3561;
+      margin: 18px 0 8px;
+    }
+
+    /* ===== INFO GRID ===== */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .info-card {
+      background: #f8f9ff;
+      border: 1px solid #dce3f7;
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .info-card .label { font-size: 0.72rem; color: #888; text-transform: uppercase; font-weight: 700; letter-spacing: 0.06em; }
+    .info-card .value { font-size: 0.92rem; font-weight: 600; color: #1a1a2e; margin-top: 2px; word-break: break-all; }
+
+    /* ===== FLOW DIAGRAM ===== */
+    .flow-wrap {
+      overflow-x: auto;
+      padding: 8px 0 16px;
+    }
+    .flow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+    .flow-row {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      flex-wrap: nowrap;
+    }
+
+    /* nodes */
+    .node {
+      border-radius: 8px;
+      padding: 8px 14px;
+      min-width: 130px;
+      max-width: 180px;
+      text-align: center;
+      font-size: 0.82rem;
+      font-weight: 600;
+      line-height: 1.3;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .node-start  { background: #1a1a2e; color: #fff; border-radius: 40px; }
+    .node-action { background: #3a86ff; color: #fff; }
+    .node-check  { background: #ffbe0b; color: #1a1a2e; border-radius: 4px; transform: rotate(0deg); }
+    .node-diamond {
+      background: #ffbe0b;
+      color: #1a1a2e;
+      clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+      width: 120px;
+      height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-align: center;
+      padding: 0 14px;
+    }
+    .node-state  { background: #8338ec; color: #fff; }
+    .node-server { background: #06d6a0; color: #fff; }
+    .node-warn   { background: #ff6b6b; color: #fff; }
+    .node-info   { background: #e9ecef; color: #1a1a2e; border: 1px solid #ced4da; }
+    .node-end    { background: #1a1a2e; color: #fff; border-radius: 40px; }
+
+    /* arrows */
+    .arr-down, .arr-right {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .arr-down {
+      width: 20px;
+      height: 28px;
+      align-self: center;
+    }
+    .arr-right {
+      width: 30px;
+      height: 20px;
+    }
+    .arr-down svg, .arr-right svg { overflow: visible; }
+
+    .label-arrow {
+      font-size: 0.68rem;
+      color: #555;
+      font-weight: 700;
+      background: #ffffcc;
+      border: 1px solid #e0c000;
+      border-radius: 4px;
+      padding: 0 5px;
+      margin: 0 2px;
+    }
+
+    /* ===== TABLES ===== */
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 0.82rem; }
+    th { background: #3a86ff; color: #fff; padding: 7px 10px; text-align: left; font-size: 0.78rem; }
+    td { padding: 6px 10px; border-bottom: 1px solid #e9ecef; vertical-align: top; }
+    tr:nth-child(even) td { background: #f8f9ff; }
+    .code { font-family: 'Consolas', monospace; font-size: 0.78rem; background: #eef2ff; padding: 1px 5px; border-radius: 3px; }
+
+    /* ===== STATUS PANEL ===== */
+    .status-panel {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .status-box {
+      border-radius: 8px;
+      padding: 14px 18px;
+      border: 1px solid #dce3f7;
+    }
+    .status-box.ok  { background: #d4f5ec; border-color: #70d9bb; }
+    .status-box.warn{ background: #fff8e1; border-color: #ffd54f; }
+    .status-box h4  { font-size: 0.88rem; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+    .status-box ul  { padding-left: 16px; font-size: 0.8rem; }
+    .status-box li  { margin-bottom: 3px; }
+
+    /* ===== LEGEND ===== */
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 10px 0 20px;
+      font-size: 0.78rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    /* ===== PRINT BUTTON ===== */
+    .print-btn {
+      position: fixed;
+      top: 18px;
+      right: 24px;
+      background: #3a86ff;
+      color: #fff;
+      border: none;
+      padding: 10px 22px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 2px 12px rgba(58,134,255,.3);
+      z-index: 100;
+    }
+    .print-btn:hover { background: #1d68e6; }
+
+    /* diagram sections */
+    .diagram-section { margin-bottom: 32px; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+    /* separators */
+    hr { border: none; border-top: 1px solid #e0e7ff; margin: 24px 0; }
+
+    .note {
+      background: #fff8e1;
+      border-left: 4px solid #ffbe0b;
+      padding: 10px 14px;
+      border-radius: 0 6px 6px 0;
+      font-size: 0.82rem;
+      margin: 10px 0 16px;
+    }
+
+    /* ===== LAYMAN GUIDE STYLES ===== */
+    .layman-header {
+      background: linear-gradient(135deg, #3a86ff 0%, #8338ec 100%);
+      color: #fff;
+      border-radius: 10px;
+      padding: 22px 28px;
+      margin-bottom: 28px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .layman-header .emoji-big { font-size: 3rem; line-height: 1; }
+    .layman-header h1 { font-size: 1.5rem; font-weight: 900; margin-bottom: 4px; }
+    .layman-header p  { font-size: 0.85rem; opacity: 0.9; }
+
+    /* step-by-step timeline */
+    .timeline { list-style: none; padding: 0; margin: 0 0 24px; position: relative; }
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 22px;
+      top: 0; bottom: 0;
+      width: 3px;
+      background: linear-gradient(to bottom, #3a86ff, #8338ec);
+      border-radius: 3px;
+    }
+    .timeline li {
+      display: flex;
+      gap: 18px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+      position: relative;
+    }
+    .tl-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #3a86ff;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2rem;
+      flex-shrink: 0;
+      z-index: 1;
+      box-shadow: 0 2px 8px rgba(58,134,255,.3);
+    }
+    .tl-icon.purple { background: #8338ec; }
+    .tl-icon.green  { background: #06d6a0; }
+    .tl-icon.orange { background: #fb8500; }
+    .tl-icon.red    { background: #ff6b6b; }
+    .tl-body { padding-top: 4px; flex: 1; }
+    .tl-body strong { display: block; font-size: 0.95rem; font-weight: 800; color: #1a1a2e; }
+    .tl-body span   { font-size: 0.82rem; color: #555; }
+    .tl-body .sub   { margin-top: 4px; font-size: 0.78rem; color: #888; background: #f0f4ff; border-radius: 6px; padding: 4px 10px; display: inline-block; }
+
+    /* cause-effect table */
+    .ce-table { width: 100%; border-collapse: collapse; margin: 12px 0 22px; font-size: 0.85rem; }
+    .ce-table th { padding: 9px 12px; text-align: left; font-size: 0.8rem; }
+    .ce-table th.cause-h  { background: #ff6b6b; color: #fff; }
+    .ce-table th.arrow-h  { background: #555; color: #fff; width: 40px; text-align:center; }
+    .ce-table th.effect-h { background: #06d6a0; color: #fff; }
+    .ce-table th.fix-h    { background: #3a86ff; color: #fff; }
+    .ce-table td { padding: 8px 12px; border-bottom: 1px solid #e9ecef; vertical-align: middle; }
+    .ce-table td.arrow-c  { text-align: center; font-size: 1rem; color: #aaa; }
+    .ce-table tr:nth-child(even) td { background: #f8f9ff; }
+    .em { font-size: 1.1rem; }
+
+    /* oled state cards */
+    .oled-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 22px;
+    }
+    .oled-card {
+      border-radius: 8px;
+      padding: 12px 10px;
+      text-align: center;
+      border: 2px solid transparent;
+    }
+    .oled-card .oled-emoji { font-size: 1.8rem; display: block; margin-bottom: 4px; }
+    .oled-card .oled-name  { font-size: 0.78rem; font-weight: 800; display: block; margin-bottom: 2px; }
+    .oled-card .oled-desc  { font-size: 0.7rem; color: #666; }
+    .oc-idle    { background: #eef2ff; border-color: #c7d2fe; }
+    .oc-happy   { background: #fef9c3; border-color: #fde047; }
+    .oc-cry     { background: #fce7f3; border-color: #f9a8d4; }
+    .oc-sick    { background: #fee2e2; border-color: #fca5a5; }
+    .oc-poop    { background: #fef3c7; border-color: #fcd34d; }
+    .oc-sleep   { background: #ede9fe; border-color: #c4b5fd; }
+    .oc-eat     { background: #dcfce7; border-color: #86efac; }
+    .oc-sad     { background: #f1f5f9; border-color: #94a3b8; }
+
+    /* do-dont */
+    .do-dont { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+    .do-box, .dont-box {
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .do-box   { background: #d1fae5; border: 1.5px solid #6ee7b7; }
+    .dont-box { background: #fee2e2; border: 1.5px solid #fca5a5; }
+    .do-box h4   { color: #065f46; font-size: 0.92rem; margin-bottom: 8px; }
+    .dont-box h4 { color: #991b1b; font-size: 0.92rem; margin-bottom: 8px; }
+    .do-box ul, .dont-box ul { padding-left: 16px; font-size: 0.82rem; }
+    .do-box li, .dont-box li { margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+
+<button class="print-btn no-print" onclick="window.print()">🖨 Print / Save PDF</button>
+
+<!-- ============================================================
+     PAGE 0 — LAYMAN GUIDE (Simple Language)
+     ============================================================ -->
+<div class="page">
+
+  <div class="layman-header">
+    <div class="emoji-big">🐣</div>
+    <div>
+      <h1>KAKU — Simple Guide &nbsp;|&nbsp; आसान भाषा में</h1>
+      <p>For anyone who wants to know: Device start karo toh kya hoga? Kya karna hai? Aur kya hone se kya hoga?</p>
+    </div>
+  </div>
+
+  <!-- ── STEP-BY-STEP STARTUP ── -->
+  <h2>A · Device Start Karo — Step by Step Kya Hoga</h2>
+  <p style="font-size:0.84rem;color:#555;margin-bottom:16px">Plug in karo aur yeh sequence automatically hoti hai — kuch karne ki zaroorat nahi.</p>
+
+  <ul class="timeline">
+    <li>
+      <div class="tl-icon">🔌</div>
+      <div class="tl-body">
+        <strong>Step 1 — Power ON</strong>
+        <span>Device ko USB se connect karo ya battery lagao.</span>
+        <div class="sub">OLED screen ON hoti hai — black screen thodi der ke liye normal hai.</div>
+      </div>
+    </li>
+    <li>
+      <div class="tl-icon">📶</div>
+      <div class="tl-body">
+        <strong>Step 2 — WiFi Connect hota hai (30 seconds tak wait karta hai)</strong>
+        <span>Device WiFi "123" se connect karne ki koshish karta hai.</span>
+        <div class="sub">✅ Connect hua → Online mode — server se baat karega.<br>❌ 30s mein connect nahi hua → Offline mode — OLED aur sensors chalte rahenge, server nahi.</div>
+      </div>
+    </li>
+    <li>
+      <div class="tl-icon purple">🥚</div>
+      <div class="tl-body">
+        <strong>Step 3 — Egg Hatching Animation</strong>
+        <span>OLED screen pe ek anda dikh ta hai jo break hota hai — yeh normal startup animation hai!</span>
+        <div class="sub">~3-5 second ki animation. Kuch mat karo, wait karo.</div>
+      </div>
+    </li>
+    <li>
+      <div class="tl-icon purple">👶</div>
+      <div class="tl-body">
+        <strong>Step 4 — Baby KAKU Screen pe aata hai</strong>
+        <span>Anda break hone ke baad baby left se slide karke aata hai aur OLED pe dikhta hai.</span>
+        <div class="sub">Yaha se device fully ready hai!</div>
+      </div>
+    </li>
+    <li>
+      <div class="tl-icon green">📷</div>
+      <div class="tl-body">
+        <strong>Step 5 — Camera aur Sensors Start</strong>
+        <span>Camera aur MPU-6050 (motion sensor) initialize hote hain. Device motion detect karna shuru kar deta hai.</span>
+        <div class="sub">Camera OLED pe dikhe wali image nahi deta — yeh sirf detection ke liye use hota hai.</div>
+      </div>
+    </li>
+    <li>
+      <div class="tl-icon green">✅</div>
+      <div class="tl-body">
+        <strong>Step 6 — Main Screen Ready!</strong>
+        <span>KAKU OLED pe blinking karta dikhega. Yeh IDLE state hai — sab theek hai.</span>
+        <div class="sub">Agar online hai toh server se har 2 second mein sync hota rehta hai.</div>
+      </div>
+    </li>
+  </ul>
+
+  <!-- ── OLED STATES ── -->
+  <h2>B · OLED Screen Pe Kya Dikh Raha Hai? — Matlab Samjho</h2>
+  <div class="oled-grid">
+    <div class="oled-card oc-idle">
+      <span class="oled-emoji">😐</span>
+      <span class="oled-name">IDLE / Blinking</span>
+      <span class="oled-desc">Sab theek hai. KAKU theek hai, na bhookha na beemar.</span>
+    </div>
+    <div class="oled-card oc-happy">
+      <span class="oled-emoji">😄</span>
+      <span class="oled-name">HAPPY</span>
+      <span class="oled-desc">Camera ke saamne koi insaan hai ya khush hai. Sparkles dikhenge.</span>
+    </div>
+    <div class="oled-card oc-cry">
+      <span class="oled-emoji">😭</span>
+      <span class="oled-name">CRY / HUNGER</span>
+      <span class="oled-desc">BHOOKHA HAI! Jaldi khana do. Aansu dikh rahe honge.</span>
+    </div>
+    <div class="oled-card oc-eat">
+      <span class="oled-emoji">🍽️</span>
+      <span class="oled-name">EATING</span>
+      <span class="oled-desc">Kha raha hai! Camera se image capture hui aur server ne bhook kam ki.</span>
+    </div>
+    <div class="oled-card oc-poop">
+      <span class="oled-emoji">💩</span>
+      <span class="oled-name">POOP</span>
+      <span class="oled-desc">Potty ho gayi. Dashboard se saaf karo — 15 min mein nahi kiya toh beemar ho jayega.</span>
+    </div>
+    <div class="oled-card oc-sick">
+      <span class="oled-emoji">🤒</span>
+      <span class="oled-name">SICK (X eyes)</span>
+      <span class="oled-desc">Beemar hai. Dashboard se injection do. Health bahut kam ho gayi.</span>
+    </div>
+    <div class="oled-card oc-sleep">
+      <span class="oled-emoji">💤</span>
+      <span class="oled-name">SLEEP (ZZZ)</span>
+      <span class="oled-desc">So raha hai. Energy zyada use ho gayi. Kuch mat karo, apne aap uthega.</span>
+    </div>
+    <div class="oled-card oc-sad">
+      <span class="oled-emoji">😔</span>
+      <span class="oled-name">SAD</span>
+      <span class="oled-desc">Khush nahi hai. Khilao ya theek karo. Happiness level kam ho gayi.</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============================================================
+     PAGE 0-B — CAUSE & EFFECT + WHAT TO DO
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div class="brand" style="font-size:1.4rem;">KAKU · Kya Hone Se Kya Hoga?</div>
+    <span class="badge badge-orange">Cause &amp; Effect Guide</span>
+  </div>
+
+  <!-- ── CAUSE EFFECT TABLE ── -->
+  <h2>C · Kya Hone Se Kya Hoga (Cause → Effect → Fix)</h2>
+
+  <table class="ce-table">
+    <tr>
+      <th class="cause-h">⚠️ Kya Hua (Cause)</th>
+      <th class="arrow-h">→</th>
+      <th class="effect-h">📺 OLED Pe Kya Dikhega</th>
+      <th class="fix-h">🛠 Kya Karo (Fix)</th>
+    </tr>
+    <tr>
+      <td><span class="em">🍽️</span> 6 minute beet gaye bina khana diye</td>
+      <td class="arrow-c">→</td>
+      <td>Hunger badhta hai, face sad hone lagta hai</td>
+      <td>Camera ke saamne kuch rakh do (food), image upload hogi</td>
+    </tr>
+    <tr>
+      <td><span class="em">😭</span> Hunger 70%+ ho gaya</td>
+      <td class="arrow-c">→</td>
+      <td><b>BHOOKHA / CRY</b> state — aansu + "FEED!" blink karta hai</td>
+      <td>Camera ke saamne food rakh do → server hunger −40 kar dega</td>
+    </tr>
+    <tr>
+      <td><span class="em">🍔</span> Camera pe image upload hui (khana diya)</td>
+      <td class="arrow-c">→</td>
+      <td>EATING animation ~3 sec</td>
+      <td>Kuch nahi — automatically hota hai ✅</td>
+    </tr>
+    <tr>
+      <td><span class="em">💩</span> 30 min baad khana pachat hai</td>
+      <td class="arrow-c">→</td>
+      <td>Poop icon dikhta hai, poop_present = ON</td>
+      <td>Dashboard kholo → "Clean" button dabao</td>
+    </tr>
+    <tr>
+      <td><span class="em">⏰</span> Poop ko 15 minute se zyada ignore kiya</td>
+      <td class="arrow-c">→</td>
+      <td><b>SICK</b> state — X-eyes dikhenge, health −10 har 60 sec</td>
+      <td>Pehle Clean karo, phir Inject karo (dashboard se)</td>
+    </tr>
+    <tr>
+      <td><span class="em">🤒</span> Health 40% se neeche aayi</td>
+      <td class="arrow-c">→</td>
+      <td>SICK state lock ho jaata hai</td>
+      <td>Dashboard → "Inject" button dabao (health +20)</td>
+    </tr>
+    <tr>
+      <td><span class="em">🚶</span> Device ko shake karo / walk pe le jao</td>
+      <td class="arrow-c">→</td>
+      <td>Steps count hoti hain (dashboard pe)</td>
+      <td>Kuch nahi — apne aap hota hai, health improve hoti hai ✅</td>
+    </tr>
+    <tr>
+      <td><span class="em">😴</span> Energy 30% se kam ho gayi</td>
+      <td class="arrow-c">→</td>
+      <td>SLEEP animation (ZZZ), kuch response nahi</td>
+      <td>Wait karo — apne aap uthega. Disturb mat karo.</td>
+    </tr>
+    <tr>
+      <td><span class="em">📷</span> Camera ke saamne koi insaan aaya</td>
+      <td class="arrow-c">→</td>
+      <td>HAPPY face + sparks ✨</td>
+      <td>Kuch nahi — yeh normal hai ✅</td>
+    </tr>
+    <tr>
+      <td><span class="em">🫳</span> Camera ko haath se 3 second dhako (cover karo)</td>
+      <td class="arrow-c">→</td>
+      <td>MENU TOGGLE — menu khulega ya band hoga</td>
+      <td>Haath hata lo, menu navigate karo</td>
+    </tr>
+    <tr>
+      <td><span class="em">🫳</span> Camera ko 0.5–3 sec dhako (menu mein)</td>
+      <td class="arrow-c">→</td>
+      <td>Menu page badlega (FOOD → CLEAN → HEALTH…)</td>
+      <td>Baar baar cover/uncover karo pages cycle karne ke liye</td>
+    </tr>
+    <tr>
+      <td><span class="em">📅</span> 24 ghante beet gaye</td>
+      <td class="arrow-c">→</td>
+      <td>KAKU ki age +1, stage change ho sakti hai</td>
+      <td>Automatic — kuch nahi karna ✅</td>
+    </tr>
+    <tr>
+      <td><span class="em">📵</span> WiFi nahi mila 30 sec tak</td>
+      <td class="arrow-c">→</td>
+      <td>Device chalta rahega — OLED animation OK</td>
+      <td>Server features nahi chalenge. WiFi fix karo ya offline mode use karo</td>
+    </tr>
+    <tr>
+      <td><span class="em">🔁</span> Server band tha kaafi time</td>
+      <td class="arrow-c">→</td>
+      <td>Server restart pe age ka catch-up hoga (e.g. 3 din offline = age +3)</td>
+      <td>Normal behavior — kuch nahi karna ✅</td>
+    </tr>
+    <tr>
+      <td><span class="em">🕹️</span> Catch-food game khela</td>
+      <td class="arrow-c">→</td>
+      <td>WIN → HAPPY (+20) | LOSE → SAD (−10)</td>
+      <td>Jeetne ki koshish karo — Happiness badhegi ✅</td>
+    </tr>
+  </table>
+
+  <!-- ── WHAT TO DO WHEN ── -->
+  <h2>D · "Kya Karo Jab..." — Quick Actions</h2>
+
+  <table style="width:100%;border-collapse:collapse;font-size:0.84rem;margin-bottom:22px;">
+    <tr style="background:#3a86ff;color:#fff;">
+      <th style="padding:8px 12px;text-align:left;">Situation</th>
+      <th style="padding:8px 12px;text-align:left;">Kahan Karo</th>
+      <th style="padding:8px 12px;text-align:left;">Button / Action</th>
+    </tr>
+    <tr><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">😭 KAKU bhooka hai</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Device ke camera ke saamne</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Koi cheez rakh do — image auto-upload hogi</td></tr>
+    <tr style="background:#f8f9ff;"><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">💩 Potty icon dikh raha hai</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Dashboard (browser)</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">"Clean" button dabao</td></tr>
+    <tr><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">🤒 SICK dikh raha hai (X-eyes)</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Dashboard (browser)</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">"Inject" button dabao</td></tr>
+    <tr style="background:#f8f9ff;"><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">📺 Menu kholna hai</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Device ka camera</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">3 second ke liye camera cover karo</td></tr>
+    <tr><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">📺 Menu mein page change karna hai</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Device ka camera (menu mein)</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">0.5–3 sec cover karo</td></tr>
+    <tr style="background:#f8f9ff;"><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">🎮 Game khelna hai</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Dashboard ya Device</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">PLAY menu navigate karo</td></tr>
+    <tr><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">💔 Health bahut kam hai</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">Dashboard (browser)</td><td style="padding:7px 12px;border-bottom:1px solid #e9ecef;">"Inject" → baar baar dena pad sakta hai</td></tr>
+    <tr style="background:#f8f9ff;"><td style="padding:7px 12px;">📡 Dashboard open karna hai</td><td style="padding:7px 12px;">Browser (koi bhi device)</td><td style="padding:7px 12px;">https://kakuproject-90943350924.asia-south1.run.app</td></tr>
+  </table>
+
+  <!-- ── DO / DON'T ── -->
+  <h2>E · Karo / Mat Karo</h2>
+  <div class="do-dont">
+    <div class="do-box">
+      <h4>✅ YEH KARO</h4>
+      <ul>
+        <li>KAKU ke bhookhe hone se pehle camera ke saamne food rakh do</li>
+        <li>Poop icon dikhte hi jaldi clean karo (&lt;15 min mein)</li>
+        <li>Device ko apne saath carry karo — steps count honge aur health achi rahegi</li>
+        <li>Regularly dashboard check karo</li>
+        <li>Server <code>python app.py</code> chalate raho — pet engine wahi hai</li>
+        <li>Agar offline use karna hai toh FINAL.ino firmware use karo</li>
+      </ul>
+    </div>
+    <div class="dont-box">
+      <h4>❌ YEH MAT KARO</h4>
+      <ul>
+        <li>Poop ko 15 min se zyada ignore mat karo — KAKU beemar ho jayega</li>
+        <li>Jab KAKU so raha ho tab disturb mat karo</li>
+        <li>Camera ko permanently cover mat rakho — yeh menu mein phans jayega</li>
+        <li>Server band mat karo — pet engine off hone se hunger/health update nahi hogi</li>
+        <li>Ek saath multiple injections mat do agar health pehle se 80%+ hai</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Yaad rakho:</b> KAKU ek virtual pet hai jisko real care chahiye! Jitna zyada dhyan doge, utna healthy aur happy rahega. Server-side pet engine har 60 second mein KAKU ki condition check karta hai — toh agar aap 10 minute ke liye bhi dhyan nahi dete, KAKU ko fark padta hai. 🐾
+  </div>
+
+</div>
+
+<!-- ============================================================
+     PAGE 1 — OVERVIEW & HARDWARE
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div>
+      <div class="brand">KAKU</div>
+      <div class="subtitle">System Documentation &amp; Startup Flow Reference &nbsp;|&nbsp; Rev. 2026-02-24</div>
+    </div>
+    <div style="text-align:right">
+      <span class="badge badge-green">ESP32-S3 Sense</span>&nbsp;
+      <span class="badge badge-blue">Cloud Run Server</span>&nbsp;
+      <span class="badge badge-orange">SQLite DB</span>
+    </div>
+  </div>
+
+  <!-- ── SYSTEM OVERVIEW ── -->
+  <h2>1 · System Overview</h2>
+  <p style="margin-bottom:14px;color:#444;font-size:0.88rem;">
+    KAKU is a connected Tamagotchi-style pet device. The XIAO ESP32 S3 Sense handles real-time display,
+    camera-based interaction, and sensor reading. A Flask/SocketIO cloud server (Google Cloud Run) acts as the
+    pet's "brain" — tracking state, hunger, health, and serving display commands back to the device.
+    Two firmware files exist: <b>esp32_sketch.ino</b> (full cloud-connected mode) and
+    <b>16_TAMAGOTCHI_CAMERA_FINAL.ino</b> (standalone offline mode).
+  </p>
+
+  <!-- ── HARDWARE SPEC ── -->
+  <h2>2 · Hardware &amp; Pin Reference</h2>
+  <div class="info-grid">
+    <div class="info-card"><div class="label">MCU</div><div class="value">XIAO ESP32 S3 Sense</div></div>
+    <div class="info-card"><div class="label">OLED Display</div><div class="value">SSD1306 64×32 @ I2C 0x3C<br>SDA=5 SCL=6</div></div>
+    <div class="info-card"><div class="label">IMU</div><div class="value">MPU-6050 Acc+Gyro<br>I2C shared bus</div></div>
+    <div class="info-card"><div class="label">Camera</div><div class="value">OV2640 — QVGA GRAYSCALE<br>XCLK=10, VSYNC=38</div></div>
+    <div class="info-card"><div class="label">Microphone</div><div class="value">PDM Mic — CLK=42, DIN=41<br>I2S 16kHz 16-bit (disabled)</div></div>
+    <div class="info-card"><div class="label">WiFi</div><div class="value">SSID: <span class="code">123</span><br>30s connect timeout</div></div>
+    <div class="info-card"><div class="label">Server URL</div><div class="value" style="font-size:0.75rem">https://kakuproject<br>-90943350924.asia-south1.run.app</div></div>
+    <div class="info-card"><div class="label">Device ID</div><div class="value">ESP32_001</div></div>
+  </div>
+
+  <!-- ── CURRENT STATUS ── -->
+  <h2>3 · Current System Status</h2>
+  <div class="status-panel">
+    <div class="status-box ok">
+      <h4>✅ Active &amp; Enabled</h4>
+      <ul>
+        <li>MPU-6050 accelerometer / gyro</li>
+        <li>OLED animation (FreeRTOS Core 0, ~30 FPS)</li>
+        <li>WiFi HTTP POST sensor data (Core 1)</li>
+        <li>Binary camera image upload (<span class="code">POST /upload</span>)</li>
+        <li>Pet state poll every 2 s (<span class="code">GET /api/oled-display/get</span>)</li>
+        <li>Step counter — server-side detection</li>
+        <li>Orientation — server-side computation</li>
+        <li>Camera person detection (NEAR / FAR)</li>
+        <li>Menu via camera cover gestures</li>
+        <li>Pet engine background thread (60 s cycle)</li>
+        <li>SQLite DB — database-only image storage (BLOB)</li>
+        <li>WebSocket real-time dashboard broadcast</li>
+      </ul>
+    </div>
+    <div class="status-box warn">
+      <h4>⚠️ Disabled / Commented Out</h4>
+      <ul>
+        <li>Audio recording &amp; upload (I2S PDM)</li>
+        <li>Shake-based feeding (replaced by camera)</li>
+        <li>File-system image storage (DB only now)</li>
+        <li>Background AI analysis (non-blocking)</li>
+        <li>File-system image cleanup thread</li>
+        <li>Orientation endpoint on ESP32 (server computes)</li>
+        <li>loadState() saved preferences (testing mode)</li>
+        <li>AI Vision: depends on server env — FULL/BASIC/NONE</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ── FIRMWARE MODES ── -->
+  <h2>4 · Firmware Modes</h2>
+  <table>
+    <tr><th>File</th><th>Mode</th><th>WiFi</th><th>Server</th><th>Use Case</th></tr>
+    <tr>
+      <td><span class="code">esp32_sketch.ino</span></td>
+      <td><span class="badge badge-blue">Cloud Connected</span></td>
+      <td>Required</td>
+      <td>Google Cloud Run</td>
+      <td>Production. Pet state managed by server. Dashboard enabled.</td>
+    </tr>
+    <tr>
+      <td><span class="code">16_TAMAGOTCHI_CAMERA_FINAL.ino</span></td>
+      <td><span class="badge badge-gray">Standalone Offline</span></td>
+      <td>Not used</td>
+      <td>None</td>
+      <td>Demo / no-internet mode. Full life-cycle on device.</td>
+    </tr>
+  </table>
+
+</div>
+
+<!-- ============================================================
+     PAGE 2 — ESP32 STARTUP FLOW (cloud sketch)
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div class="brand" style="font-size:1.4rem;">KAKU · ESP32 Startup Flow</div>
+    <span class="badge badge-blue">esp32_sketch.ino</span>
+  </div>
+
+  <h2>5 · ESP32 Boot &amp; Startup Sequence</h2>
+
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#1a1a2e"></div>Start/End</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#3a86ff"></div>Action</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ffbe0b"></div>Decision</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#8338ec"></div>State Change</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#06d6a0"></div>Server Call</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff6b6b"></div>Error / Halt</div>
+  </div>
+
+  <!-- MAIN BOOT FLOW -->
+  <div class="flow-wrap">
+    <div class="flow">
+
+      <!-- ROW 1 -->
+      <div class="flow-row">
+        <div class="node node-start">POWER ON<br><span style="font-weight:400;font-size:0.72rem">3.3 V → ESP32</span></div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-action">Serial.begin(115200)<br>delay(1 s)</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-action">WiFi.begin("123")<br>"KUNAL 26"</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-diamond">WiFi OK within 30 s?</div>
+      </div>
+
+      <!-- YES / NO branches -->
+      <div class="flow-row" style="gap:60px; margin-top:0;">
+        <!-- YES -->
+        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+          <div class="arr-down" style="margin-top:35px">
+            <svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg>
+          </div>
+          <span class="label-arrow">YES</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <div class="node node-server" style="font-size:0.75rem">Online Mode<br>WiFi.setSleep(true)<br>CPU = 80 MHz</div>
+        </div>
+        <!-- NO -->
+        <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+          <div class="arr-down" style="margin-top:35px">
+            <svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#e05252" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#e05252"/></svg>
+          </div>
+          <span class="label-arrow">TIMEOUT</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#e05252" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#e05252"/></svg></div>
+          <div class="node node-warn" style="font-size:0.75rem">Offline Mode<br>Server comms disabled<br>OLED still runs</div>
+        </div>
+      </div>
+
+      <div class="arr-down" style="margin-top:16px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-action">Wire.begin(SDA=5, SCL=6)<br>I2C 400 kHz</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-action">display.begin(SSD1306)<br>0x3C  64×32</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-diamond">OLED Init OK?</div>
+      </div>
+
+      <div class="flow-row" style="gap:60px;margin-top:0">
+        <!-- YES - OLED OK -->
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <span class="label-arrow">YES</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <div class="node node-state" style="font-size:0.75rem">🥚 Egg Cracking<br>Animation (~3 s)</div>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#8338ec" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#8338ec"/></svg></div>
+          <div class="node node-state" style="font-size:0.75rem">👶 Slide Infant<br>from Left</div>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#8338ec" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#8338ec"/></svg></div>
+          <div class="node node-state" style="font-size:0.75rem">startupComplete=true<br>showHomeIcon=true</div>
+        </div>
+        <!-- NO - OLED failed -->
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#e05252" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#e05252"/></svg></div>
+          <span class="label-arrow">FAIL</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#e05252" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#e05252"/></svg></div>
+          <div class="node node-warn" style="font-size:0.75rem">displayReady=false<br>Continues without OLED<br>(no hang)</div>
+        </div>
+      </div>
+
+      <div class="arr-down" style="margin-top:16px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-action">Camera Init<br>esp_camera_init()<br>QVGA GRAYSCALE</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="flow-row">
+        <div class="node node-action">scanI2CDevices()<br>Scan I2C bus</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <!-- FreeRTOS tasks -->
+      <div class="flow-row" style="gap:40px">
+        <div class="node node-server" style="font-size:0.75rem">xTaskCreatePinnedToCore<br>oledTask → Core 0<br>~30 FPS animation</div>
+        <div style="align-self:center;font-weight:900;color:#555;font-size:1.2rem">+</div>
+        <div class="node node-server" style="font-size:0.75rem">xTaskCreatePinnedToCore<br>networkTask → Core 1<br>HTTP / WiFi ops</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-end">MAIN LOOP RUNNING</div>
+
+    </div><!-- /flow -->
+  </div><!-- /flow-wrap -->
+
+</div>
+
+<!-- ============================================================
+     PAGE 3 — MAIN LOOP & SERVER INTERACTION
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div class="brand" style="font-size:1.4rem;">KAKU · Main Loop &amp; Server Flow</div>
+    <span class="badge badge-green">Runtime Operation</span>
+  </div>
+
+  <h2>6 · Main Loop (networkTask — Core 1, ~5 s cycle)</h2>
+
+  <div class="flow-wrap">
+    <div class="flow">
+
+      <div class="node node-start">networkTask Loop</div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-action">Read MPU6050<br>Acc + Gyro + Mic Level<br>Batch 20 readings over 2 s</div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-server">POST /api/sensor-data<br>{accel, gyro, mic, sensor_batch, device_id}</div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-info" style="font-size:0.78rem;max-width:240px">
+        Server computes:<br>
+        ① Orientation (NEUTRAL/LEFT/RIGHT/FORWARD/BACK/INVERTED)<br>
+        ② Step detection (stoss algorithm)<br>
+        ③ Stores in SQLite<br>
+        ④ WebSocket broadcast to dashboard
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-diamond">Pet hungry?<br>(hunger &gt; 70)</div>
+
+      <div class="flow-row" style="gap:50px;margin-top:0">
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <span class="label-arrow">YES</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <div class="node node-action" style="font-size:0.75rem">Capture camera frame<br>POST /upload (binary JPEG)<br>→ Server reduces hunger −40</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#999" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#999"/></svg></div>
+          <span class="label-arrow">NO</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#999" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#999"/></svg></div>
+          <div class="node node-info" style="font-size:0.75rem">Skip camera upload</div>
+        </div>
+      </div>
+
+      <div class="arr-down" style="margin-top:14px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-server">GET /api/events?device_id=ESP32_001<br>Check pending events (every cycle)</div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-diamond">Events<br>pending?</div>
+
+      <div class="flow-row" style="gap:50px;margin-top:0">
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <span class="label-arrow">YES</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <div class="node node-state" style="font-size:0.75rem">Process event<br>Show on OLED<br>POST /api/device/event/received</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#999" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#999"/></svg></div>
+          <span class="label-arrow">NO</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#999" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#999"/></svg></div>
+          <div class="node node-info" style="font-size:0.75rem">Continue</div>
+        </div>
+      </div>
+
+      <div class="arr-down" style="margin-top:14px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-server">GET /api/oled-display/get<br>Poll every 2 s for display state</div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-state">Update petAge, currentEmotion,<br>showFoodIcon, showPoopIcon,<br>currentScreenType from server response</div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div class="node node-start">↺ Repeat every ~5 s</div>
+
+    </div>
+  </div>
+
+  <!-- OLED TASK -->
+  <h2>7 · OLED Animation Task (Core 0 — independent 30 FPS)</h2>
+  <div class="flow-wrap">
+    <div class="flow">
+      <div class="node node-start">oledTask Loop</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-diamond">displayReady &amp;&amp;<br>startupComplete?</div>
+      <div class="flow-row" style="gap:40px;margin-top:0">
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <span class="label-arrow">YES</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#06c48e" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#06c48e"/></svg></div>
+          <div class="node node-state" style="font-size:0.75rem">displayPetAnimation()<br>Reads currentEmotion + petAge<br>set by networkTask</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="arr-down" style="margin-top:35px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#999" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#999"/></svg></div>
+          <span class="label-arrow">NO</span>
+          <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#999" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#999"/></svg></div>
+          <div class="node node-info" style="font-size:0.75rem">Skip frame<br>(still in startup)</div>
+        </div>
+      </div>
+      <div class="arr-down" style="margin-top:14px"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-start">vTaskDelay(33 ms) → ↺</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============================================================
+     PAGE 4 — SERVER FLOW & PET ENGINE
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div class="brand" style="font-size:1.4rem;">KAKU · Server &amp; Pet Engine</div>
+    <span class="badge badge-orange">Flask · SQLite · Google Cloud Run</span>
+  </div>
+
+  <h2>8 · Server Startup (app.py)</h2>
+  <div class="flow-wrap">
+    <div class="flow">
+      <div class="node node-start">python app.py</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-action">Try import: PIL, numpy,<br>transformers, torch</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <!-- AI mode -->
+      <div style="display:flex;gap:24px;align-items:flex-start;">
+        <div class="node node-server" style="font-size:0.74rem">AI_MODE="FULL"<br>transformers ✅<br>Google ViT</div>
+        <div style="align-self:center;color:#888;font-size:0.8rem">or</div>
+        <div class="node node-warn" style="font-size:0.74rem">AI_MODE="BASIC"<br>PIL only ✅<br>visual features</div>
+        <div style="align-self:center;color:#888;font-size:0.8rem">or</div>
+        <div class="node node-warn" style="font-size:0.74rem">AI_MODE="NONE"<br>no AI libs ❌</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-action">init_database()<br>CREATE IF NOT EXISTS: sensor_readings, pet_state,<br>important_events, oled_display_state, step_statistics, game_rewards</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-action">Initialize default pet_state row<br>(if table empty)<br>Age=0, Stage=INFANT, Health=100</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+
+      <div style="display:flex;gap:24px;align-items:flex-start;">
+        <div class="node node-server" style="font-size:0.74rem">🐾 pet_engine_thread<br>daemon=True<br>every 60 s</div>
+        <div style="align-self:center;color:#888;font-size:0.8rem">+</div>
+        <div class="node node-server" style="font-size:0.74rem">📊 stats_thread<br>daemon=True<br>every 60 s</div>
+      </div>
+
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-end">socketio.run(app) → SERVING ✅</div>
+    </div>
+  </div>
+
+  <h2>9 · Pet Engine Cycle (every 60 seconds)</h2>
+  <div class="note">The pet engine runs in a background daemon thread. It is the "brain" — all aging, hunger, poop, sickness, and emotion logic lives here.</div>
+
+  <div class="flow-wrap">
+    <div class="flow">
+      <div class="node node-start">pet_engine_cycle()</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-action">time.sleep(60)</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-action">get_pet_state("ESP32_001")</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <!-- 6 updates in row -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;max-width:700px;">
+        <div class="node node-action" style="min-width:100px;font-size:0.72rem">① Age +1<br>every 24 h<br>(catch-up OK)</div>
+        <div class="node node-action" style="min-width:100px;font-size:0.72rem">② Hunger ↑<br>per stage<br>every 360 s</div>
+        <div class="node node-action" style="min-width:100px;font-size:0.72rem">③ Digestion<br>poop after<br>30 min feed</div>
+        <div class="node node-warn" style="min-width:100px;font-size:0.72rem">④ Poop &gt;15min<br>Health −10<br>penalty</div>
+        <div class="node node-action" style="min-width:100px;font-size:0.72rem">⑤ Energy −2<br>per cycle</div>
+        <div class="node node-warn" style="min-width:100px;font-size:0.72rem">⑥ OLD stage<br>1% random<br>sickness/cycle</div>
+      </div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-state">Emotion Priority:<br>SICK &gt; POOP &gt; CRY/HUNGER &gt; SLEEP &gt; HAPPY/SAD &gt; IDLE</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-server">update_pet_state_atomic()<br>Versioned, thread-safe write</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-server">socketio.emit('pet_state_update')<br>→ Dashboard WebSocket</div>
+      <div class="arr-down"><svg width="20" height="28"><line x1="10" y1="0" x2="10" y2="20" stroke="#555" stroke-width="2"/><polygon points="10,28 5,18 15,18" fill="#555"/></svg></div>
+      <div class="node node-start">↺ sleep(60) → repeat</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============================================================
+     PAGE 5 — API REFERENCE & PET ACTIONS
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div class="brand" style="font-size:1.4rem;">KAKU · API Reference</div>
+    <span class="badge badge-blue">REST + WebSocket</span>
+  </div>
+
+  <h2>10 · API Endpoints</h2>
+  <table>
+    <tr><th>Method</th><th>Endpoint</th><th>Who calls</th><th>Description</th></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/sensor-data</span></td><td>ESP32</td><td>Send accelerometer/gyro/mic batch. Server computes orientation + steps, stores, broadcasts via WebSocket.</td></tr>
+    <tr><td><span class="badge badge-green">POST</span></td><td><span class="code">/upload</span></td><td>ESP32</td><td>Binary JPEG image upload. Stored as BLOB. Automatically feeds pet (hunger −40).</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/events</span></td><td>ESP32</td><td>Poll pending events by device_id. Returns list of unacknowledged events.</td></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/device/event/received</span></td><td>ESP32</td><td>Acknowledge event by ID. Marks is_sent=1 in DB.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/oled-display/get</span></td><td>ESP32</td><td>Get current OLED display state (animation, emotion, screen type).</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/pet/state</span></td><td>Dashboard</td><td>Get full pet state (age, health, hunger, cleanliness, happiness, energy, poop).</td></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/pet/inject</span></td><td>Dashboard</td><td>Give injection. Health +20. Emotion = RECOVER.</td></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/pet/clean</span></td><td>Dashboard</td><td>Clean poop. Cleanliness → 100. Emotion = HAPPY.</td></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/pet/play-result</span></td><td>ESP32/Dashboard</td><td>WIN: happiness +20. LOSE: happiness −10.</td></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/game/reward</span></td><td>ESP32</td><td>Store catch-food game score + KakuCoin.</td></tr>
+    <tr><td><span class="badge badge-blue">POST</span></td><td><span class="code">/api/pet/menu</span></td><td>Dashboard</td><td>Switch menu: MAIN / HEALTH / CLEAN / FEED / PLAY.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/latest</span></td><td>Dashboard</td><td>Last 20 sensor records (no binary). JSON.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/latest-image</span></td><td>Dashboard</td><td>Latest camera image as base64 + AI caption.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/image/&lt;id&gt;</span></td><td>Dashboard</td><td>Serve JPEG image from DB BLOB by sensor_reading id.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/stats</span></td><td>Dashboard</td><td>Total records, accel averages, date range.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/health</span></td><td>Any</td><td>Server health check. Returns status + DB exists.</td></tr>
+    <tr><td><span class="badge badge-red">POST</span></td><td><span class="code">/api/clear</span></td><td>Admin</td><td>Delete all sensor_readings rows.</td></tr>
+    <tr><td><span class="badge badge-blue">GET</span></td><td><span class="code">/api/export</span></td><td>Admin</td><td>Download all sensor data as JSON (no binary).</td></tr>
+  </table>
+
+  <h2>11 · WebSocket Events (SocketIO)</h2>
+  <table>
+    <tr><th>Event</th><th>Direction</th><th>Payload</th></tr>
+    <tr><td><span class="code">sensor_update</span></td><td>Server → Dashboard</td><td>accel_x/y/z, gyro_x/y/z, mic_level, chip_temperature</td></tr>
+    <tr><td><span class="code">orientation_update</span></td><td>Server → Dashboard</td><td>direction, calibrated_ax/ay/az, confidence</td></tr>
+    <tr><td><span class="code">camera_update</span></td><td>Server → Dashboard</td><td>image_url (base64), ai_caption, image_id</td></tr>
+    <tr><td><span class="code">step_counter_updated</span></td><td>Server → Dashboard</td><td>total_steps, daily_steps, timestamp</td></tr>
+    <tr><td><span class="code">pet_state_update</span></td><td>Server → Dashboard</td><td>stage, emotion, health, hunger, cleanliness, happiness, energy, poop_present, age</td></tr>
+    <tr><td><span class="code">connection_response</span></td><td>Server → Client</td><td>status: "Connected to dashboard"</td></tr>
+  </table>
+
+</div>
+
+<!-- ============================================================
+     PAGE 6 — PET LIFECYCLE & MENU INTERACTION
+     ============================================================ -->
+<div class="page">
+
+  <div class="doc-header">
+    <div class="brand" style="font-size:1.4rem;">KAKU · Pet Lifecycle &amp; Interaction</div>
+    <span class="badge badge-green">Complete Reference</span>
+  </div>
+
+  <h2>12 · Pet Life Stages &amp; Aging</h2>
+  <table>
+    <tr><th>Stage</th><th>Age (days)</th><th>Hunger Rate</th><th>Appearance</th></tr>
+    <tr><td><span class="badge badge-blue">INFANT</span></td><td>0 – 5</td><td>+15 / 6 min</td><td>Baby, single hair tuft</td></tr>
+    <tr><td><span class="badge badge-green">CHILD</span></td><td>6 – 10</td><td>+10 / 6 min</td><td>Two hair bumps</td></tr>
+    <tr><td><span class="badge badge-orange">ADULT</span></td><td>11 – 17</td><td>+8 / 6 min</td><td>Glasses &amp; tie</td></tr>
+    <tr><td><span class="badge badge-red">OLD</span></td><td>18 – 21</td><td>+12 / 6 min</td><td>Mustache, wrinkles, 1% sick/cycle</td></tr>
+    <tr><td><span class="badge badge-gray">END</span></td><td>22+</td><td>—</td><td>End of life</td></tr>
+  </table>
+
+  <div class="note">Age increments every 24 h. Server catches up for offline periods — if server was down 3 days and restarts, age increases by 3.</div>
+
+  <h2>13 · Emotion System</h2>
+  <table>
+    <tr><th>Emotion</th><th>Trigger</th><th>Duration</th><th>OLED Display</th></tr>
+    <tr><td>IDLE</td><td>Default</td><td>Continuous</td><td>Blinking idle face</td></tr>
+    <tr><td>HAPPY</td><td>happiness &gt; 80</td><td>Continuous</td><td>Happy face + sparks</td></tr>
+    <tr><td>SAD</td><td>happiness &lt; 40</td><td>Continuous</td><td>Sad + tears</td></tr>
+    <tr><td>CRY</td><td>hunger &gt; 70 (INFANT)</td><td>Continuous</td><td>Crying face + tears</td></tr>
+    <tr><td>HUNGER</td><td>hunger &gt; 70 (other)</td><td>Continuous</td><td>Sad face</td></tr>
+    <tr><td>SLEEP</td><td>energy &lt; 30</td><td>Continuous</td><td>ZZZ animation</td></tr>
+    <tr><td>SICK</td><td>health &lt; 40 OR poop &gt;15 min</td><td>Continuous</td><td>X-eyes</td></tr>
+    <tr><td>POOP</td><td>poop_present=true</td><td>Continuous</td><td>Poop icon</td></tr>
+    <tr><td>EATING</td><td>image uploaded (fed)</td><td>3 s lock</td><td>Eating animation</td></tr>
+    <tr><td>RECOVER</td><td>injection given</td><td>3 s lock</td><td>Recovery animation</td></tr>
+    <tr><td>WIN / LOSE</td><td>game result</td><td>3 s lock</td><td>WIN/LOSE animation</td></tr>
+  </table>
+
+  <h2>14 · Camera-Based Menu Interaction</h2>
+  <div class="two-col">
+    <div>
+      <h3>Cloud Mode (esp32_sketch.ino)</h3>
+      <table>
+        <tr><th>Action</th><th>Result</th></tr>
+        <tr><td>Cover camera 0.5–3 s</td><td>Cycle menu page (MAIN → FOOD → CLEAN → HEALTH → DISCIPLINE)</td></tr>
+        <tr><td>Cover camera 3+ s</td><td>Toggle between MAIN screen and MENU</td></tr>
+        <tr><td>5 consecutive black frames</td><td>Menu cycle (cooldown 3 s)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Standalone Mode (FINAL.ino)</h3>
+      <table>
+        <tr><th>Condition</th><th>Emotion</th></tr>
+        <tr><td>Person detected NEAR<br>(brightness &gt; 1500)</td><td>HAPPY face</td></tr>
+        <tr><td>No person / FAR<br>(brightness &lt; 500)</td><td>IDLE / Blinking</td></tr>
+        <tr><td>Camera fully black</td><td>Menu interactions</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2>15 · Care Actions &amp; Effects</h2>
+  <table>
+    <tr><th>Action</th><th>How</th><th>Effect on Pet</th></tr>
+    <tr><td>Feed</td><td>Camera image upload → <span class="code">POST /upload</span></td><td>Hunger −40, digestion_due=+30 min, poop comes after 30 min</td></tr>
+    <tr><td>Clean</td><td><span class="code">POST /api/pet/clean</span> (dashboard)</td><td>poop_present→0, cleanliness→100, emotion=HAPPY</td></tr>
+    <tr><td>Inject</td><td><span class="code">POST /api/pet/inject</span> (dashboard)</td><td>health+20, emotion=RECOVER (only if health &lt;80)</td></tr>
+    <tr><td>Play Game</td><td>Catch-food game on device / dashboard</td><td>WIN: happiness+20 | LOSE: happiness−10</td></tr>
+    <tr><td>Walk (steps)</td><td>MPU-6050 shake → server detects steps</td><td>Points toward health; logged in step_statistics</td></tr>
+    <tr><td>Neglect poop &gt;15 min</td><td>Automatic (pet engine)</td><td>health −10 per engine cycle</td></tr>
+    <tr><td>Neglect hunger &gt;70</td><td>Automatic</td><td>Emotion→CRY/HUNGER, health degrades</td></tr>
+  </table>
+
+  <hr/>
+  <h2>16 · Quick-Start Checklist</h2>
+  <table>
+    <tr><th>#</th><th>Step</th><th>Expected</th></tr>
+    <tr><td>1</td><td>Flash <span class="code">esp32_sketch.ino</span> to XIAO ESP32 S3</td><td>Serial: "KAKU Starting…"</td></tr>
+    <tr><td>2</td><td>Ensure WiFi SSID "123" / "KUNAL 26" is in range</td><td>Serial: "WiFi Connected" + IP</td></tr>
+    <tr><td>3</td><td>OLED shows egg cracking → infant slides in</td><td>Startup animation ~5 s</td></tr>
+    <tr><td>4</td><td>Server: <span class="code">python app.py</span> on Cloud Run (or local)</td><td>"Pet engine started" + "SERVING"</td></tr>
+    <tr><td>5</td><td>Open <span class="code">index.html</span> in browser</td><td>Dashboard connects via WebSocket</td></tr>
+    <tr><td>6</td><td>Move device — check accelerometer on dashboard</td><td>Orientation updates live</td></tr>
+    <tr><td>7</td><td>Pet hungry? (hunger &gt; 70) — point camera at food</td><td>Image upload → Eating animation</td></tr>
+    <tr><td>8</td><td>Pet has poop icon → use Clean button on dashboard</td><td>Poop cleared, Happy emotion</td></tr>
+    <tr><td>9</td><td>Pet sick → use Inject button on dashboard</td><td>Health +20, Recover emotion</td></tr>
+  </table>
+
+  <div class="note" style="margin-top:20px;">
+    <b>Offline Fallback:</b> If WiFi is unavailable, flash <span class="code">16_TAMAGOTCHI_CAMERA_FINAL.ino</span> instead. 
+    The device runs a fully self-contained Tamagotchi with all 5 life stages, camera-based interaction, 
+    and an automatic hunger/health/sleep system — no server required.
+  </div>
+
+  <div style="margin-top:28px;text-align:center;color:#aaa;font-size:0.74rem">
+    KAKU System Documentation &nbsp;·&nbsp; Generated 2026-02-24 &nbsp;·&nbsp; esp32_sketch.ino + app.py
+  </div>
+
+</div><!-- /page -->
+
+</body>
+</html>

@@ -104,6 +104,7 @@ unsigned long eatingFinishTime = 0;  // NEW: Track when eating finished
 // NEW: Mode and hunger tracking for conditional camera send
 String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
+int  petAgeInt   = 0;              // Actual integer age from server (increments every 24 h)
 
 // Camera cover detection for menu switching
 #define BLACK_BRIGHTNESS_TH 90    // Brightness threshold (JPEG avg when covered ~70-85)
@@ -170,9 +171,13 @@ unsigned long lastFeedTime = 0;  // Track when pet was last fed
 // Toilet Menu Cleaning Gesture Variables
 bool holdingLeftForCleaning = false;  // Track if holding left tilt for cleaning
 unsigned long cleaningHoldStartTime = 0;  // Track when tilt started for cleaning
-bool isCleaningPoop = false;  // Flag for cleaning in progress
-int cleaningFadeStep = 0;  // Fade animation step (0-10)
-unsigned long cleaningStartTime = 0;  // When cleaning animation started
+bool isCleaningPoop = false;       // Flag for cleaning in progress
+int cleaningFadeStep = 0;          // Fade animation step (0-10)
+unsigned long cleaningStartTime = 0; // When cleaning animation started
+// Clean slide animation vars
+int cleanSlideX = 64;              // Current x position of sliding sprite (starts off right)
+int cleanSlideFrame = 1;           // Alternates between 1 and 2
+unsigned long cleanSlideLastStep = 0; // Last time sprite moved
 bool justCleanedPet = false;  // Flag to show "Cleared" after cleaning
 
 // Smooth control
@@ -337,12 +342,15 @@ void drawPoopIcon();  // NEW: Draw poop icon pixel-by-pixel (bottom-right)
 void playEatingAnimation();  // NEW: Play eating animation
 void drawStaticFoodIcon();  // NEW: Draw static food icon at top-left (food menu)
 void drawStaticToiletIcon();  // NEW: Draw static toilet icon at top-left (toilet menu)
+void drawCleanSpriteFrame(int frame, int xOffset);  // NEW: Draw clean slide sprite frame
 void drawStaticPlayIcon();  // NEW: Draw static play icon at top-left (play menu)
 void drawStaticHealthIcon();  // NEW: Draw static heart icon at top-left (health menu)
+void playInjectionAnimation();  // NEW: Play injection/medicine animation
 void displayFoodMenu();  // NEW: Display food menu screen
 void displayToiletMenu();  // NEW: Display toilet menu screen
 void displayPlayMenu();  // NEW: Display play menu screen (static icon)
 void displayHealthMenu();  // NEW: Display health menu screen with heart icon
+void displayStatusInfoMenu();  // NEW: Display status info menu (smiley + age + flash + score)
 bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
 void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET → PLAY)
 // void checkCameraCover();  // DISABLED: Check camera cover for menu switching (now uses 5-sec intervals)
@@ -880,6 +888,22 @@ void displayFoodMenu() {
 }
 
 // Display toilet menu screen
+// Draw clean slide sprite at given x position
+void drawCleanSpriteFrame(int frame, int xOffset) {
+    for (uint16_t y = 0; y < CLEAN_SLIDE_HEIGHT; y++) {
+        for (uint16_t x = 0; x < CLEAN_SLIDE_WIDTH; x++) {
+            uint16_t byteIndex = y * ((CLEAN_SLIDE_WIDTH + 7) / 8) + (x / 8);
+            uint8_t bitIndex = 7 - (x % 8);
+            if (pgm_read_byte(&clean_slide_frames[frame][byteIndex]) & (1 << bitIndex)) {
+                int px = x + xOffset;
+                int py = y + 4;  // vertical centering on 32px screen
+                if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT)
+                    display.drawPixel(px, py, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
 void displayToiletMenu() {
     display.clearDisplay();
     
@@ -891,28 +915,22 @@ void displayToiletMenu() {
     display.setTextColor(SSD1306_WHITE);
     
     if (isCleaningPoop) {
-        // Fade out "Clean me" text during cleaning animation
-        if (cleaningFadeStep < 10) {
-            // Draw fading text (skip pixels based on fade step)
-            display.setCursor(10, 12);
-            
-            // Simple fade by drawing text with varying brightness simulation
-            // (SSD1306 doesn't support grayscale, so we skip pixels)
-            if (cleaningFadeStep % 2 == 0) {
-                display.print("Clean me");
+        // Slide animation: sprite walks from right to left across screen
+        if (cleanSlideX > -CLEAN_SLIDE_WIDTH) {
+            // Move sprite every 80ms
+            if (millis() - cleanSlideLastStep > 80) {
+                cleanSlideX -= 2;
+                cleanSlideFrame = (cleanSlideFrame == 1) ? 2 : 1;  // toggle frames
+                cleanSlideLastStep = millis();
             }
-            
-            // Update fade step
-            if (millis() - cleaningStartTime > 200) {
-                cleaningFadeStep++;
-                cleaningStartTime = millis();
-            }
+            // Draw sliding sprite
+            drawCleanSpriteFrame(cleanSlideFrame, cleanSlideX);
         } else {
-            // Show "Cleared" after fade complete
+            // Sprite has exited - show "Cleared!" message
             display.setCursor(10, 12);
-            display.print("Cleared");
+            display.print("Cleared!");
             
-            // Stop cleaning animation after showing message
+            // Stop animation after showing message
             if (millis() - cleaningStartTime > 2000) {
                 isCleaningPoop = false;
                 justCleanedPet = true;
@@ -1279,6 +1297,78 @@ void displayHealthMenu() {
     display.display();
 }
 
+// ================= STATUS INFO MENU =================
+// 4-quadrant layout on 64x32 OLED:
+//   Q1 top-left  (0,0)   : Smiley face
+//   Q2 top-right (32,0)  : Pet age / stage label
+//   Q3 bot-left  (0,16)  : Flash / energy icon (lightning bolt bitmap)
+//   Q4 bot-right (32,16) : Game score + "pts" label
+
+#define STATUS_FLASH_WIDTH  32
+#define STATUS_FLASH_HEIGHT 16
+
+PROGMEM const uint8_t statusFlashBitmap[64] = {
+    0xff,0xff,0xff,0xff,  0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,  0xff,0xff,0xbf,0xff,
+    0xff,0xff,0x7f,0xff,  0xff,0xfe,0x7f,0xff,
+    0xff,0xfc,0x7f,0xff,  0xff,0xfc,0x1f,0xff,
+    0xff,0xf8,0x1f,0xff,  0xff,0xff,0x3f,0xff,
+    0xff,0xfe,0x7f,0xff,  0xff,0xfe,0xff,0xff,
+    0xff,0xfd,0xff,0xff,  0xff,0xfd,0xff,0xff,
+    0xff,0xff,0xff,0xff,  0xff,0xff,0xff,0xff
+};
+
+// Draw simple smiley for status quadrant (Q1)
+void drawSmileyStatus(int x, int y) {
+    display.drawCircle(x + 8, y + 8, 7, SSD1306_WHITE);
+    display.fillCircle(x + 5, y + 6, 1, SSD1306_WHITE);   // left eye
+    display.fillCircle(x + 11, y + 6, 1, SSD1306_WHITE);  // right eye
+    display.drawLine(x + 4, y + 11, x + 12, y + 11, SSD1306_WHITE);  // smile
+}
+
+// Draw flash/lightning bolt bitmap for status quadrant (Q3)
+// Renders PROGMEM bitmap inverted (0-bit = pixel ON)
+void drawFlashStatus(int xOffset, int yOffset) {
+    for (uint16_t row = 0; row < STATUS_FLASH_HEIGHT; row++) {
+        for (uint16_t col = 0; col < STATUS_FLASH_WIDTH; col++) {
+            uint16_t byteIndex = row * ((STATUS_FLASH_WIDTH + 7) / 8) + (col / 8);
+            uint8_t  bitIndex  = 7 - (col % 8);
+            if (!(pgm_read_byte(&statusFlashBitmap[byteIndex]) & (1 << bitIndex))) {
+                display.drawPixel(col + xOffset, row + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
+// STATUS INFO MENU display function
+void displayStatusInfoMenu() {
+    display.clearDisplay();
+
+    // --- Q1: Smiley (top-left) ---
+    drawSmileyStatus(0, 0);
+
+    // --- Q2: Actual age from server in years (top-right) ---
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(30, 4);
+    display.print(petAgeInt);      // Real integer age sent by server (increments every 24 h)
+    display.print(" yrs");
+
+    // --- Q3: Flash / energy icon (bottom-left) ---
+    drawFlashStatus(0, 16);
+
+    // --- Q4: Calories — default 100, or use gameScore if a game has been played ---
+    int calValue = (gameScore > 0) ? gameScore : 100;
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(32, 18);
+    display.print(calValue);
+    display.setCursor(34, 26);
+    display.print("cal");
+
+    display.display();
+}
+
 // Check for medicine gesture (hold left tilt for 3 seconds)
 void checkMedicineGesture() {
     if (!mpuAvailable || !petIsSick) return;
@@ -1374,6 +1464,9 @@ void checkCleaningGesture() {
             isCleaningPoop = true;
             cleaningFadeStep = 0;
             cleaningStartTime = millis();
+            cleanSlideX = SCREEN_WIDTH;   // Start sprite from right edge
+            cleanSlideFrame = 1;
+            cleanSlideLastStep = millis();
             holdingLeftForCleaning = false;
             
             Serial.println("🧹 Starting cleaning animation!");
@@ -1384,11 +1477,6 @@ void checkCleaningGesture() {
         }
     } else {
         holdingLeftForCleaning = false;
-    }
-}
-        }
-    } else {
-        holdingLeftForFeeding = false;
     }
 }
 
@@ -1473,7 +1561,7 @@ bool isFrameMostlyBlack(camera_fb_t * fb) {
     return isBlack;
 }
 
-// Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → PLAY_MENU → HEALTH_MENU → MAIN
+// Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → PLAY_MENU → HEALTH_MENU → STATUS_INFO_MENU → MAIN
 void cycleMenu() {
     String newMenu;
     
@@ -1485,6 +1573,8 @@ void cycleMenu() {
         newMenu = "PLAY_MENU";
     } else if (currentScreenType == "PLAY_MENU") {
         newMenu = "HEALTH_MENU";
+    } else if (currentScreenType == "HEALTH_MENU") {
+        newMenu = "STATUS_INFO_MENU";
     } else {
         newMenu = "MAIN";
     }
@@ -1584,6 +1674,9 @@ void displayPetAnimation() {
             return;  // Exit early
         } else if (currentScreenType == "HEALTH_MENU") {
             displayHealthMenu();
+            return;  // Exit early
+        } else if (currentScreenType == "STATUS_INFO_MENU") {
+            displayStatusInfoMenu();
             return;  // Exit early
         }
         
@@ -2282,6 +2375,15 @@ void getOLEDDisplayFromServer() {
                 }
             }
             
+            // Parse actual integer age from server
+            if (g_oledDoc.containsKey("age")) {
+                int newAge = g_oledDoc["age"].as<int>();
+                if (petAgeInt != newAge) {
+                    petAgeInt = newAge;
+                    Serial.printf("🗓️  Pet age updated: %d yrs\n", petAgeInt);
+                }
+            }
+            
             // NEW: Handle screen_type / screen_state (DISABLED - ESP32 controls menu locally)
             // Server menu override disabled to allow local camera cover menu navigation
             /*
@@ -2911,7 +3013,7 @@ void sendCleanRequest() {
     http.setReuse(true);
     http.setTimeout(5000);
     
-    String cleanUrl = String(serverBaseUrl) + "/api/pet/clean";
+    String cleanUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/clean";
     Serial.println("🧹 Sending cleaning request to server...");
     
     if (!http.begin(cleanUrl)) {
