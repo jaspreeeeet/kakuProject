@@ -96,6 +96,7 @@ bool startupComplete = false;  // Track if startup egg animation is done
 bool showHomeIcon = true;   // ESP32 controls: Always show on MAIN screen
 bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
 bool showPoopIcon = false;  // NEW: Show poop icon when poop present
+bool showSickIcon = false;  // Show heart/sick icon after poop ignored >15 min (only when poop cleared)
 String currentScreenType = "MAIN";  // NEW: Track current screen state from server
 String currentEmotion = "IDLE";  // NEW: Track current emotion from server (IDLE, CRY, SAD, HAPPY, EATING, etc.)
 bool justFinishedEating = false;  // NEW: Track if just finished eating to show GOOD text
@@ -297,7 +298,8 @@ enum NetReqType : uint8_t {
     NET_OLED   = 1,  // Poll OLED display state from server
     NET_EVENTS = 2,  // Poll server for events
     NET_IMAGE  = 3,  // Upload camera image to server
-    NET_CLEAN  = 4   // Send cleaning request to server
+    NET_CLEAN  = 4,  // Send cleaning request to server
+    NET_INJECT = 5   // Send injection/medicine given to server
 };
 
 QueueHandle_t networkQueue;           // Queue: loop() → networkTask
@@ -339,6 +341,7 @@ void getOLEDDisplayFromServer();  // NEW: Forward declaration
 void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
 void drawFoodIcon();  // NEW: Draw food icon pixel-by-pixel (bottom-right)
 void drawPoopIcon();  // NEW: Draw poop icon pixel-by-pixel (bottom-right)
+void drawSickIcon();  // NEW: Draw blinking heart/sick icon at bottom-right (after poop ignored >15 min)
 void playEatingAnimation();  // NEW: Play eating animation
 void drawStaticFoodIcon();  // NEW: Draw static food icon at top-left (food menu)
 void drawStaticToiletIcon();  // NEW: Draw static toilet icon at top-left (toilet menu)
@@ -346,6 +349,7 @@ void drawCleanSpriteFrame(int frame, int xOffset);  // NEW: Draw clean slide spr
 void drawStaticPlayIcon();  // NEW: Draw static play icon at top-left (play menu)
 void drawStaticHealthIcon();  // NEW: Draw static heart icon at top-left (health menu)
 void playInjectionAnimation();  // NEW: Play injection/medicine animation
+void sendInjectRequest();       // NEW: Notify server that injection was given
 void displayFoodMenu();  // NEW: Display food menu screen
 void displayToiletMenu();  // NEW: Display toilet menu screen
 void displayPlayMenu();  // NEW: Display play menu screen (static icon)
@@ -687,6 +691,26 @@ void drawFoodIcon() {
             uint8_t bitIndex = y % 8;
             
             if (pgm_read_byte(&food_icon_frames[foodFrame][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
+// ================= SICK ICON DRAWING (BLINKING HEART) =================
+// Shows blinking heart icon at bottom-right ONLY when poop was ignored >15 min AND poop has been cleared
+void drawSickIcon() {
+    // Blink: 500ms on, 500ms off
+    if ((millis() / 500) % 2 == 1) return;
+    
+    int xOffset = SCREEN_WIDTH - HEART_ICON_WIDTH;   // 64-24 = 40 (same spot as poop)
+    int yOffset = SCREEN_HEIGHT - HEART_ICON_HEIGHT; // 32-12 = 20
+    
+    for (uint16_t y = 0; y < HEART_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < HEART_ICON_WIDTH; x++) {
+            uint16_t byteIndex = y * ((HEART_ICON_WIDTH + 7) / 8) + (x / 8);
+            uint8_t bitIndex = 7 - (x % 8);
+            if (pgm_read_byte(&heart_icon_frames[0][byteIndex]) & (1 << bitIndex)) {
                 display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
             }
         }
@@ -1514,9 +1538,14 @@ void playInjectionAnimation() {
                 // Animation complete - cure the pet
                 givingMedicine = false;
                 petIsSick = false;
+                showSickIcon = false;  // Hide sick icon immediately
                 medicineAnimLoopCount = 0;
                 currentInjectionFrame = 0;
                 Serial.println("✅ Medicine given! Pet is now healthy!");
+                
+                // Notify server: sick_pending cleared, hunger resumes
+                uint8_t req = NET_INJECT;
+                xQueueSend(networkQueue, &req, 0);
                 
                 // Show "All Good" message for a moment
                 display.clearDisplay();
@@ -1773,6 +1802,11 @@ void displayPetAnimation() {
             drawPoopIcon();
         }
         
+        // Draw sick/heart icon at bottom-right (only when poop cleared but was ignored >15 min)
+        if (showSickIcon && !showPoopIcon && currentScreenType == "MAIN") {
+            drawSickIcon();
+        }
+        
         // Only animation - no text
         display.display();
         
@@ -1826,6 +1860,11 @@ void networkTask(void *parameter) {
                 case NET_CLEAN:
                     // Lightweight cleaning request
                     sendCleanRequest();
+                    break;
+                
+                case NET_INJECT:
+                    // Notify server medicine was given
+                    sendInjectRequest();
                     break;
             }
             vTaskDelay(pdMS_TO_TICKS(20));  // Brief settle between requests
@@ -2410,40 +2449,48 @@ void getOLEDDisplayFromServer() {
                 showHomeIcon = false;
             }
             
-            // DISABLED: Server hunger state (controlled locally by feeding gesture)
-            // if (g_oledDoc.containsKey("show_food_icon")) {
-            //     bool newShowFood = g_oledDoc["show_food_icon"].as<bool>();
-            //     
-            //     // Ignore server food icon updates for 10 seconds after feeding
-            //     // This gives server time to process image and reduce hunger
-            //     if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
-            //         Serial.println("🍽️  Ignoring server food icon (just fed, waiting for sync)");
-            //     } else {
-            //         justFedPet = false;  // Resume accepting server updates
-            //         if (showFoodIcon != newShowFood) {
-            //             showFoodIcon = newShowFood;
-            //             Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
-            //         }
-            //     }
-            // }
+            if (g_oledDoc.containsKey("show_food_icon")) {
+                bool newShowFood = g_oledDoc["show_food_icon"].as<bool>();
+                
+                // Ignore server food icon updates for 10 seconds after feeding
+                // This gives server time to process image and reduce hunger
+                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+                    Serial.println("🍽️  Ignoring server food icon (just fed, waiting for sync)");
+                } else {
+                    justFedPet = false;  // Resume accepting server updates
+                    if (showFoodIcon != newShowFood) {
+                        showFoodIcon = newShowFood;
+                        Serial.printf("🍽️  Food Icon: %s\n", showFoodIcon ? "SHOW" : "HIDE");
+                    }
+                }
+            }
             
             if (g_oledDoc.containsKey("show_poop_icon")) {
                 showPoopIcon = g_oledDoc["show_poop_icon"].as<bool>();
                 Serial.printf("💩 Poop Icon: %s\n", showPoopIcon ? "SHOW" : "HIDE");
             }
             
+            // Sick icon — shown after poop ignored >15 min AND poop has been cleared
+            if (g_oledDoc.containsKey("show_sick_icon")) {
+                bool newSick = g_oledDoc["show_sick_icon"].as<bool>();
+                if (showSickIcon != newSick) {
+                    showSickIcon = newSick;
+                    petIsSick = newSick;  // Sync health menu "Give Med" / "All Good"
+                    Serial.printf("❤️  Sick Icon: %s\n", showSickIcon ? "SHOW" : "HIDE");
+                }
+            }
+            
             Serial.println("🤖 Mode: AUTOMATIC (forced)");
             
-            // DISABLED: Server hunger state (controlled locally by feeding gesture)
-            // if (g_oledDoc.containsKey("is_hungry")) {
-            //     // Ignore server hunger updates for 10 seconds after feeding
-            //     if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
-            //         Serial.println("🍽️  Ignoring server hunger status (just fed, waiting for sync)");
-            //     } else {
-            //         petIsHungry = g_oledDoc["is_hungry"].as<bool>();
-            //         Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
-            //     }
-            // }
+            if (g_oledDoc.containsKey("is_hungry")) {
+                // Ignore server hunger updates for 10 seconds after feeding
+                if (justFedPet && (millis() - lastFeedTime < FEED_IGNORE_DURATION)) {
+                    Serial.println("🍽️  Ignoring server hunger status (just fed, waiting for sync)");
+                } else {
+                    petIsHungry = g_oledDoc["is_hungry"].as<bool>();
+                    Serial.printf("🍽️  Hungry: %s\n", petIsHungry ? "YES" : "NO");
+                }
+            }
             
             if (g_oledDoc.containsKey("current_emotion")) {
                 String emotion = g_oledDoc["current_emotion"].as<String>();
@@ -3042,6 +3089,44 @@ void sendCleanRequest() {
         }
     } else {
         Serial.printf("❌ Cleaning request failed: %s\n", http.errorToString(httpCode).c_str());
+    }
+    
+    http.end();
+}
+
+// ================= SEND INJECTION REQUEST =================
+// Called after injection animation completes — clears sick_pending on server, resumes hunger
+void sendInjectRequest() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected, cannot send injection request");
+        return;
+    }
+    
+    HTTPClient http;
+    http.setReuse(true);
+    http.setTimeout(5000);
+    
+    String injectUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/inject";
+    Serial.println("💉 Sending injection request to server...");
+    
+    if (!http.begin(injectUrl)) {
+        Serial.println("❌ Failed to initialize HTTP client for injection");
+        return;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    
+    int httpCode = http.POST("{}");
+    
+    if (httpCode > 0) {
+        Serial.printf("📡 Injection server response: %d\n", httpCode);
+        if (httpCode == HTTP_CODE_OK) {
+            Serial.println("✅ Server injection acknowledged — sick_pending cleared, hunger resumes");
+        } else {
+            Serial.printf("⚠️ Injection unexpected response: %d\n", httpCode);
+        }
+    } else {
+        Serial.printf("❌ Injection request failed: %s\n", http.errorToString(httpCode).c_str());
     }
     
     http.end();

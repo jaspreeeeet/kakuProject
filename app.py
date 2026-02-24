@@ -629,6 +629,10 @@ def init_database():
                 if 'last_hunger_update' not in pet_columns:
                     cursor.execute('ALTER TABLE pet_state ADD COLUMN last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP')
                     print("✅ Added last_hunger_update column to pet_state (hunger updates every 360 seconds)")
+                
+                if 'sick_pending' not in pet_columns:
+                    cursor.execute('ALTER TABLE pet_state ADD COLUMN sick_pending BOOLEAN DEFAULT 0')
+                    print("✅ Added sick_pending column to pet_state")
             except Exception as e:
                 print(f"⚠️ Migration warning: {e}")
             
@@ -674,6 +678,7 @@ def init_database():
                     last_clean_time DATETIME,
                     last_age_increment DATETIME DEFAULT CURRENT_TIMESTAMP,
                     last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    sick_pending BOOLEAN DEFAULT 0,
                     
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -747,7 +752,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                        poop_present, poop_timestamp, digestion_due_time,
                        current_menu, current_emotion,
                        last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment, last_hunger_update
+                       last_age_increment, last_hunger_update, sick_pending
                 FROM pet_state
                 WHERE device_id = ?
             ''', (device_id,))
@@ -780,7 +785,8 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                 'last_sleep_time': result[18],
                 'last_clean_time': result[19],
                 'last_age_increment': result[20],
-                'last_hunger_update': result[21]
+                'last_hunger_update': result[21],
+                'sick_pending': result[22] if result[22] is not None else 0
             }
             
             # Merge updates
@@ -797,7 +803,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                     current_menu = ?, current_emotion = ?, emotion_expire_at = ?,
                     action_lock = ?,
                     last_feed_time = ?, last_play_time = ?, last_sleep_time = ?, last_clean_time = ?,
-                    last_age_increment = ?, last_hunger_update = ?, updated_at = CURRENT_TIMESTAMP
+                    last_age_increment = ?, last_hunger_update = ?, sick_pending = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND version = ?
             ''', (
                 new_state['version'], new_state['age'], new_state['stage'],
@@ -809,6 +815,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                 new_state['last_feed_time'], new_state['last_play_time'],
                 new_state['last_sleep_time'], new_state['last_clean_time'],
                 new_state['last_age_increment'], new_state.get('last_hunger_update'),
+                new_state.get('sick_pending', 0),
                 current_state['id'], current_state['version']
             ))
             
@@ -841,7 +848,7 @@ def get_pet_state(device_id='ESP32_001'):
                        poop_present, poop_timestamp, current_menu, current_emotion,
                        emotion_expire_at, action_lock, version, digestion_due_time,
                        last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment
+                       last_age_increment, sick_pending
                 FROM pet_state
                 WHERE device_id = ?
             ''', (device_id,))
@@ -870,7 +877,8 @@ def get_pet_state(device_id='ESP32_001'):
                 'last_play_time': result[16],
                 'last_sleep_time': result[17],
                 'last_clean_time': result[18],
-                'last_age_increment': result[19]
+                'last_age_increment': result[19],
+                'sick_pending': bool(result[20]) if result[20] is not None else False
             }
         finally:
             conn.close()
@@ -988,22 +996,30 @@ def pet_engine_cycle():
                 time_since_hunger = 361  # Force first update
             
             if time_since_hunger >= 360:  # 6 minutes passed
-                hunger_increase = 0
-                current_stage = updates.get('stage', state['stage'])
+                # ⏸️ PAUSE hunger when poop is present OR sick_pending (sick not treated yet)
+                poop_active = updates.get('poop_present', state.get('poop_present', 0))
+                sick_active = updates.get('sick_pending', state.get('sick_pending', 0))
                 
-                if current_stage == 'INFANT':
-                    hunger_increase = 15
-                elif current_stage == 'CHILD':
-                    hunger_increase = 10
-                elif current_stage == 'ADULT':
-                    hunger_increase = 8
-                elif current_stage == 'OLD':
-                    hunger_increase = 12
-                
-                # Apply hunger increase (scaled for 360-second / 6-minute intervals)
-                updates['hunger'] = min(100, state['hunger'] + (hunger_increase / 5))  # 30min / 6min = 5 cycles
-                updates['last_hunger_update'] = datetime.now().isoformat()
-                print(f"🍽️  Hunger increased by {hunger_increase / 5:.1f}: {state['hunger']} → {updates['hunger']}")
+                if poop_active or sick_active:
+                    updates['last_hunger_update'] = datetime.now().isoformat()  # Reset timer but don't increase
+                    print(f"⏸️  Hunger PAUSED (poop={bool(poop_active)}, sick_pending={bool(sick_active)})")
+                else:
+                    hunger_increase = 0
+                    current_stage = updates.get('stage', state['stage'])
+                    
+                    if current_stage == 'INFANT':
+                        hunger_increase = 15
+                    elif current_stage == 'CHILD':
+                        hunger_increase = 10
+                    elif current_stage == 'ADULT':
+                        hunger_increase = 8
+                    elif current_stage == 'OLD':
+                        hunger_increase = 12
+                    
+                    # Apply hunger increase (scaled for 360-second / 6-minute intervals)
+                    updates['hunger'] = min(100, state['hunger'] + (hunger_increase / 5))  # 30min / 6min = 5 cycles
+                    updates['last_hunger_update'] = datetime.now().isoformat()
+                    print(f"🍽️  Hunger increased by {hunger_increase / 5:.1f}: {state['hunger']} → {updates['hunger']}")
             else:
                 print(f"⏳ Hunger update in {360 - time_since_hunger:.0f} seconds")
             
@@ -1017,13 +1033,14 @@ def pet_engine_cycle():
                     updates['digestion_due_time'] = None
                     print("💩 Poop appeared (digestion complete)")
             
-            # Check poop age for health penalty
+            # Check poop age for health penalty + sick_pending flag
             if state['poop_present'] and state.get('poop_timestamp'):
                 from datetime import datetime, timedelta
                 poop_time = datetime.fromisoformat(state['poop_timestamp']) if isinstance(state['poop_timestamp'], str) else state['poop_timestamp']
                 if poop_time and (datetime.now() - poop_time) > timedelta(minutes=15):
                     updates['health'] = max(0, state['health'] - 10)
-                    print(f"🤢 Poop ignored >15min → Health penalty: {state['health']} → {updates['health']}")
+                    updates['sick_pending'] = 1  # Mark sick — icon shows after poop is cleared
+                    print(f"🤢 Poop ignored >15min → Health penalty + sick_pending set: health {state['health']} → {updates['health']}")
             
             # 4️⃣ ENERGY DECAY
             updates['energy'] = max(0, state['energy'] - 2)
@@ -1865,9 +1882,10 @@ def pet_inject():
         updates = {'action_lock': 1}
         update_pet_state_atomic(device_id, updates)
         
-        # Injection logic
+        # Injection logic — also clears sick_pending and resumes hunger
         updates = {
             'health': min(100, state['health'] + 20),
+            'sick_pending': 0,  # Cure sickness — sick icon disappears, hunger resumes
             'current_emotion': 'RECOVER',
             'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat(),
             'action_lock': 0
@@ -2345,10 +2363,11 @@ def get_oled_display():
             'poop_present': pet['poop_present'],
             'age': pet['age'],
             'mode': 'AUTOMATIC',
-            'is_hungry': pet['hunger'] > 70,
-            'show_home_icon': current_menu == 'MAIN',  # Show home icon on main screen
-            'show_food_icon': pet['hunger'] > 70,
+            'is_hungry': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
+            'show_home_icon': current_menu == 'MAIN',
+            'show_food_icon': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
             'show_poop_icon': pet['poop_present'],
+            'show_sick_icon': bool(pet.get('sick_pending', False)) and not pet['poop_present'],
             'screen_type': current_menu,
             'play_eating_animation': play_eating,
             'play_cleaning_animation': play_cleaning,
