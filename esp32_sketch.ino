@@ -1952,6 +1952,16 @@ void displayPetAnimation() {
             frameData = old_cry[currentFrame % OLD_CRY_FRAME_COUNT];
             frameCount = OLD_CRY_FRAME_COUNT;
             display.drawBitmap(0, 0, frameData, OLD_CRY_WIDTH, OLD_CRY_HEIGHT, SSD1306_WHITE);
+        } else if (currentEmotion == "SURPRISE" && petAge == OLD) {
+            // OLD surprised
+            frameData = old_surprise[currentFrame % OLD_SURPRISE_FRAME_COUNT];
+            frameCount = OLD_SURPRISE_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, OLD_SURPRISE_WIDTH, OLD_SURPRISE_HEIGHT, SSD1306_WHITE);
+        } else if (currentEmotion == "SURPRISE") {
+            // INFANT/CHILD/ADULT surprised — use infant_surprise_frames as fallback
+            frameData = infant_surprise_frames[currentFrame % INFANT_SURPRISE_FRAME_COUNT];
+            frameCount = INFANT_SURPRISE_FRAME_COUNT;
+            display.drawBitmap(0, 0, frameData, INFANT_SURPRISE_WIDTH, INFANT_SURPRISE_HEIGHT, SSD1306_WHITE);
         } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER" || currentEmotion == "POOP") {
             // SAD/HUNGER/POOP - sad animation (poop present = pet is uncomfortable)
             switch (petAge) {
