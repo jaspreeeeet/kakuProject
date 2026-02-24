@@ -97,6 +97,7 @@ bool showHomeIcon = true;   // ESP32 controls: Always show on MAIN screen
 bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
 bool showPoopIcon = false;  // NEW: Show poop icon when poop present
 bool showSickIcon = false;  // Show heart/sick icon after poop ignored >15 min (only when poop cleared)
+bool showPlayIcon = false;  // Show play icon 1hr after last feed (blinks top-left, paused when sick)
 String currentScreenType = "MAIN";  // NEW: Track current screen state from server
 String currentEmotion = "IDLE";  // NEW: Track current emotion from server (IDLE, CRY, SAD, HAPPY, EATING, etc.)
 bool justFinishedEating = false;  // NEW: Track if just finished eating to show GOOD text
@@ -151,6 +152,21 @@ unsigned long gameOverStartTime = 0;
 unsigned long gameStartTime = 0;
 unsigned long holdStartTime = 0;
 bool holdingLeft = false;
+
+// Which game is active: 0 = catch food, 1 = dodge obstacle
+int activeGame = 0;
+
+// Game 2 (Dodge) variables
+int obsX = 0;
+int obsY = 0;
+const int obsSize = 4;
+int dodgeFallSpeed = 120;
+unsigned long lastObsFall = 0;
+int dodgeScore = 0;
+bool dodgeGameOver = false;
+int walkFrame = 0;
+unsigned long lastWalkFrameTime = 0;
+bool dodgeGameOverAnimDone = false;
 
 // Health Menu Medicine Variables
 bool petIsSick = false;  // Track if pet is sick (to be managed by backend in future)
@@ -344,6 +360,7 @@ void getOLEDDisplayFromServer();  // NEW: Forward declaration
 void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
 void drawFoodIcon();  // NEW: Draw food icon pixel-by-pixel (bottom-right)
 void drawPoopIcon();  // NEW: Draw poop icon pixel-by-pixel (bottom-right)
+void drawPlayIcon();  // NEW: Draw blinking play icon at top-left (1hr after feed)
 void drawSickIcon();  // NEW: Draw blinking heart/sick icon at bottom-right (after poop ignored >15 min)
 void playEatingAnimation();  // NEW: Play eating animation
 void drawStaticFoodIcon();  // NEW: Draw static food icon at top-left (food menu)
@@ -680,6 +697,29 @@ void drawHomeIcon() {
     }
 }
 
+// ================= PLAY ICON DRAWING (BLINKING, TOP-LEFT) =================
+// Blinks at top-left 1 hr after feeding — reminder to play with the pet
+// Hidden when pet is sick (sick_pending active on server, showPlayIcon=false)
+void drawPlayIcon() {
+    // Blink: 600ms on, 600ms off
+    if ((millis() / 600) % 2 == 1) return;
+    
+    int xOffset = 0;  // Top-left corner (same as home icon but home hidden when play shows)
+    int yOffset = 0;
+    
+    uint8_t frame = (millis() / play_icon_delays[0]) % PLAY_ICON_FRAME_COUNT;
+    
+    for (uint16_t y = 0; y < PLAY_ICON_HEIGHT; y++) {
+        for (uint16_t x = 0; x < PLAY_ICON_WIDTH; x++) {
+            uint16_t byteIndex = y * ((PLAY_ICON_WIDTH + 7) / 8) + (x / 8);
+            uint8_t bitIndex = 7 - (x % 8);
+            if (pgm_read_byte(&play_icon_frames[frame][byteIndex]) & (1 << bitIndex)) {
+                display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
+            }
+        }
+    }
+}
+
 // ================= FOOD ICON DRAWING (PIXEL-BY-PIXEL) =================
 // Draws food icon at bottom-right corner using pixel-by-pixel approach
 void drawFoodIcon() {
@@ -714,7 +754,7 @@ void drawSickIcon() {
         for (uint16_t x = 0; x < HEART_ICON_WIDTH; x++) {
             uint16_t byteIndex = y * ((HEART_ICON_WIDTH + 7) / 8) + (x / 8);
             uint8_t bitIndex = 7 - (x % 8);
-            if (pgm_read_byte(&heart_icon_frames[0][byteIndex]) & (1 << bitIndex)) {
+            if (pgm_read_byte(&heart_icon_frames[1][byteIndex]) & (1 << bitIndex)) {
                 display.drawPixel(x + xOffset, y + yOffset, SSD1306_WHITE);
             }
         }
@@ -997,6 +1037,16 @@ void drawStaticPlayIcon() {
 
 // ================= PLAY MENU GAME FUNCTIONS =================
 
+// ---- Shared bitmaps for Dodge game character ----
+// 8x8 walk frame 1: standing
+const unsigned char charFrame1[] PROGMEM = {
+    0x18, 0x3C, 0x18, 0x24, 0x18, 0x24, 0x00, 0x00
+};
+// 8x8 walk frame 2: striding
+const unsigned char charFrame2[] PROGMEM = {
+    0x18, 0x3C, 0x18, 0x24, 0x3C, 0x12, 0x00, 0x00
+};
+
 // Calculate KakuCoin reward
 float calculateKakuCoin(int scoreValue) {
     return scoreValue * 0.80;
@@ -1156,10 +1206,12 @@ void checkStartGesture() {
         }
         
         if (millis() - holdStartTime > 3000) {
+            activeGame = random(0, 2);  // 0 = catch food, 1 = dodge obstacle
             resetGameState();
+            dodgeFallSpeed = 120;  // reset dodge speed
             playGameState = GAME_PLAYING;
             gameStartTime = millis();
-            Serial.println("🎮 Game started!");
+            Serial.printf("🎮 Game started! Type: %s\n", activeGame == 0 ? "CATCH FOOD" : "DODGE");
         }
     } else {
         holdingLeft = false;
@@ -1177,12 +1229,121 @@ void resetGameState() {
     foodY = 0;
     foodX = random(0, SCREEN_WIDTH - foodSize);
     
+    // Reset dodge game state too
+    dodgeScore = 0;
+    dodgeGameOver = false;
+    dodgeGameOverAnimDone = false;
+    obsY = 0;
+    obsX = random(0, SCREEN_WIDTH - obsSize);
+    walkFrame = 0;
+    playerX = 28;
+    
     // Initialize coins
     for (int i = 0; i < COIN_COUNT; i++) {
         coinX[i] = random(0, SCREEN_WIDTH);
         coinY[i] = random(0, SCREEN_HEIGHT);
         coinSpeed[i] = random(1, 3);
     }
+}
+
+// ---- GAME 2: DODGE OBSTACLE FUNCTIONS ----
+
+void readTiltForDodge() {
+    if (!mpuAvailable) return;
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    float accelX = ax / 16384.0;
+    playerX += accelX * 3.0;
+    if (playerX < 0) playerX = 0;
+    if (playerX > SCREEN_WIDTH - 8) playerX = SCREEN_WIDTH - 8;
+    if (abs(accelX) > 0.2) {
+        if (millis() - lastWalkFrameTime > 120) {
+            walkFrame = !walkFrame;
+            lastWalkFrameTime = millis();
+        }
+    }
+}
+
+void updateObstacle() {
+    if (millis() - lastObsFall > dodgeFallSpeed) {
+        obsY += 2;
+        lastObsFall = millis();
+    }
+    if (obsY > SCREEN_HEIGHT) {
+        dodgeScore++;
+        obsY = 0;
+        obsX = random(0, SCREEN_WIDTH - obsSize);
+        // Speed up slightly every 5 dodges
+        if (dodgeScore % 5 == 0 && dodgeFallSpeed > 40) dodgeFallSpeed -= 8;
+    }
+}
+
+void checkDodgeCollision() {
+    const int charY = 24;
+    if (obsY + obsSize >= charY &&
+        obsX + obsSize >= (int)playerX &&
+        obsX <= (int)playerX + 8) {
+        dodgeGameOver = true;
+    }
+}
+
+void drawDodgeGame() {
+    display.clearDisplay();
+    // Draw character
+    if (walkFrame == 0)
+        display.drawBitmap((int)playerX, 19, charFrame1, 8, 8, SSD1306_WHITE);
+    else
+        display.drawBitmap((int)playerX, 19, charFrame2, 8, 8, SSD1306_WHITE);
+    // Draw obstacle
+    display.fillRect(obsX, obsY, obsSize, obsSize, SSD1306_WHITE);
+    // Score
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.print("S:");
+    display.print(dodgeScore);
+    display.display();
+}
+
+void playDodgeGameOverAnim() {
+    // Explosion rings
+    for (int r = 2; r < 14; r += 2) {
+        display.clearDisplay();
+        display.drawCircle((int)playerX + 4, 23, r, SSD1306_WHITE);
+        display.display();
+        delay(70);
+    }
+    // Scatter pixels
+    for (int i = 0; i < 8; i++) {
+        display.clearDisplay();
+        for (int p = 0; p < 15; p++) {
+            int px = (int)playerX + random(-8, 8);
+            int py = 23 + random(-8, 8);
+            display.drawPixel(px, py, SSD1306_WHITE);
+        }
+        display.display();
+        delay(60);
+    }
+    // Screen shake "CRASH!"
+    for (int i = 0; i < 6; i++) {
+        display.clearDisplay();
+        int s = random(-2, 2);
+        display.setCursor(10 + s, 10);
+        display.print("CRASH!");
+        display.display();
+        delay(90);
+    }
+    // Final score screen
+    display.clearDisplay();
+    float kc = dodgeScore * 0.8;
+    display.setCursor(4, 6);
+    display.print("GAME OVER");
+    display.setCursor(10, 18);
+    display.print("KC:");
+    display.print(kc, 1);
+    display.display();
+    delay(2500);
+    dodgeGameOverAnimDone = true;
 }
 
 // Send KakuCoin reward to server
@@ -1210,7 +1371,7 @@ void sendKakuCoinReward(int score, float kakucoin) {
     doc["score"] = score;
     doc["kakucoin"] = kakucoin;
     doc["play_duration"] = (millis() - gameStartTime) / 1000;  // seconds
-    doc["game_type"] = "catch_food";
+    doc["game_type"] = (activeGame == 0) ? "catch_food" : "dodge_obstacle";
     
     String payload;
     serializeJson(doc, payload);
@@ -1248,15 +1409,35 @@ void displayPlayMenu() {
             break;
         
         case GAME_PLAYING:
-            // Active gameplay
-            readTiltForGame();
-            updateFoodFalling();
-            checkGameCollision();
-            drawGamePlay();
+            if (activeGame == 0) {
+                // Game 1: Catch Food
+                readTiltForGame();
+                updateFoodFalling();
+                checkGameCollision();
+                drawGamePlay();
+            } else {
+                // Game 2: Dodge Obstacle
+                if (!dodgeGameOver) {
+                    readTiltForDodge();
+                    updateObstacle();
+                    checkDodgeCollision();
+                    drawDodgeGame();
+                } else {
+                    // Trigger game-over flow
+                    if (!dodgeGameOverAnimDone) {
+                        playDodgeGameOverAnim();  // blocking animation
+                    }
+                    // Send reward and return to idle
+                    float kc = dodgeScore * 0.8;
+                    sendKakuCoinReward(dodgeScore, kc);
+                    playGameState = GAME_IDLE;
+                    Serial.println("🎮 Dodge game ended, resuming normal operations");
+                }
+            }
             break;
         
         case GAME_OVER_ANIM:
-            // Game over animation
+            // Game 1 (catch food) game-over animation (coins screen)
             drawGameOverScreen();
             
             if (millis() - gameOverStartTime > 5000) {
@@ -1762,8 +1943,8 @@ void displayPetAnimation() {
             frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
             frameCount = INFANT_CRY_FRAME_COUNT;
             display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
-        } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER") {
-            // SAD/HUNGER - show age-appropriate SAD animation or fallback
+        } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER" || currentEmotion == "POOP") {
+            // SAD/HUNGER/POOP - sad animation (poop present = pet is uncomfortable)
             switch (petAge) {
                 case INFANT: {
                     // INFANT has SAD animation
@@ -1826,8 +2007,10 @@ void displayPetAnimation() {
             }
         }
         
-        // Draw home icon at top-left corner using pixel-by-pixel approach (no corruption)
-        if (showHomeIcon && currentScreenType == "MAIN") {
+        // Draw home icon OR play icon at top-left (play icon overrides home when active)
+        if (showPlayIcon && currentScreenType == "MAIN") {
+            drawPlayIcon();  // Play reminder blinks at top-left
+        } else if (showHomeIcon && currentScreenType == "MAIN") {
             drawHomeIcon();
         }
         
@@ -2525,6 +2708,15 @@ void getOLEDDisplayFromServer() {
                     showSickIcon = newSick;
                     petIsSick = newSick;  // Sync health menu "Give Med" / "All Good"
                     Serial.printf("❤️  Sick Icon: %s\n", showSickIcon ? "SHOW" : "HIDE");
+                }
+            }
+            
+            // Play icon — 1hr after last feed, hidden when sick or poop present
+            if (g_oledDoc.containsKey("show_play_icon")) {
+                bool newPlay = g_oledDoc["show_play_icon"].as<bool>();
+                if (showPlayIcon != newPlay) {
+                    showPlayIcon = newPlay;
+                    Serial.printf("🎮 Play Icon: %s\n", showPlayIcon ? "SHOW" : "HIDE");
                 }
             }
             
