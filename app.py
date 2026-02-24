@@ -2010,6 +2010,34 @@ def pet_play_result():
         print(f'❌ Error processing play result: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/pet/cover-happy', methods=['POST'])
+def pet_cover_happy():
+    """Camera cover interaction detected — happiness +5 (max 100)"""
+    try:
+        data = request.get_json() or {}
+        device_id = data.get('device_id', 'ESP32_001')
+        
+        state = get_pet_state(device_id)
+        if not state:
+            return jsonify({'status': 'error', 'message': 'Pet not found'}), 404
+        
+        new_happiness = min(100, state['happiness'] + 5)
+        updates = {'happiness': new_happiness}
+        result = update_pet_state_atomic(device_id, updates)
+        
+        if result:
+            print(f"😀 Cover interaction: happiness {state['happiness']} → {result['happiness']}")
+            return jsonify({
+                'status': 'success',
+                'happiness': result['happiness']
+            }), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Failed to update happiness'}), 500
+
+    except Exception as e:
+        print(f'❌ Error in cover-happy: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/game/reward', methods=['POST'])
 def game_reward():
     """Process catch-food game reward - store score and KakuCoin"""

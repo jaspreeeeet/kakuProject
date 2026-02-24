@@ -299,7 +299,8 @@ enum NetReqType : uint8_t {
     NET_EVENTS = 2,  // Poll server for events
     NET_IMAGE  = 3,  // Upload camera image to server
     NET_CLEAN  = 4,  // Send cleaning request to server
-    NET_INJECT = 5   // Send injection/medicine given to server
+    NET_INJECT = 5,  // Send injection/medicine given to server
+    NET_HAPPY  = 6   // Camera cover detected → happiness +5
 };
 
 QueueHandle_t networkQueue;           // Queue: loop() → networkTask
@@ -1866,6 +1867,11 @@ void networkTask(void *parameter) {
                     // Notify server medicine was given
                     sendInjectRequest();
                     break;
+                
+                case NET_HAPPY:
+                    // Camera cover interaction → happiness +5 on server
+                    sendCoverHappyRequest();
+                    break;
             }
             vTaskDelay(pdMS_TO_TICKS(20));  // Brief settle between requests
         }
@@ -2140,6 +2146,9 @@ void cameraMonitorTask(void *parameter) {
                         cycleMenu();  // MAIN → FOOD_MENU → TOILET_MENU → MAIN
                         lastMenuCycleTime = now;
                         consecutiveBlackFrames = 0;  // Reset counter
+                        // Camera cover = interaction → happiness +5
+                        uint8_t req = NET_HAPPY;
+                        xQueueSend(networkQueue, &req, 0);
                     } else if (consecutiveBlackFrames >= 1) {
                         Serial.printf("   ⏳ Cooldown active: %lu ms remaining\n", 
                                      MENU_CYCLE_COOLDOWN - (now - lastMenuCycleTime));
@@ -3096,6 +3105,29 @@ void sendCleanRequest() {
 
 // ================= SEND INJECTION REQUEST =================
 // Called after injection animation completes — clears sick_pending on server, resumes hunger
+// ================= SEND COVER HAPPY REQUEST =================
+// Called each time camera cover cycles the menu — happiness +5 on server
+void sendCoverHappyRequest() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    
+    HTTPClient http;
+    http.setReuse(true);
+    http.setTimeout(5000);
+    
+    String url = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/cover-happy";
+    if (!http.begin(url)) return;
+    
+    http.addHeader("Content-Type", "application/json");
+    int httpCode = http.POST("{}");
+    
+    if (httpCode == HTTP_CODE_OK) {
+        Serial.println("\U0001f600 Cover detected → happiness +5 sent to server");
+    } else {
+        Serial.printf("\u26a0\ufe0f cover-happy response: %d\n", httpCode);
+    }
+    http.end();
+}
+
 void sendInjectRequest() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("❌ WiFi not connected, cannot send injection request");
