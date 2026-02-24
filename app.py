@@ -633,6 +633,10 @@ def init_database():
                 if 'sick_pending' not in pet_columns:
                     cursor.execute('ALTER TABLE pet_state ADD COLUMN sick_pending BOOLEAN DEFAULT 0')
                     print("✅ Added sick_pending column to pet_state")
+                
+                if 'discipline' not in pet_columns:
+                    cursor.execute('ALTER TABLE pet_state ADD COLUMN discipline INTEGER DEFAULT 100')
+                    print("✅ Added discipline column to pet_state")
             except Exception as e:
                 print(f"⚠️ Migration warning: {e}")
             
@@ -679,6 +683,7 @@ def init_database():
                     last_age_increment DATETIME DEFAULT CURRENT_TIMESTAMP,
                     last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP,
                     sick_pending BOOLEAN DEFAULT 0,
+                    discipline INTEGER DEFAULT 100,
                     
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -752,7 +757,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                        poop_present, poop_timestamp, digestion_due_time,
                        current_menu, current_emotion,
                        last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment, last_hunger_update, sick_pending
+                       last_age_increment, last_hunger_update, sick_pending, discipline
                 FROM pet_state
                 WHERE device_id = ?
             ''', (device_id,))
@@ -786,7 +791,8 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                 'last_clean_time': result[19],
                 'last_age_increment': result[20],
                 'last_hunger_update': result[21],
-                'sick_pending': result[22] if result[22] is not None else 0
+                'sick_pending': result[22] if result[22] is not None else 0,
+                'discipline': result[23] if result[23] is not None else 100
             }
             
             # Merge updates
@@ -803,7 +809,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                     current_menu = ?, current_emotion = ?, emotion_expire_at = ?,
                     action_lock = ?,
                     last_feed_time = ?, last_play_time = ?, last_sleep_time = ?, last_clean_time = ?,
-                    last_age_increment = ?, last_hunger_update = ?, sick_pending = ?, updated_at = CURRENT_TIMESTAMP
+                    last_age_increment = ?, last_hunger_update = ?, sick_pending = ?, discipline = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND version = ?
             ''', (
                 new_state['version'], new_state['age'], new_state['stage'],
@@ -815,7 +821,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
                 new_state['last_feed_time'], new_state['last_play_time'],
                 new_state['last_sleep_time'], new_state['last_clean_time'],
                 new_state['last_age_increment'], new_state.get('last_hunger_update'),
-                new_state.get('sick_pending', 0),
+                new_state.get('sick_pending', 0), new_state.get('discipline', 100),
                 current_state['id'], current_state['version']
             ))
             
@@ -848,7 +854,7 @@ def get_pet_state(device_id='ESP32_001'):
                        poop_present, poop_timestamp, current_menu, current_emotion,
                        emotion_expire_at, action_lock, version, digestion_due_time,
                        last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment, sick_pending
+                       last_age_increment, sick_pending, discipline
                 FROM pet_state
                 WHERE device_id = ?
             ''', (device_id,))
@@ -878,7 +884,8 @@ def get_pet_state(device_id='ESP32_001'):
                 'last_sleep_time': result[17],
                 'last_clean_time': result[18],
                 'last_age_increment': result[19],
-                'sick_pending': bool(result[20]) if result[20] is not None else False
+                'sick_pending': bool(result[20]) if result[20] is not None else False,
+                'discipline': result[21] if result[21] is not None else 100
             }
         finally:
             conn.close()
@@ -1045,12 +1052,63 @@ def pet_engine_cycle():
             # 4️⃣ ENERGY DECAY
             updates['energy'] = max(0, state['energy'] - 2)
             
+            # 7️⃣ HEALTH DRAIN — not fed for 30 min (not sick, just gradual health drop)
+            # Also updates discipline based on rule compliance
+            from datetime import datetime, timedelta
+            discipline_delta = 0
+            all_rules_ok = True
+            
+            last_feed = state.get('last_feed_time')
+            if last_feed:
+                if isinstance(last_feed, str):
+                    last_feed = datetime.fromisoformat(last_feed)
+                mins_since_feed = (datetime.now() - last_feed).total_seconds() / 60
+                if mins_since_feed > 30:
+                    # Health drain (not sick — just -2 per cycle)
+                    updates['health'] = max(0, updates.get('health', state['health']) - 2)
+                    discipline_delta -= 2
+                    all_rules_ok = False
+                    print(f"🍝 Not fed for {mins_since_feed:.0f} min → health -2, discipline -2")
+            
+            # Discipline: poop not cleaned >15 min
+            if state['poop_present'] and state.get('poop_timestamp'):
+                poop_t = datetime.fromisoformat(state['poop_timestamp']) if isinstance(state['poop_timestamp'], str) else state['poop_timestamp']
+                if poop_t and (datetime.now() - poop_t) > timedelta(minutes=15):
+                    discipline_delta -= 3
+                    all_rules_ok = False
+                    print(f"💩 Poop not cleaned >15 min → discipline -3")
+            
+            # Discipline: not played with for >2 hours
+            last_play = state.get('last_play_time')
+            if last_play:
+                if isinstance(last_play, str):
+                    last_play = datetime.fromisoformat(last_play)
+                if (datetime.now() - last_play).total_seconds() / 3600 > 2:
+                    discipline_delta -= 1
+                    all_rules_ok = False
+                    print(f"🎮 Not played >2 hrs → discipline -1")
+            
+            # Positive discipline: all rules followed this cycle
+            if all_rules_ok:
+                discipline_delta += 1
+            
+            if discipline_delta != 0:
+                updates['discipline'] = max(0, min(100, state.get('discipline', 100) + discipline_delta))
+                print(f"📊 Discipline: {state.get('discipline', 100)} → {updates['discipline']} (delta {discipline_delta:+})") 
+            
             # 5️⃣ SICKNESS (OLD age random sickness)
             if current_stage == 'OLD':
                 import random
                 if random.random() < 0.01:  # 1% chance per cycle
                     updates['health'] = max(0, state['health'] - 5)
                     print(f"🤒 Random sickness (OLD age): Health {state['health']} → {updates['health']}")
+            
+            # 8️⃣ SICK_PENDING — set if health drops below 40 (any cause: hunger drain, poop, OLD)
+            # This triggers ❤️ sick icon on ESP32 and hides food icon until injection given
+            current_health = updates.get('health', state['health'])
+            if current_health < 40 and not state.get('sick_pending', 0):
+                updates['sick_pending'] = 1
+                print(f"🤒 Health < 40 → sick_pending set (health={current_health})")
             
             # 6️⃣ EMOTION PRIORITY UPDATE
             merged_state = {**state, **updates}
@@ -2390,6 +2448,8 @@ def get_oled_display():
             'energy': pet['energy'],
             'poop_present': pet['poop_present'],
             'age': pet['age'],
+            'happiness': pet['happiness'],
+            'discipline': pet.get('discipline', 100),
             'mode': 'AUTOMATIC',
             'is_hungry': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
             'show_home_icon': current_menu == 'MAIN',

@@ -106,6 +106,8 @@ unsigned long eatingFinishTime = 0;  // NEW: Track when eating finished
 String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 int  petAgeInt   = 0;              // Actual integer age from server (increments every 24 h)
+int  petHappiness = 100;           // Happiness (0-100) from server, shown as bar
+int  petDiscipline = 100;          // Discipline (0-100) from server, shown as bar
 
 // Camera cover detection for menu switching
 #define BLACK_BRIGHTNESS_TH 90    // Brightness threshold (JPEG avg when covered ~70-85)
@@ -356,6 +358,7 @@ void displayToiletMenu();  // NEW: Display toilet menu screen
 void displayPlayMenu();  // NEW: Display play menu screen (static icon)
 void displayHealthMenu();  // NEW: Display health menu screen with heart icon
 void displayStatusInfoMenu();  // NEW: Display status info menu (smiley + age + flash + score)
+void displayStatsMenu();       // NEW: Display stats menu (happiness + discipline bars)
 bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
 void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET → PLAY)
 // void checkCameraCover();  // DISABLED: Check camera cover for menu switching (now uses 5-sec intervals)
@@ -1343,6 +1346,15 @@ PROGMEM const uint8_t statusFlashBitmap[64] = {
     0xff,0xff,0xff,0xff,  0xff,0xff,0xff,0xff
 };
 
+// ================= PROGRESS BAR HELPER =================
+// Draws a labelled progress bar. x,y = top-left corner, w = total width, h = bar height
+void drawBar(int x, int y, int w, int h, int level, int maxLevel) {
+    display.drawRect(x, y, w, h, SSD1306_WHITE);          // outline
+    int fill = (level * (w - 2)) / maxLevel;              // filled pixels
+    if (fill > 0)
+        display.fillRect(x + 1, y + 1, fill, h - 2, SSD1306_WHITE);  // fill
+}
+
 // Draw simple smiley for status quadrant (Q1)
 void drawSmileyStatus(int x, int y) {
     display.drawCircle(x + 8, y + 8, 7, SSD1306_WHITE);
@@ -1365,24 +1377,25 @@ void drawFlashStatus(int xOffset, int yOffset) {
     }
 }
 
-// STATUS INFO MENU display function
+// STATUS INFO MENU — shows Happiness + Discipline as live progress bars
+// STATUS INFO MENU — 4-quadrant: smiley / age / flash / calories
 void displayStatusInfoMenu() {
     display.clearDisplay();
 
     // --- Q1: Smiley (top-left) ---
     drawSmileyStatus(0, 0);
 
-    // --- Q2: Actual age from server in years (top-right) ---
+    // --- Q2: Actual age from server (top-right) ---
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(30, 4);
-    display.print(petAgeInt);      // Real integer age sent by server (increments every 24 h)
+    display.print(petAgeInt);
     display.print(" yrs");
 
     // --- Q3: Flash / energy icon (bottom-left) ---
     drawFlashStatus(0, 16);
 
-    // --- Q4: Calories — default 100, or use gameScore if a game has been played ---
+    // --- Q4: Calories ---
     int calValue = (gameScore > 0) ? gameScore : 100;
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
@@ -1390,6 +1403,26 @@ void displayStatusInfoMenu() {
     display.print(calValue);
     display.setCursor(34, 26);
     display.print("cal");
+
+    display.display();
+}
+
+// STATS MENU — Happiness + Discipline as live progress bars (full 64x32)
+void displayStatsMenu() {
+    display.clearDisplay();
+
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    // Happiness label + bar
+    display.setCursor(0, 0);
+    display.print("Happy");
+    drawBar(0, 8, SCREEN_WIDTH, 7, petHappiness, 100);
+
+    // Discipline label + bar
+    display.setCursor(0, 17);
+    display.print("Discip");
+    drawBar(0, 25, SCREEN_WIDTH, 7, petDiscipline, 100);
 
     display.display();
 }
@@ -1605,6 +1638,8 @@ void cycleMenu() {
         newMenu = "HEALTH_MENU";
     } else if (currentScreenType == "HEALTH_MENU") {
         newMenu = "STATUS_INFO_MENU";
+    } else if (currentScreenType == "STATUS_INFO_MENU") {
+        newMenu = "STATS_MENU";
     } else {
         newMenu = "MAIN";
     }
@@ -1708,6 +1743,9 @@ void displayPetAnimation() {
         } else if (currentScreenType == "STATUS_INFO_MENU") {
             displayStatusInfoMenu();
             return;  // Exit early
+        } else if (currentScreenType == "STATS_MENU") {
+            displayStatsMenu();
+            return;  // Exit early
         }
         
         // Default: MAIN screen with pet animation
@@ -1794,7 +1832,8 @@ void displayPetAnimation() {
         }
         
         // Draw food icon at bottom-right corner (shows when pet is hungry)
-        if (showFoodIcon && currentScreenType == "MAIN") {
+        // Priority: SICK > POOP > HUNGER — food hidden if poop or sick active (same as sick/poop mutual exclusion)
+        if (showFoodIcon && !showPoopIcon && !showSickIcon && currentScreenType == "MAIN") {
             drawFoodIcon();
         }
         
@@ -2490,6 +2529,22 @@ void getOLEDDisplayFromServer() {
             }
             
             Serial.println("🤖 Mode: AUTOMATIC (forced)");
+            
+            // Parse happiness and discipline for status bars
+            if (g_oledDoc.containsKey("happiness")) {
+                int newHappy = g_oledDoc["happiness"].as<int>();
+                if (petHappiness != newHappy) {
+                    petHappiness = newHappy;
+                    Serial.printf("😀 Happiness: %d\n", petHappiness);
+                }
+            }
+            if (g_oledDoc.containsKey("discipline")) {
+                int newDisc = g_oledDoc["discipline"].as<int>();
+                if (petDiscipline != newDisc) {
+                    petDiscipline = newDisc;
+                    Serial.printf("📊 Discipline: %d\n", petDiscipline);
+                }
+            }
             
             if (g_oledDoc.containsKey("is_hungry")) {
                 // Ignore server hunger updates for 10 seconds after feeding
