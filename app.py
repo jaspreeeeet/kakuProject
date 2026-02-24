@@ -2021,7 +2021,7 @@ def pet_cover_happy():
         if not state:
             return jsonify({'status': 'error', 'message': 'Pet not found'}), 404
         
-        new_happiness = min(100, state['happiness'] + 5)
+        new_happiness = min(100, state['happiness'] + 2)
         updates = {'happiness': new_happiness}
         result = update_pet_state_atomic(device_id, updates)
         
