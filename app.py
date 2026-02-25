@@ -635,25 +635,6 @@ def init_database():
             except Exception as e:
                 print(f"⚠️ Migration warning: {e}")
             
-            # ===== DATABASE MIGRATION: Add last_hunger_update to pet_state =====
-            try:
-                cursor.execute('PRAGMA table_info(pet_state)')
-                pet_columns = [column[1] for column in cursor.fetchall()]
-                
-                if 'last_hunger_update' not in pet_columns:
-                    cursor.execute('ALTER TABLE pet_state ADD COLUMN last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP')
-                    print("✅ Added last_hunger_update column to pet_state (hunger updates every 360 seconds)")
-                
-                if 'sick_pending' not in pet_columns:
-                    cursor.execute('ALTER TABLE pet_state ADD COLUMN sick_pending BOOLEAN DEFAULT 0')
-                    print("✅ Added sick_pending column to pet_state")
-                
-                if 'discipline' not in pet_columns:
-                    cursor.execute('ALTER TABLE pet_state ADD COLUMN discipline INTEGER DEFAULT 100')
-                    print("✅ Added discipline column to pet_state")
-            except Exception as e:
-                print(f"⚠️ Migration warning: {e}")
-            
             # Initialize default OLED state if not exists
             cursor.execute('SELECT COUNT(*) FROM oled_display_state')
             if cursor.fetchone()[0] == 0:
@@ -733,6 +714,29 @@ def init_database():
             ''')
             print("✅ Created firmware_versions table")
             
+            # ===== DATABASE MIGRATION: Add missing columns to pet_state =====
+            # Must run AFTER CREATE TABLE pet_state so table is guaranteed to exist
+            try:
+                cursor.execute('PRAGMA table_info(pet_state)')
+                pet_columns = [column[1] for column in cursor.fetchall()]
+                
+                if 'last_hunger_update' not in pet_columns:
+                    cursor.execute('ALTER TABLE pet_state ADD COLUMN last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP')
+                    print("✅ Added last_hunger_update column to pet_state")
+                
+                if 'sick_pending' not in pet_columns:
+                    cursor.execute('ALTER TABLE pet_state ADD COLUMN sick_pending BOOLEAN DEFAULT 0')
+                    print("✅ Added sick_pending column to pet_state")
+                
+                if 'discipline' not in pet_columns:
+                    cursor.execute('ALTER TABLE pet_state ADD COLUMN discipline INTEGER DEFAULT 100')
+                    print("✅ Added discipline column to pet_state")
+                
+                conn.commit()  # Explicit commit after migrations
+                print("✅ pet_state migrations complete")
+            except Exception as e:
+                print(f"⚠️ pet_state migration warning: {e}")
+            
             # Initialize one pet_state row if not exists
             cursor.execute('SELECT COUNT(*) FROM pet_state')
             if cursor.fetchone()[0] == 0:
@@ -755,6 +759,40 @@ def init_database():
 
 # Initialize database on startup
 init_database()
+
+# ===== EMERGENCY DB MIGRATION ENDPOINT =====
+@app.route('/api/db-migrate', methods=['GET'])
+def emergency_db_migrate():
+    """Emergency endpoint to run DB migrations on-demand.
+    Use when sick_pending / discipline / last_hunger_update columns are missing.
+    Call: GET /api/db-migrate
+    """
+    results = []
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'DB connection failed'}), 500
+        cursor = conn.cursor()
+        
+        cursor.execute('PRAGMA table_info(pet_state)')
+        pet_columns = [col[1] for col in cursor.fetchall()]
+        
+        for col, definition in [
+            ('last_hunger_update', 'DATETIME DEFAULT CURRENT_TIMESTAMP'),
+            ('sick_pending',       'BOOLEAN DEFAULT 0'),
+            ('discipline',         'INTEGER DEFAULT 100'),
+        ]:
+            if col not in pet_columns:
+                cursor.execute(f'ALTER TABLE pet_state ADD COLUMN {col} {definition}')
+                results.append(f'✅ Added {col}')
+            else:
+                results.append(f'⏭ {col} already exists')
+        
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'migrations': results}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ==================== PET ENGINE - CENTRAL UPDATE FUNCTION ====================
 
