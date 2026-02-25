@@ -28,7 +28,6 @@ Required Libraries:
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <HttpsOTAUpdate.h>
 #include <Update.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -315,6 +314,10 @@ const float   LP_ALPHA_STEP = 0.85f;    // low-pass filter weight for gravity es
 
 // ── OTA UPDATE STATE ───────────────────────────────────────────────────
 bool otaUpdateRequested = false;       // Set true when server sends ota_update flag
+
+// Global SSL client for OTA — WiFiClientSecure is ~16KB, MUST be global (not on stack)
+WiFiClientSecure sslOTA;
+uint8_t otaBuf[4096];  // OTA download buffer — global to save stack
 
 // LP gravity estimate — tracks gravity at ANY tilt (initialised flat)
 float stepGravX = 0.0f, stepGravY = 0.0f, stepGravZ = 1.0f;
@@ -771,11 +774,15 @@ void setup() {
         0                  // Core 0 (opposite of WiFi heavy Core 1)
     );
     
+    // Init global OTA SSL client
+    sslOTA.setInsecure();
+    sslOTA.setTimeout(120);
+
     // Start dedicated network task on Core 1 (HTTP only, queue-driven)
     xTaskCreatePinnedToCore(
         networkTask,         // Task function
         "Network",           // Task name
-        8192,               // Stack size (large for HTTP + JSON)
+        16384,              // Stack size (16K: WiFiClientSecure + HTTP + JSON + OTA)
         NULL,               // Parameters
         1,                  // Priority
         NULL,               // Task handle
@@ -3209,11 +3216,12 @@ void checkAndPerformOTA() {
     // Step 1: Check /api/firmware/latest for newer version
     setCpuFrequencyMhz(240);  // Max CPU for OTA
     
+    sslOTA.stop();  // Reset connection state
     HTTPClient http;
     http.setConnectTimeout(10000);
     http.setTimeout(10000);
     
-    if (!http.begin(firmwareCheckUrl)) {
+    if (!http.begin(sslOTA, String(firmwareCheckUrl))) {
         Serial.println("❌ OTA: Failed to connect to firmware server");
         otaUpdateRequested = false;
         setCpuFrequencyMhz(40);
@@ -3259,13 +3267,19 @@ void checkAndPerformOTA() {
         return;
     }
     
-    const char* newVersion  = otaDoc["version"] | "?";
-    const char* downloadUrl = otaDoc["download_url"] | "";
-    int fileSize            = otaDoc["file_size"] | 0;
-    const char* checksum    = otaDoc["checksum"] | "";
+    // Copy strings BEFORE otaDoc goes out of scope or gets reused
+    String newVersion   = String(otaDoc["version"] | "?");
+    String downloadUrl  = String(otaDoc["download_url"] | "");
+    int fileSize        = otaDoc["file_size"] | 0;
+    String checksumStr  = String(otaDoc["checksum"] | "");
     
-    Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion, fileSize);
-    Serial.printf("   Download: %s\n", downloadUrl);
+    // Force HTTPS — Cloud Run redirects http→https, ESP32 can't follow 302
+    if (downloadUrl.startsWith("http://")) {
+        downloadUrl = "https://" + downloadUrl.substring(7);
+    }
+    
+    Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion.c_str(), fileSize);
+    Serial.printf("   Download: %s\n", downloadUrl.c_str());
     
     // Step 2: Show downloading status on OLED
     display.clearDisplay();
@@ -3276,13 +3290,13 @@ void checkAndPerformOTA() {
     display.println(newVersion);
     display.display();
     
-    // Step 3: Download and flash firmware using HTTPClient + Update library
-    // This uses ESP32's dual-partition OTA — writes to inactive partition, then swaps on reboot
+    // Step 3: Download and flash firmware using global sslOTA + Update library
+    sslOTA.stop();
     HTTPClient httpOTA;
     httpOTA.setConnectTimeout(15000);
-    httpOTA.setTimeout(60000);  // 60s timeout for large firmware downloads
+    httpOTA.setTimeout(120000);  // 120s timeout for large firmware downloads
     
-    if (!httpOTA.begin(downloadUrl)) {
+    if (!httpOTA.begin(sslOTA, downloadUrl)) {
         Serial.println("❌ OTA: Failed to connect for firmware download");
         otaUpdateRequested = false;
         setCpuFrequencyMhz(40);
@@ -3321,21 +3335,28 @@ void checkAndPerformOTA() {
     }
     
     WiFiClient *stream = httpOTA.getStreamPtr();
-    uint8_t buf[1024];
-    int written = 0;
+    size_t written = 0;
     int lastPct = -1;
+    unsigned long lastDataTime = millis();
     
-    while (httpOTA.connected() && (written < contentLength)) {
-        size_t available = stream->available();
-        if (available) {
-            int bytesRead = stream->readBytes(buf, min((size_t)sizeof(buf), available));
-            Update.write(buf, bytesRead);
+    while (written < (size_t)contentLength) {
+        // Watchdog — abort if no data for 60s
+        if (millis() - lastDataTime > 60000) {
+            Serial.println("❌ OTA: Download stalled (60s no data)");
+            break;
+        }
+        
+        // Use read() directly — available() misses pending TLS records
+        int bytesRead = stream->read(otaBuf, sizeof(otaBuf));
+        if (bytesRead > 0) {
+            Update.write(otaBuf, bytesRead);
             written += bytesRead;
+            lastDataTime = millis();
             
             int pct = (written * 100) / contentLength;
-            if (pct != lastPct && pct % 10 == 0) {
+            if (pct / 10 != lastPct / 10) {
                 lastPct = pct;
-                Serial.printf("   OTA: %d%%\n", pct);
+                Serial.printf("   OTA: %d%% (%d/%d)\n", pct, written, contentLength);
                 // Update OLED progress
                 display.clearDisplay();
                 display.setCursor(2, 4);
@@ -3347,13 +3368,17 @@ void checkAndPerformOTA() {
                 display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
                 display.display();
             }
+        } else {
+            vTaskDelay(1);  // Yield to RTOS, retry quickly
         }
-        vTaskDelay(1);  // Yield to RTOS
+        
+        // Check if connection dropped
+        if (!httpOTA.connected() && stream->available() == 0) break;
     }
     
     httpOTA.end();
     
-    if (written != contentLength) {
+    if (written != (size_t)contentLength) {
         Serial.printf("❌ OTA: Download incomplete (%d/%d)\n", written, contentLength);
         Update.abort();
         otaUpdateRequested = false;
@@ -3368,7 +3393,7 @@ void checkAndPerformOTA() {
         return;
     }
     
-    Serial.printf("✅ OTA: Firmware v%s flashed successfully! Rebooting...\n", newVersion);
+    Serial.printf("✅ OTA: Firmware v%s flashed successfully! Rebooting...\n", newVersion.c_str());
     
     // Show success on OLED
     display.clearDisplay();
