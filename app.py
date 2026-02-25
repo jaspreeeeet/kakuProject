@@ -3418,6 +3418,7 @@ def get_latest_firmware():
 @app.route('/api/firmware/download/<filename>', methods=['GET'])
 def download_firmware(filename):
     """Serve the firmware .bin file for ESP32 OTA download.
+    Uses streaming response to avoid Cloud Run buffering issues.
     Requires auth token for security."""
     try:
         auth_token = request.headers.get('X-OTA-Token', '')
@@ -3428,10 +3429,29 @@ def download_firmware(filename):
         if not os.path.exists(filepath):
             return jsonify({'status': 'error', 'message': 'Firmware file not found'}), 404
         
-        print(f'📦 Serving firmware: {filename}')
-        return send_from_directory(FIRMWARE_DIR, filename,
-                                   mimetype='application/octet-stream',
-                                   as_attachment=True)
+        file_size = os.path.getsize(filepath)
+        print(f'📦 Serving firmware: {filename} ({file_size} bytes)')
+
+        def generate():
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        from flask import Response
+        return Response(
+            generate(),
+            status=200,
+            headers={
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': str(file_size),
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Cache-Control': 'no-cache',
+                'X-Content-Type-Options': 'nosniff'
+            }
+        )
     except Exception as e:
         print(f'❌ Error serving firmware: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
