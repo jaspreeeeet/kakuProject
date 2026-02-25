@@ -716,26 +716,26 @@ def init_database():
             
             # ===== DATABASE MIGRATION: Add missing columns to pet_state =====
             # Must run AFTER CREATE TABLE pet_state so table is guaranteed to exist
-            try:
-                cursor.execute('PRAGMA table_info(pet_state)')
-                pet_columns = [column[1] for column in cursor.fetchall()]
-                
-                if 'last_hunger_update' not in pet_columns:
-                    cursor.execute('ALTER TABLE pet_state ADD COLUMN last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP')
-                    print("✅ Added last_hunger_update column to pet_state")
-                
-                if 'sick_pending' not in pet_columns:
-                    cursor.execute('ALTER TABLE pet_state ADD COLUMN sick_pending BOOLEAN DEFAULT 0')
-                    print("✅ Added sick_pending column to pet_state")
-                
-                if 'discipline' not in pet_columns:
-                    cursor.execute('ALTER TABLE pet_state ADD COLUMN discipline INTEGER DEFAULT 100')
-                    print("✅ Added discipline column to pet_state")
-                
-                conn.commit()  # Explicit commit after migrations
-                print("✅ pet_state migrations complete")
-            except Exception as e:
-                print(f"⚠️ pet_state migration warning: {e}")
+            cursor.execute('PRAGMA table_info(pet_state)')
+            pet_columns = [column[1] for column in cursor.fetchall()]
+            
+            # NOTE: SQLite ALTER TABLE ADD COLUMN only allows constant defaults
+            # CURRENT_TIMESTAMP is NOT a constant — use NULL instead
+            migration_cols = [
+                ('last_hunger_update', 'DATETIME DEFAULT NULL'),
+                ('sick_pending',       'BOOLEAN DEFAULT 0'),
+                ('discipline',         'INTEGER DEFAULT 100'),
+            ]
+            for col_name, col_def in migration_cols:
+                try:
+                    if col_name not in pet_columns:
+                        cursor.execute(f'ALTER TABLE pet_state ADD COLUMN {col_name} {col_def}')
+                        print(f"✅ Added {col_name} column to pet_state")
+                except Exception as e:
+                    print(f"⚠️ Migration {col_name}: {e}")
+            
+            conn.commit()  # Explicit commit after migrations
+            print("✅ pet_state migrations complete")
             
             # Initialize one pet_state row if not exists
             cursor.execute('SELECT COUNT(*) FROM pet_state')
@@ -777,14 +777,19 @@ def emergency_db_migrate():
         cursor.execute('PRAGMA table_info(pet_state)')
         pet_columns = [col[1] for col in cursor.fetchall()]
         
+        # NOTE: SQLite ALTER TABLE ADD COLUMN only allows constant defaults
+        # CURRENT_TIMESTAMP not allowed — use NULL instead
         for col, definition in [
-            ('last_hunger_update', 'DATETIME DEFAULT CURRENT_TIMESTAMP'),
+            ('last_hunger_update', 'DATETIME DEFAULT NULL'),
             ('sick_pending',       'BOOLEAN DEFAULT 0'),
             ('discipline',         'INTEGER DEFAULT 100'),
         ]:
             if col not in pet_columns:
-                cursor.execute(f'ALTER TABLE pet_state ADD COLUMN {col} {definition}')
-                results.append(f'✅ Added {col}')
+                try:
+                    cursor.execute(f'ALTER TABLE pet_state ADD COLUMN {col} {definition}')
+                    results.append(f'✅ Added {col}')
+                except Exception as col_err:
+                    results.append(f'❌ {col}: {str(col_err)}')
             else:
                 results.append(f'⏭ {col} already exists')
         
@@ -816,49 +821,43 @@ def update_pet_state_atomic(device_id, update_fields: dict):
         try:
             cursor = conn.cursor()
             
-            # Fetch current state with version
-            cursor.execute('''
-                SELECT id, version, action_lock, emotion_expire_at,
-                       age, stage, health, hunger, cleanliness, happiness, energy,
-                       poop_present, poop_timestamp, digestion_due_time,
-                       current_menu, current_emotion,
-                       last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment, last_hunger_update, sick_pending, discipline
-                FROM pet_state
-                WHERE device_id = ?
-            ''', (device_id,))
+            # Fetch current state with version — use SELECT * for schema resilience
+            cursor.execute('SELECT * FROM pet_state WHERE device_id = ?', (device_id,))
             
             result = cursor.fetchone()
             if not result:
                 print(f"❌ No pet state found for {device_id}")
                 return None
             
-            # Build current state
+            # Build current state dynamically from column names
+            col_names = [desc[0] for desc in cursor.description]
+            row = dict(zip(col_names, result))
+            
             current_state = {
-                'id': result[0],
-                'version': result[1],
-                'action_lock': result[2],
-                'emotion_expire_at': result[3],
-                'age': result[4],
-                'stage': result[5],
-                'health': result[6],
-                'hunger': result[7],
-                'cleanliness': result[8],
-                'happiness': result[9],
-                'energy': result[10],
-                'poop_present': result[11],
-                'poop_timestamp': result[12],
-                'digestion_due_time': result[13],
-                'current_menu': result[14],
-                'current_emotion': result[15],
-                'last_feed_time': result[16],
-                'last_play_time': result[17],
-                'last_sleep_time': result[18],
-                'last_clean_time': result[19],
-                'last_age_increment': result[20],
-                'last_hunger_update': result[21],
-                'sick_pending': result[22] if result[22] is not None else 0,
-                'discipline': result[23] if result[23] is not None else 100
+                'id': row.get('id'),
+                'version': row.get('version', 0),
+                'action_lock': row.get('action_lock', 0),
+                'emotion_expire_at': row.get('emotion_expire_at'),
+                'age': row.get('age', 0),
+                'stage': row.get('stage', 'INFANT'),
+                'health': row.get('health', 100),
+                'hunger': row.get('hunger', 0),
+                'cleanliness': row.get('cleanliness', 100),
+                'happiness': row.get('happiness', 100),
+                'energy': row.get('energy', 100),
+                'poop_present': row.get('poop_present', 0),
+                'poop_timestamp': row.get('poop_timestamp'),
+                'digestion_due_time': row.get('digestion_due_time'),
+                'current_menu': row.get('current_menu', 'MAIN'),
+                'current_emotion': row.get('current_emotion', 'IDLE'),
+                'last_feed_time': row.get('last_feed_time'),
+                'last_play_time': row.get('last_play_time'),
+                'last_sleep_time': row.get('last_sleep_time'),
+                'last_clean_time': row.get('last_clean_time'),
+                'last_age_increment': row.get('last_age_increment'),
+                'last_hunger_update': row.get('last_hunger_update'),
+                'sick_pending': row.get('sick_pending', 0) or 0,
+                'discipline': row.get('discipline', 100) or 100,
             }
             
             # Merge updates
@@ -866,30 +865,47 @@ def update_pet_state_atomic(device_id, update_fields: dict):
             new_state['version'] = current_state['version'] + 1
             new_state['updated_at'] = datetime.now().isoformat()
             
-            # Update database
-            cursor.execute('''
-                UPDATE pet_state
-                SET version = ?, age = ?, stage = ?, health = ?, hunger = ?,
-                    cleanliness = ?, happiness = ?, energy = ?,
-                    poop_present = ?, poop_timestamp = ?, digestion_due_time = ?,
-                    current_menu = ?, current_emotion = ?, emotion_expire_at = ?,
-                    action_lock = ?,
-                    last_feed_time = ?, last_play_time = ?, last_sleep_time = ?, last_clean_time = ?,
-                    last_age_increment = ?, last_hunger_update = ?, sick_pending = ?, discipline = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND version = ?
-            ''', (
-                new_state['version'], new_state['age'], new_state['stage'],
-                new_state['health'], new_state['hunger'], new_state['cleanliness'],
-                new_state['happiness'], new_state['energy'],
-                new_state['poop_present'], new_state['poop_timestamp'], new_state['digestion_due_time'],
-                new_state['current_menu'], new_state['current_emotion'], new_state['emotion_expire_at'],
-                new_state['action_lock'],
-                new_state['last_feed_time'], new_state['last_play_time'],
-                new_state['last_sleep_time'], new_state['last_clean_time'],
-                new_state['last_age_increment'], new_state.get('last_hunger_update'),
-                new_state.get('sick_pending', 0), new_state.get('discipline', 100),
-                current_state['id'], current_state['version']
-            ))
+            # Build UPDATE dynamically based on which columns exist in the DB
+            cursor.execute('PRAGMA table_info(pet_state)')
+            existing_cols = {col[1] for col in cursor.fetchall()}
+            
+            # Core columns always present
+            update_pairs = [
+                ('version', new_state['version']),
+                ('age', new_state['age']),
+                ('stage', new_state['stage']),
+                ('health', new_state['health']),
+                ('hunger', new_state['hunger']),
+                ('cleanliness', new_state['cleanliness']),
+                ('happiness', new_state['happiness']),
+                ('energy', new_state['energy']),
+                ('poop_present', new_state['poop_present']),
+                ('poop_timestamp', new_state['poop_timestamp']),
+                ('digestion_due_time', new_state['digestion_due_time']),
+                ('current_menu', new_state['current_menu']),
+                ('current_emotion', new_state['current_emotion']),
+                ('emotion_expire_at', new_state['emotion_expire_at']),
+                ('action_lock', new_state['action_lock']),
+                ('last_feed_time', new_state['last_feed_time']),
+                ('last_play_time', new_state['last_play_time']),
+                ('last_sleep_time', new_state['last_sleep_time']),
+                ('last_clean_time', new_state['last_clean_time']),
+                ('last_age_increment', new_state['last_age_increment']),
+            ]
+            
+            # Optional columns — only include if they exist in DB
+            for opt_col, default in [('last_hunger_update', None), ('sick_pending', 0), ('discipline', 100)]:
+                if opt_col in existing_cols:
+                    update_pairs.append((opt_col, new_state.get(opt_col, default)))
+            
+            set_clause = ', '.join(f'{col} = ?' for col, _ in update_pairs) + ', updated_at = CURRENT_TIMESTAMP'
+            values = [val for _, val in update_pairs]
+            values.extend([current_state['id'], current_state['version']])
+            
+            cursor.execute(
+                f'UPDATE pet_state SET {set_clause} WHERE id = ? AND version = ?',
+                values
+            )
             
             if cursor.rowcount == 0:
                 print("⚠️ Version conflict detected, retrying...")
@@ -907,7 +923,7 @@ def update_pet_state_atomic(device_id, update_fields: dict):
             conn.close()
 
 def get_pet_state(device_id='ESP32_001'):
-    """Get current pet state safely"""
+    """Get current pet state safely — handles missing columns gracefully"""
     with db_lock:
         conn = get_db_connection()
         if not conn:
@@ -915,43 +931,39 @@ def get_pet_state(device_id='ESP32_001'):
         
         try:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT age, stage, health, hunger, cleanliness, happiness, energy,
-                       poop_present, poop_timestamp, current_menu, current_emotion,
-                       emotion_expire_at, action_lock, version, digestion_due_time,
-                       last_feed_time, last_play_time, last_sleep_time, last_clean_time,
-                       last_age_increment, sick_pending, discipline
-                FROM pet_state
-                WHERE device_id = ?
-            ''', (device_id,))
+            cursor.execute('SELECT * FROM pet_state WHERE device_id = ?', (device_id,))
             
             result = cursor.fetchone()
             if not result:
                 return None
             
+            # Build column name → value map dynamically
+            col_names = [desc[0] for desc in cursor.description]
+            row = dict(zip(col_names, result))
+            
             return {
-                'age': result[0],
-                'stage': result[1],
-                'health': result[2],
-                'hunger': result[3],
-                'cleanliness': result[4],
-                'happiness': result[5],
-                'energy': result[6],
-                'poop_present': bool(result[7]),
-                'poop_timestamp': result[8],
-                'current_menu': result[9],
-                'current_emotion': result[10],
-                'emotion_expire_at': result[11],
-                'action_lock': bool(result[12]),
-                'version': result[13],
-                'digestion_due_time': result[14],
-                'last_feed_time': result[15],
-                'last_play_time': result[16],
-                'last_sleep_time': result[17],
-                'last_clean_time': result[18],
-                'last_age_increment': result[19],
-                'sick_pending': bool(result[20]) if result[20] is not None else False,
-                'discipline': result[21] if result[21] is not None else 100
+                'age': row.get('age', 0),
+                'stage': row.get('stage', 'INFANT'),
+                'health': row.get('health', 100),
+                'hunger': row.get('hunger', 0),
+                'cleanliness': row.get('cleanliness', 100),
+                'happiness': row.get('happiness', 100),
+                'energy': row.get('energy', 100),
+                'poop_present': bool(row.get('poop_present', 0)),
+                'poop_timestamp': row.get('poop_timestamp'),
+                'current_menu': row.get('current_menu', 'MAIN'),
+                'current_emotion': row.get('current_emotion', 'IDLE'),
+                'emotion_expire_at': row.get('emotion_expire_at'),
+                'action_lock': bool(row.get('action_lock', 0)),
+                'version': row.get('version', 0),
+                'digestion_due_time': row.get('digestion_due_time'),
+                'last_feed_time': row.get('last_feed_time'),
+                'last_play_time': row.get('last_play_time'),
+                'last_sleep_time': row.get('last_sleep_time'),
+                'last_clean_time': row.get('last_clean_time'),
+                'last_age_increment': row.get('last_age_increment'),
+                'sick_pending': bool(row['sick_pending']) if row.get('sick_pending') is not None else False,
+                'discipline': row.get('discipline', 100),
             }
         finally:
             conn.close()
