@@ -3448,7 +3448,8 @@ def download_firmware(filename):
                 'Content-Type': 'application/octet-stream',
                 'Content-Length': str(file_size),
                 'Content-Disposition': f'attachment; filename={filename}',
-                'Cache-Control': 'no-cache',
+                'Cache-Control': 'no-cache, no-store',
+                'X-Accel-Buffering': 'no',
                 'X-Content-Type-Options': 'nosniff'
             }
         )

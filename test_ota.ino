@@ -32,6 +32,13 @@ const char* OTA_AUTH_TOKEN   = "kaku-ota-2025";
 const unsigned long CHECK_INTERVAL_MS = 10000;
 unsigned long lastCheckTime = 0;
 
+// Global SSL clients — WiFiClientSecure is ~16KB, MUST be global (not on stack)
+WiFiClientSecure sslPoll;
+WiFiClientSecure sslOTA;
+uint8_t otaBuf[4096];  // download buffer — also global to save stack
+
+
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -54,6 +61,10 @@ void setup() {
     
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("\n✅ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        // Force Google DNS to fix DNS resolution failures
+        WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+                    IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
+        Serial.println("DNS set to 8.8.8.8");
     } else {
         Serial.println("\n❌ WiFi failed. Restarting in 5s...");
         delay(5000);
@@ -62,9 +73,50 @@ void setup() {
     
     Serial.println("Checking for OTA updates every 10 seconds...");
     Serial.println("Press 'Enable OTA' on the dashboard to trigger update.");
+    // Poll immediately on boot instead of waiting 10s
+    lastCheckTime = millis() - CHECK_INTERVAL_MS;
+
+    // Init global SSL clients
+    sslPoll.setInsecure();
+    sslPoll.setTimeout(10);
+    sslOTA.setInsecure();
+    sslOTA.setTimeout(120);
+
+    // Warm up Cloud Run — first request wakes the container
+    Serial.println("🔗 Warming up server...");
+    unsigned long t = millis();
+    HTTPClient warmup;
+    warmup.setConnectTimeout(20000);
+    warmup.setTimeout(20000);
+    warmup.begin(sslPoll, String(SERVER_BASE) + "/api/oled-display/get?device_id=ESP32_001");
+    int rc = warmup.GET();
+    Serial.printf("🔗 Warmup done in %lums (HTTP %d)\n", millis() - t, rc);
+    warmup.end();
+    sslPoll.stop();
+}
+
+void reconnectWiFi() {
+    if (WiFi.status() == WL_CONNECTED) return;
+    Serial.println("⚠️ WiFi lost — reconnecting...");
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+                    IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
+        Serial.printf("\n✅ Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+        Serial.println("\n❌ Reconnect failed — will retry next cycle");
+    }
 }
 
 void loop() {
+    reconnectWiFi();
     if (millis() - lastCheckTime >= CHECK_INTERVAL_MS) {
         lastCheckTime = millis();
         checkOLEDForOTA();
@@ -79,14 +131,19 @@ void checkOLEDForOTA() {
         return;
     }
     
+    Serial.print("📡 Polling... ");
+    unsigned long t = millis();
+
+    sslPoll.stop();  // reset connection state
     HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(5000);
+    http.setConnectTimeout(10000);
+    http.setTimeout(10000);
     
     String oledUrl = String(SERVER_BASE) + "/api/oled-display/get?device_id=ESP32_001";
-    if (!http.begin(oledUrl)) return;
+    if (!http.begin(sslPoll, oledUrl)) { Serial.println("begin failed"); return; }
     
     int code = http.GET();
+    Serial.printf("%dms ", millis() - t);
     if (code == 200) {
         String body = http.getString();
         StaticJsonDocument<1024> doc;
@@ -115,11 +172,12 @@ void performOTA() {
     // Step 1: Check /api/firmware/latest
     String checkUrl = String(SERVER_BASE) + "/api/firmware/latest?device_id=ESP32_001&current_version=" + FIRMWARE_VERSION;
     
+    sslOTA.stop();
     HTTPClient http;
-    http.setConnectTimeout(10000);
-    http.setTimeout(10000);
+    http.setConnectTimeout(15000);
+    http.setTimeout(15000);
     
-    if (!http.begin(checkUrl)) {
+    if (!http.begin(sslOTA, checkUrl)) {
         Serial.println("❌ Cannot connect to firmware server");
         return;
     }
@@ -149,19 +207,30 @@ void performOTA() {
     }
     
     const char* newVersion  = doc["version"] | "?";
-    const char* downloadUrl = doc["download_url"] | "";
-    int fileSize            = doc["file_size"] | 0;
+    const char* dlUrl       = doc["download_url"] | "";
     const char* checksum    = doc["checksum"] | "";
+    int fileSize            = doc["file_size"] | 0;
+
+    // Copy strings BEFORE doc goes out of scope or gets reused
+    String versionStr    = String(newVersion);
+    String downloadUrl   = String(dlUrl);
+    String checksumStr   = String(checksum);
+
+    // Force HTTPS — Cloud Run redirects http→https, ESP32 can't follow 302
+    if (downloadUrl.startsWith("http://")) {
+        downloadUrl = "https://" + downloadUrl.substring(7);
+    }
     
-    Serial.printf("🆕 New firmware: v%s (%d bytes, md5:%s)\n", newVersion, fileSize, checksum);
-    Serial.printf("📥 Downloading from: %s\n", downloadUrl);
+    Serial.printf("🆕 New firmware: v%s (%d bytes, md5:%s)\n", versionStr.c_str(), fileSize, checksumStr.c_str());
+    Serial.printf("📥 Downloading from: %s\n", downloadUrl.c_str());
     
     // Step 2: Download and flash
+    sslOTA.stop();
     HTTPClient httpDL;
     httpDL.setConnectTimeout(15000);
-    httpDL.setTimeout(60000);
+    httpDL.setTimeout(120000);
     
-    if (!httpDL.begin(downloadUrl)) {
+    if (!httpDL.begin(sslOTA, downloadUrl)) {
         Serial.println("❌ Cannot connect for download");
         return;
     }
@@ -189,41 +258,49 @@ void performOTA() {
     }
     
     Serial.printf("📦 Flashing %d bytes...\n", contentLength);
-    
-    WiFiClient *stream = httpDL.getStreamPtr();
-    uint8_t buf[1024];
-    int written = 0;
-    
-    while (httpDL.connected() && written < contentLength) {
-        size_t available = stream->available();
-        if (available) {
-            int bytesRead = stream->readBytes(buf, min((size_t)sizeof(buf), available));
-            Update.write(buf, bytesRead);
+
+    // Manual chunked download with watchdog
+    WiFiClient* stream = httpDL.getStreamPtr();
+    size_t written = 0;
+    int lastPctPrint = -1;
+    unsigned long lastDataTime = millis();
+
+    while (written < (size_t)contentLength) {
+        // Watchdog — abort if no data for 60s
+        if (millis() - lastDataTime > 60000) {
+            Serial.println("❌ Download stalled (60s no data)");
+            break;
+        }
+
+        // Use read() directly — available() misses pending TLS records
+        int bytesRead = stream->read(otaBuf, sizeof(otaBuf));
+        if (bytesRead > 0) {
+            Update.write(otaBuf, bytesRead);
             written += bytesRead;
-            
+            lastDataTime = millis();
+
             int pct = (written * 100) / contentLength;
-            if (pct % 10 == 0) {
+            if (pct / 10 != lastPctPrint / 10) {
+                lastPctPrint = pct;
                 Serial.printf("   %d%% (%d/%d)\n", pct, written, contentLength);
             }
+        } else {
+            delay(1);  // yield to WiFi stack, retry quickly
         }
-        delay(1);
+
+        // Check if connection dropped
+        if (!httpDL.connected() && stream->available() == 0) break;
     }
-    
     httpDL.end();
-    
-    if (written != contentLength) {
-        Serial.printf("❌ Incomplete download (%d/%d)\n", written, contentLength);
+
+    if (written != (size_t)contentLength || !Update.end(true)) {
+        Serial.printf("❌ OTA failed: wrote %d/%d  err: %s\n", written, contentLength, Update.errorString());
         Update.abort();
         return;
     }
     
-    if (!Update.end(true)) {
-        Serial.printf("❌ Flash error: %s\n", Update.errorString());
-        return;
-    }
-    
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    Serial.printf("  ✅ OTA Success! v%s → v%s\n", FIRMWARE_VERSION, newVersion);
+    Serial.printf("  ✅ OTA Success! v%s → v%s\n", FIRMWARE_VERSION, versionStr.c_str());
     Serial.println("  Rebooting in 2 seconds...");
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
