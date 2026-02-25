@@ -2255,27 +2255,88 @@ void displayPetAnimation() {
         uint8_t frameCount = 0;
         
         // EMOTION-BASED ANIMATION SELECTION
-        // Priority: Emotion > Age (CRY/SAD override default animations)
-        if (currentEmotion == "CRY" && petAge == INFANT) {
-            // INFANT crying (hungry/needs care)
-            frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
-            frameCount = INFANT_CRY_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
-        } else if (currentEmotion == "CRY" && petAge == OLD) {
-            // OLD crying
-            frameData = old_cry[currentFrame % OLD_CRY_FRAME_COUNT];
-            frameCount = OLD_CRY_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, OLD_CRY_WIDTH, OLD_CRY_HEIGHT, SSD1306_WHITE);
-        } else if (currentEmotion == "SURPRISE" && petAge == OLD) {
-            // OLD surprised
-            frameData = old_surprise[currentFrame % OLD_SURPRISE_FRAME_COUNT];
-            frameCount = OLD_SURPRISE_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, OLD_SURPRISE_WIDTH, OLD_SURPRISE_HEIGHT, SSD1306_WHITE);
+        // Priority: Emotion > Age
+        if (currentEmotion == "HAPPY") {
+            switch (petAge) {
+                case INFANT: {
+                    frameData = infant_happy[currentFrame % INFANT_HAPPY_FRAME_COUNT];
+                    frameCount = INFANT_HAPPY_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, INFANT_HAPPY_WIDTH, INFANT_HAPPY_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case CHILD: {
+                    frameData = happy_child[currentFrame % HAPPY_CHILD_FRAME_COUNT];
+                    frameCount = HAPPY_CHILD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, HAPPY_CHILD_WIDTH, HAPPY_CHILD_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case ADULT: {
+                    frameData = happy_adult[currentFrame % HAPPY_ADULT_FRAME_COUNT];
+                    frameCount = HAPPY_ADULT_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, HAPPY_ADULT_WIDTH, HAPPY_ADULT_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case OLD: {
+                    frameData = old_happy[currentFrame % OLD_HAPPY_FRAME_COUNT];
+                    frameCount = OLD_HAPPY_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, OLD_HAPPY_WIDTH, OLD_HAPPY_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+            }
+        } else if (currentEmotion == "CRY") {
+            switch (petAge) {
+                case INFANT: {
+                    frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
+                    frameCount = INFANT_CRY_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, INFANT_CRY_WIDTH, INFANT_CRY_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case CHILD: {
+                    frameData = cry_child[currentFrame % CRY_CHILD_FRAME_COUNT];
+                    frameCount = CRY_CHILD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, CRY_CHILD_WIDTH, CRY_CHILD_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case ADULT: {
+                    frameData = cry_adult[currentFrame % CRY_ADULT_FRAME_COUNT];
+                    frameCount = CRY_ADULT_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, CRY_ADULT_WIDTH, CRY_ADULT_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case OLD: {
+                    frameData = old_cry[currentFrame % OLD_CRY_FRAME_COUNT];
+                    frameCount = OLD_CRY_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, OLD_CRY_WIDTH, OLD_CRY_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+            }
         } else if (currentEmotion == "SURPRISE") {
-            // INFANT/CHILD/ADULT surprised — use infant_surprise_frames as fallback
-            frameData = infant_surprise_frames[currentFrame % INFANT_SURPRISE_FRAME_COUNT];
-            frameCount = INFANT_SURPRISE_FRAME_COUNT;
-            display.drawBitmap(0, 0, frameData, INFANT_SURPRISE_WIDTH, INFANT_SURPRISE_HEIGHT, SSD1306_WHITE);
+            switch (petAge) {
+                case INFANT: {
+                    frameData = infant_surprise_frames[currentFrame % INFANT_SURPRISE_FRAME_COUNT];
+                    frameCount = INFANT_SURPRISE_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, INFANT_SURPRISE_WIDTH, INFANT_SURPRISE_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case CHILD: {
+                    frameData = child_surprise[currentFrame % CHILD_SURPRISE_FRAME_COUNT];
+                    frameCount = CHILD_SURPRISE_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, CHILD_SURPRISE_WIDTH, CHILD_SURPRISE_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case ADULT: {
+                    frameData = surprise_adult[currentFrame % SURPRISE_ADULT_FRAME_COUNT];
+                    frameCount = SURPRISE_ADULT_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, SURPRISE_ADULT_WIDTH, SURPRISE_ADULT_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case OLD: {
+                    frameData = old_surprise[currentFrame % OLD_SURPRISE_FRAME_COUNT];
+                    frameCount = OLD_SURPRISE_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, OLD_SURPRISE_WIDTH, OLD_SURPRISE_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+            }
         } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER" || currentEmotion == "POOP") {
             // SAD/HUNGER/POOP - sad animation (poop present = pet is uncomfortable)
             switch (petAge) {
@@ -2285,16 +2346,24 @@ void displayPetAnimation() {
                     display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT, SSD1306_WHITE);
                     break;
                 }
+                case CHILD: {
+                    frameData = child_sad[currentFrame % CHILD_SAD_FRAME_COUNT];
+                    frameCount = CHILD_SAD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, CHILD_SAD_WIDTH, CHILD_SAD_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
+                case ADULT: {
+                    frameData = adult_sad[currentFrame % ADULT_SAD_FRAME_COUNT];
+                    frameCount = ADULT_SAD_FRAME_COUNT;
+                    display.drawBitmap(0, 0, frameData, ADULT_SAD_WIDTH, ADULT_SAD_HEIGHT, SSD1306_WHITE);
+                    break;
+                }
                 case OLD: {
                     frameData = old_sad[currentFrame % OLD_SAD_FRAME_COUNT];
                     frameCount = OLD_SAD_FRAME_COUNT;
                     display.drawBitmap(0, 0, frameData, OLD_SAD_WIDTH, OLD_SAD_HEIGHT, SSD1306_WHITE);
                     break;
                 }
-                case CHILD:
-                case ADULT:
-                    drawSimpleSadFace();
-                    break;
             }
         } else if (currentEmotion == "IDLE") {
             // IDLE face - pet is calm/relaxed (not hungry, not sick, not dirty)
