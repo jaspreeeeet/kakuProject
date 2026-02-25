@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from threading import Thread, Lock
 import base64
+import hashlib
 
 # AI Vision imports - Google ViT Model
 try:
@@ -44,6 +45,8 @@ step_counter_lock = Lock()
 step_count_global = 0  # Total steps counted
 accel_history = deque(maxlen=20)  # Keep last 20 acceleration readings (enough for 2-second span @ 100ms intervals)
 last_step_time = 0  # Prevent duplicate step detection
+last_walking_time = 0  # Timestamp of most recent detected step (for is_walking flag)
+WALKING_ACTIVE_WINDOW = 3  # seconds — pet considered walking if step detected within this window
 
 # 👟 STEP DETECTION PARAMETERS (Optimized for 100ms buffered readings)
 # Now with 20 readings per 2 seconds = 100ms intervals = much better temporal resolution
@@ -76,10 +79,21 @@ def detect_steps(accel_x, accel_y, accel_z, current_time):
     if stoss > barrier and time_since_last_step > min_interval:
         steps_detected = 1
         detect_steps.last_step_time = current_time
+        global last_walking_time
+        last_walking_time = current_time  # Mark when walking was last active
         with step_counter_lock:
             step_count_global += 1
         print(f'     ✅👣 STEP #{step_count_global}! stoss: {stoss:.0f} > barrier: {barrier} | interval: {time_since_last_step:.2f}s')
     return steps_detected
+
+# ================= OTA FIRMWARE UPDATE STATE =================
+FIRMWARE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'firmware')
+os.makedirs(FIRMWARE_DIR, exist_ok=True)
+
+# In-memory OTA state: device_id → True when OTA is enabled from dashboard
+ota_enabled_devices = {}          # {device_id: True/False}
+ota_device_auth_tokens = {}       # {device_id: token} — set on first registration
+OTA_AUTH_TOKEN = 'kaku-ota-2025'  # Shared secret for device authentication
 
 # ================= CREATE FLASK APP =================
 app = Flask(__name__, static_folder='.', static_url_path='')
@@ -705,6 +719,20 @@ def init_database():
             ''')
             print("✅ Created game_rewards table")
             
+            # Firmware versions table for OTA updates
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS firmware_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    file_size INTEGER DEFAULT 0,
+                    checksum TEXT DEFAULT '',
+                    uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    notes TEXT DEFAULT ''
+                )
+            ''')
+            print("✅ Created firmware_versions table")
+            
             # Initialize one pet_state row if not exists
             cursor.execute('SELECT COUNT(*) FROM pet_state')
             if cursor.fetchone()[0] == 0:
@@ -1324,29 +1352,17 @@ def receive_sensor_data():
         accel_y = data.get('accel_y', 0)
         accel_z = data.get('accel_z', 0)
         
-        # 👣 COMPUTE STEP COUNT ON SERVER
+        # 👣 STEP COUNT from ESP32 hardware (ESP32 runs stoss/barrier detection)
         import time
         current_time = time.time()
-        
-        # NEW: Process sensor batch if available (multiple readings from ESP32)
-        total_steps_batch = 0
-        
-        # Reduced logging for performance
-        if data.get('sensor_batch') and data['sensor_batch'].get('readings'):
-            readings = data['sensor_batch']['readings']
-            
-            for idx, reading in enumerate(readings):
-                batch_accel_x = reading.get('accel_x', 0)
-                batch_accel_y = reading.get('accel_y', 0)
-                batch_accel_z = reading.get('accel_z', 0)
-                batch_time = current_time + (idx * 0.1)  # Approximate timing based on index
-                
-                steps_in_reading = detect_steps(batch_accel_x, batch_accel_y, batch_accel_z, batch_time)
-                total_steps_batch += steps_in_reading
-        else:
-            # Fall back to single reading detection
-            steps_in_reading = detect_steps(accel_x, accel_y, accel_z, current_time)
-            total_steps_batch = steps_in_reading
+
+        total_steps_batch = int(data.get('step_count', 0))
+        if total_steps_batch > 0:
+            global last_walking_time
+            last_walking_time = current_time  # Mark walking active for OLED is_walking flag
+            with step_counter_lock:
+                step_count_global += total_steps_batch
+            print(f'👣 HW Steps: +{total_steps_batch} | Total: {step_count_global}')
         
         # 🧭 COMPUTE ORIENTATION ON SERVER (moved from ESP32)
         direction, confidence = detect_device_orientation(accel_x, accel_y, accel_z)
@@ -2329,6 +2345,30 @@ def store_sensor_data(data):
 
 # ==================== OLED DISPLAY ANIMATION CONTROL ====================
 
+def _should_show_play_icon(pet: dict) -> bool:
+    """Returns True if the play icon should blink on the ESP32 main screen.
+    
+    Rules:
+      - At least 1 hour has passed since last_feed_time
+      - Pet is NOT sick (sick_pending == 0)
+      - Pet does NOT currently have poop present
+    """
+    try:
+        if pet.get('sick_pending', False):
+            return False
+        if pet.get('poop_present', False):
+            return False
+        last_feed = pet.get('last_feed_time')
+        if not last_feed:
+            return False
+        if isinstance(last_feed, str):
+            last_feed = datetime.fromisoformat(last_feed)
+        elapsed_seconds = (datetime.now() - last_feed).total_seconds()
+        return elapsed_seconds > 3600  # 1 hour
+    except Exception:
+        return False
+
+
 @app.route('/api/oled-display/get', methods=['GET'])
 def get_oled_display():
     """ESP32 polls this endpoint to get what animation to display on OLED
@@ -2362,6 +2402,7 @@ def get_oled_display():
                 'show_food_icon': False,
                 'show_poop_icon': False,
                 'screen_type': 'MAIN',
+                'is_walking': False,
                 'mode': 'AUTOMATIC',
                 'message': 'Default INFANT state'
             }), 200
@@ -2448,7 +2489,6 @@ def get_oled_display():
             'energy': pet['energy'],
             'poop_present': pet['poop_present'],
             'age': pet['age'],
-            'happiness': pet['happiness'],
             'discipline': pet.get('discipline', 100),
             'mode': 'AUTOMATIC',
             'is_hungry': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
@@ -2456,9 +2496,12 @@ def get_oled_display():
             'show_food_icon': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
             'show_poop_icon': pet['poop_present'],
             'show_sick_icon': bool(pet.get('sick_pending', False)) and not pet['poop_present'],
+            'show_play_icon': _should_show_play_icon(pet),
             'screen_type': current_menu,
             'play_eating_animation': play_eating,
             'play_cleaning_animation': play_cleaning,
+            'is_walking': (time.time() - last_walking_time) < WALKING_ACTIVE_WINDOW,
+            'ota_update': ota_enabled_devices.get(device_id, False),
             'message': f'Auto: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
         }), 200
     
@@ -3167,6 +3210,225 @@ def get_step_stats():
     except Exception as e:
         print(f'❌ Error getting step stats: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ==================== OTA FIRMWARE UPDATE ENDPOINTS ====================
+
+@app.route('/api/firmware/enable-ota', methods=['POST'])
+def enable_ota():
+    """Dashboard sends POST to enable/disable OTA for a device.
+    ESP32 will see ota_update=true in next OLED poll and begin update."""
+    try:
+        data = request.get_json()
+        device_id = data.get('device_id', 'ESP32_001')
+        enable = data.get('enable', True)
+        
+        ota_enabled_devices[device_id] = bool(enable)
+        status_str = 'enabled' if enable else 'disabled'
+        print(f'🔄 OTA {status_str} for device {device_id}')
+        
+        return jsonify({
+            'status': 'success',
+            'device_id': device_id,
+            'ota_enabled': bool(enable),
+            'message': f'OTA {status_str} for {device_id}'
+        }), 200
+    except Exception as e:
+        print(f'❌ Error enabling OTA: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/firmware/upload', methods=['POST'])
+def upload_firmware():
+    """Upload a new firmware .bin file from the dashboard.
+    Stores file in firmware/ directory and records metadata in DB."""
+    try:
+        if 'firmware' not in request.files:
+            return jsonify({'status': 'error', 'message': 'No firmware file in request'}), 400
+        
+        fw_file = request.files['firmware']
+        version = request.form.get('version', '').strip()
+        notes = request.form.get('notes', '').strip()
+        
+        if not version:
+            return jsonify({'status': 'error', 'message': 'Version is required'}), 400
+        
+        if not fw_file.filename.endswith('.bin'):
+            return jsonify({'status': 'error', 'message': 'Only .bin files are allowed'}), 400
+        
+        # Read file data and compute checksum
+        fw_data = fw_file.read()
+        checksum = hashlib.md5(fw_data).hexdigest()
+        file_size = len(fw_data)
+        
+        # Save file as firmware/<version>.bin
+        safe_filename = f'firmware_v{version}.bin'
+        filepath = os.path.join(FIRMWARE_DIR, safe_filename)
+        with open(filepath, 'wb') as f:
+            f.write(fw_data)
+        
+        # Record in database
+        conn = get_db_connection()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO firmware_versions (version, filename, file_size, checksum, notes)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (version, safe_filename, file_size, checksum, notes))
+                conn.commit()
+            finally:
+                conn.close()
+        
+        print(f'✅ Firmware v{version} uploaded: {safe_filename} ({file_size} bytes, md5:{checksum})')
+        
+        return jsonify({
+            'status': 'success',
+            'version': version,
+            'filename': safe_filename,
+            'file_size': file_size,
+            'checksum': checksum,
+            'message': f'Firmware v{version} uploaded successfully'
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error uploading firmware: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/firmware/latest', methods=['GET'])
+def get_latest_firmware():
+    """ESP32 calls this to check if a newer firmware is available.
+    Returns version, download URL, and checksum for integrity verification.
+    Requires auth token in header for security."""
+    try:
+        # Verify device auth token
+        auth_token = request.headers.get('X-OTA-Token', '')
+        if auth_token != OTA_AUTH_TOKEN:
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        
+        device_id = request.args.get('device_id', 'ESP32_001')
+        current_version = request.args.get('current_version', '0.0.0')
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database unavailable'}), 500
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT version, filename, file_size, checksum, notes
+                FROM firmware_versions
+                ORDER BY id DESC LIMIT 1
+            ''')
+            row = cursor.fetchone()
+            
+            if not row:
+                return jsonify({
+                    'status': 'success',
+                    'update_available': False,
+                    'message': 'No firmware versions available'
+                }), 200
+            
+            latest_version = row[0]
+            filename = row[1]
+            file_size = row[2]
+            checksum = row[3]
+            notes = row[4]
+            
+            # Simple version comparison (assumes semantic versioning)
+            update_available = latest_version != current_version
+            
+            # Build download URL
+            host = request.host_url.rstrip('/')
+            download_url = f'{host}/api/firmware/download/{filename}'
+            
+            # Auto-disable OTA flag after ESP32 checks in
+            if device_id in ota_enabled_devices:
+                ota_enabled_devices[device_id] = False
+            
+            return jsonify({
+                'status': 'success',
+                'update_available': update_available,
+                'version': latest_version,
+                'current_version': current_version,
+                'download_url': download_url,
+                'file_size': file_size,
+                'checksum': checksum,
+                'notes': notes
+            }), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f'❌ Error checking firmware: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/firmware/download/<filename>', methods=['GET'])
+def download_firmware(filename):
+    """Serve the firmware .bin file for ESP32 OTA download.
+    Requires auth token for security."""
+    try:
+        auth_token = request.headers.get('X-OTA-Token', '')
+        if auth_token != OTA_AUTH_TOKEN:
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        
+        filepath = os.path.join(FIRMWARE_DIR, filename)
+        if not os.path.exists(filepath):
+            return jsonify({'status': 'error', 'message': 'Firmware file not found'}), 404
+        
+        print(f'📦 Serving firmware: {filename}')
+        return send_from_directory(FIRMWARE_DIR, filename,
+                                   mimetype='application/octet-stream',
+                                   as_attachment=True)
+    except Exception as e:
+        print(f'❌ Error serving firmware: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/firmware/status', methods=['GET'])
+def firmware_status():
+    """Dashboard calls this to display current firmware info."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database unavailable'}), 500
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT version, filename, file_size, checksum, uploaded_at, notes
+                FROM firmware_versions
+                ORDER BY id DESC LIMIT 5
+            ''')
+            rows = cursor.fetchall()
+            
+            versions = []
+            for row in rows:
+                versions.append({
+                    'version': row[0],
+                    'filename': row[1],
+                    'file_size': row[2],
+                    'checksum': row[3],
+                    'uploaded_at': row[4],
+                    'notes': row[5]
+                })
+            
+            return jsonify({
+                'status': 'success',
+                'versions': versions,
+                'ota_enabled_devices': {k: v for k, v in ota_enabled_devices.items()},
+                'latest_version': versions[0]['version'] if versions else None
+            }), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f'❌ Error getting firmware status: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 # ==================== Error Handlers ====================
 

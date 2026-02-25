@@ -596,6 +596,24 @@
                 <button class="btn-secondary" onclick="clearDatabase()">🗑️ Clear Database</button>
                 <button class="btn-secondary" onclick="downloadData()">⬇️ Download Data</button>
             </div>
+
+            <!-- OTA Firmware Update -->
+            <div style="margin-top: 15px; padding: 15px; background: #1a1a2e; border-radius: 10px; border: 1px solid #333;">
+                <h3 style="margin: 0 0 10px 0; color: #e94560;">🔄 OTA Firmware Update</h3>
+                <div id="otaStatus" style="font-size: 0.85em; color: #aaa; margin-bottom: 10px;">No firmware uploaded yet</div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                    <button class="btn-primary" id="otaEnableBtn" onclick="toggleOTA()" style="background: #e94560;">🚀 Enable OTA</button>
+                    <input type="file" id="firmwareFile" accept=".bin" style="display: none;" onchange="handleFirmwareFile(this)">
+                    <button class="btn-secondary" onclick="document.getElementById('firmwareFile').click()">📁 Upload .bin</button>
+                    <input type="text" id="firmwareVersion" placeholder="Version (e.g. 1.0.1)" style="padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #0f3460; color: #fff; width: 150px;">
+                </div>
+                <div id="otaUploadProgress" style="display: none; margin-top: 10px;">
+                    <div style="background: #333; border-radius: 4px; height: 8px; overflow: hidden;">
+                        <div id="otaProgressBar" style="background: #e94560; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                    </div>
+                    <span id="otaProgressText" style="font-size: 0.8em; color: #aaa;">Uploading...</span>
+                </div>
+            </div>
         </div>
 
         <!-- Data Table with Filters -->
@@ -1308,6 +1326,7 @@
             initWebSocket();
             refreshData();
             loadLatestImage(); // Load latest image on page load
+            loadFirmwareStatus(); // Load OTA firmware status
             
             // Setup event listeners
             document.getElementById('recordLimit').addEventListener('change', refreshData);
@@ -1340,6 +1359,93 @@
                 .catch(error => {
                     console.error('Error loading latest image:', error);
                 });
+        }
+
+        // ================= OTA FIRMWARE UPDATE =================
+        let otaEnabled = false;
+
+        function toggleOTA() {
+            otaEnabled = !otaEnabled;
+            const btn = document.getElementById('otaEnableBtn');
+            fetch(API_BASE + '/api/firmware/enable-ota', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_id: 'ESP32_001', enable: otaEnabled })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    btn.textContent = otaEnabled ? '⏹️ Disable OTA' : '🚀 Enable OTA';
+                    btn.style.background = otaEnabled ? '#0f3460' : '#e94560';
+                    console.log('OTA ' + (otaEnabled ? 'enabled' : 'disabled'));
+                } else {
+                    otaEnabled = !otaEnabled;
+                    alert('Failed: ' + data.message);
+                }
+            })
+            .catch(err => { otaEnabled = !otaEnabled; console.error('OTA toggle error:', err); });
+        }
+
+        function handleFirmwareFile(input) {
+            if (!input.files.length) return;
+            const file = input.files[0];
+            const version = document.getElementById('firmwareVersion').value.trim();
+            if (!version) { alert('Please enter a firmware version first'); input.value = ''; return; }
+            if (!file.name.endsWith('.bin')) { alert('Only .bin files allowed'); input.value = ''; return; }
+
+            const formData = new FormData();
+            formData.append('firmware', file);
+            formData.append('version', version);
+
+            const progressDiv = document.getElementById('otaUploadProgress');
+            const progressBar = document.getElementById('otaProgressBar');
+            const progressText = document.getElementById('otaProgressText');
+            progressDiv.style.display = 'block';
+            progressBar.style.width = '10%';
+            progressText.textContent = 'Uploading ' + file.name + '...';
+
+            fetch(API_BASE + '/api/firmware/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                progressBar.style.width = '100%';
+                if (data.status === 'success') {
+                    progressText.textContent = '✅ v' + data.version + ' uploaded (' + (data.file_size / 1024).toFixed(1) + ' KB, md5:' + data.checksum.substring(0, 8) + ')';
+                    document.getElementById('otaStatus').textContent = 'Latest: v' + data.version + ' | ' + (data.file_size / 1024).toFixed(1) + ' KB | md5:' + data.checksum.substring(0, 8);
+                    document.getElementById('firmwareVersion').value = '';
+                } else {
+                    progressText.textContent = '❌ ' + data.message;
+                }
+                input.value = '';
+            })
+            .catch(err => {
+                progressBar.style.width = '100%';
+                progressBar.style.background = '#ff4444';
+                progressText.textContent = '❌ Upload failed: ' + err.message;
+                input.value = '';
+            });
+        }
+
+        // Load firmware status on page load
+        function loadFirmwareStatus() {
+            fetch(API_BASE + '/api/firmware/status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success' && data.latest_version) {
+                        const v = data.versions[0];
+                        document.getElementById('otaStatus').textContent = 'Latest: v' + v.version + ' | ' + (v.file_size / 1024).toFixed(1) + ' KB | md5:' + v.checksum.substring(0, 8);
+                        // Sync OTA button state
+                        if (data.ota_enabled_devices && data.ota_enabled_devices['ESP32_001']) {
+                            otaEnabled = true;
+                            const btn = document.getElementById('otaEnableBtn');
+                            btn.textContent = '⏹️ Disable OTA';
+                            btn.style.background = '#0f3460';
+                        }
+                    }
+                })
+                .catch(err => console.log('Firmware status not available:', err));
         }
     </script>
 </body>

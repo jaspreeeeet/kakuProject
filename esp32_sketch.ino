@@ -1,26 +1,35 @@
 /*
-ESP32 Dashboard Client - Arduino C++ Version with Camera & Microphone
-This sketch reads sensors, captures images, records audio, and sends data to dashboard
+ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
 
-⚠️  CURRENT MODE: SENSOR DATA ONLY ⚠️
-📡 ACTIVE: MPU6050 (accelerometer/gyro) + Microphone Level
-❌ DISABLED: Camera Image Capture & Audio Recording/Sending
-   (Camera & Audio code commented out for testing - search for "DISABLED" to re-enable)
+📡 ACTIVE FEATURES:
+  - MPU6050: accelerometer/gyro (tilt gestures + game control)
+  - Camera: on-demand only (food feeding gesture triggers capture)
+  - OLED 64x32: pet animations, menus, icons
+  - WiFi: sensor upload, pet state sync, image upload
+
+🎮 GESTURE CONTROLS:
+  - Right tilt + hold 2s → cycle menu (MAIN→FOOD→TOILET→PLAY→HEALTH→STATUS→STATS→MAIN)
+  - Left tilt + hold 3s  → context action (feed / clean / medicine depending on menu)
+
+⚡ CPU FREQUENCY:
+  - Idle:          40 MHz
+  - HTTP/JSON:    160 MHz
+  - Camera capture: 240 MHz
+
+📶 NETWORK SCHEDULE (staggered, no overlap):
+  - SLOT A: Sensor batch   → every 2s
+  - SLOT B: OLED + Events  → every 5s (combined single slot)
+  - On demand: Image upload, clean, inject, happy
 
 Required Libraries:
-- ArduinoJson
-- WiFi
-- HTTPClient
-- I2Cdev
-- MPU6050
-- esp_camera (ESP32 Camera)
-
-Install via Arduino IDE: Sketch > Include Library > Manage Libraries
+- ArduinoJson, WiFi, HTTPClient, I2Cdev, MPU6050, esp_camera
 */
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <HttpsOTAUpdate.h>
+#include <Update.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include "MPU6050.h"
@@ -35,6 +44,9 @@ Install via Arduino IDE: Sketch > Include Library > Manage Libraries
 #include <Adafruit_SSD1306.h>
 #include "all_pets.h"
 
+// ================= FIRMWARE VERSION (increment before each upload) =================
+#define FIRMWARE_VERSION "1.0.0"
+
 // ================= WIFI =================
 #define WIFI_SSID     "123"
 #define WIFI_PASSWORD "KUNAL 26"
@@ -44,6 +56,8 @@ const char* serverUrl = "https://kakuproject-90943350924.asia-south1.run.app/api
 const char* eventsUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/events?device_id=ESP32_001";  // Events endpoint
 const char* eventReceivedUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/event/received";  // Event acknowledgment
 const char* oledDisplayUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/get";  // OLED display animation endpoint
+const char* firmwareCheckUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/firmware/latest?device_id=ESP32_001&current_version=" FIRMWARE_VERSION;
+const char* OTA_AUTH_TOKEN = "kaku-ota-2025";  // Must match server token
 // NOTE: Orientation endpoint removed - server computes direction from sensor data
 
 // ================= CAMERA PINS (XIAO ESP32 S3 Sense) =================
@@ -83,43 +97,227 @@ const char* oledDisplayUrl = "https://kakuproject-90943350924.asia-south1.run.ap
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
+// ================= SLEEPING ANIMATION (2 frames, 64x32) =================
+#define SLEEPING_FRAME_COUNT 2
+#define SLEEPING_WIDTH  64
+#define SLEEPING_HEIGHT 32
+const uint16_t sleeping_delays[SLEEPING_FRAME_COUNT] = {700, 900};
+PROGMEM const uint8_t sleeping_frames[SLEEPING_FRAME_COUNT][256] = {
+  { // Frame 1
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x07,0x01,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x0f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0x3b,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3b,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0x80,0x00,0x00,0x00,0x00,0x00,0x7b,0xfb,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7c,0x7c,0x80,0x00,0x00,0x00,0x00,0x00,0x7f,0xdf,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xbf,0x80,0x00,0x00,0x00,0x00,0x00,0xf7,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x01,0xf7,0xc7,0xc0,0x00,0x00,0x00,0x00,0x03,0xf7,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x07,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x03,0x7f,0xff,0x00,0x00,0x00,0x00,0x00,0x07,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0xe0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xc0,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x40,0x20,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x60,0x00,0x00,0x00
+  },
+  { // Frame 2
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x07,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x04,0x01,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x0f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x3b,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3b,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0x80,0x00,0x00,0x00,0x00,0x00,0x7f,0xfb,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7c,0x7c,0x80,0x00,0x00,0x00,0x00,0x00,0x7f,0xdf,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xff,0x80,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xc7,0xc0,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x07,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x03,0x3f,0xff,0x80,0x00,0x00,0x00,0x00,0x07,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0xf0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xc0,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x40,0x20,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x30,0x00,0x00,0x00
+  }
+};
+
+// ================= WALKING ANIMATION (6 frames, 64x32 — frame 2 skipped) =================
+#define WALKING_FRAME_COUNT 6
+#define WALKING_WIDTH  64
+#define WALKING_HEIGHT 32
+const uint16_t walking_delays[WALKING_FRAME_COUNT] = {400,400,400,400,400,400};
+PROGMEM const uint8_t walking_animation[WALKING_FRAME_COUNT][256] = {
+  { // Frame 0
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0xe0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x37,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x77,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xf3,0x7e,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xef,0xfe,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x01,0xe3,0xf1,0x80,0x00,0x00,0x00,0x00,0x03,0xe3,0xf1,0x80,0x00,0x00,
+    0x00,0x00,0x03,0xe3,0xf1,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x02,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xfe,0x0f,0x80,0x00,0x00,
+    0x00,0x00,0x07,0xff,0x1f,0x80,0x00,0x00,0x00,0x00,0x0f,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x1f,0xff,0xff,0xa0,0x00,0x00,0x00,0x00,0x1f,0xbf,0xff,0xa0,0x00,0x00,
+    0x00,0x00,0x1f,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x36,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xff,0xe0,0x00,0x00,0x00,0x00,0x00,0x03,0x60,0x18,0x00,0x00,0x00,
+    0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x18,0x00,0x00,0x00,
+    0x00,0x00,0x02,0x00,0x18,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1e,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  },
+  { // Frame 1
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0xf0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x07,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x1b,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x00,0xf0,0xf8,0x80,0x00,0x00,0x00,0x00,0x00,0xf0,0xf8,0x80,0x00,0x00,
+    0x00,0x00,0x00,0xf0,0xf8,0xc0,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x07,0xff,0x87,0xc0,0x00,0x00,
+    0x00,0x00,0x1f,0xff,0xcf,0xc0,0x00,0x00,0x00,0x00,0x1f,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x0f,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x07,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x00,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x07,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x30,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x10,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x10,0x3c,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  },
+  { // Frame 2 (skipped at runtime)
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0f,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x0f,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x1c,0x7f,0x80,0x00,0x00,0x00,0x00,0x00,0x1f,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x00,0x3c,0xfe,0x40,0x00,0x00,0x00,0x00,0x00,0x3c,0x7c,0x60,0x00,0x00,
+    0x00,0x00,0x00,0x7c,0x7c,0x60,0x00,0x00,0x00,0x00,0x00,0x7c,0xfe,0x60,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0xe0,0x00,0x00,0x00,0x00,0x00,0x7f,0xff,0xe0,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0xe0,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xe0,0x00,0x00,
+    0x00,0x00,0x00,0xff,0xff,0xe0,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0xe0,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xff,0xe0,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0xc0,0x00,0x00,0x00,0x00,0x00,0x3f,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x0f,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x07,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x06,0x0c,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0a,0x0c,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  },
+  { // Frame 3
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0x9e,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xfd,0xff,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x01,0xfe,0x7f,0x00,0x00,0x00,0x00,0x00,0x01,0xfe,0x3e,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xfe,0x3e,0x00,0x00,0x00,0x00,0x00,0x03,0xfe,0x73,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0x7f,0xfe,0x80,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xfd,0x88,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0xa0,0x00,0x00,
+    0x00,0x00,0x0f,0xff,0xff,0xb8,0x00,0x00,0x00,0x00,0x07,0xef,0xff,0xa0,0x00,0x00,
+    0x00,0x00,0x1f,0xdf,0xff,0xa0,0x00,0x00,0x00,0x00,0x0f,0xbf,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x10,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x0f,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x07,0xff,0xfe,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xff,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xc8,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xa0,0x10,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x05,0x00,0x00,0x00,
+    0x00,0x00,0x01,0x00,0x07,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x06,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  },
+  { // Frame 4
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xf8,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xd7,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x01,0x7e,0xfe,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xc7,0x80,0x00,0x00,0x00,0x00,0x01,0xff,0xc7,0x80,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xc7,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xe6,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x18,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x1a,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x0f,0xff,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xf0,0x00,0x00,0x00,0x00,0x00,0x01,0x38,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x01,0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x20,0x00,0x00,0x00,
+    0x00,0x00,0x01,0x00,0x20,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x70,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  },
+  { // Frame 5
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0f,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x1b,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7e,0x7e,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xf9,0xf9,0x80,0x00,0x00,0x00,0x00,0x01,0xf1,0xf8,0x80,0x00,0x00,
+    0x00,0x00,0x01,0xf1,0xf8,0xc0,0x00,0x00,0x00,0x00,0x01,0xff,0xf9,0xc0,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x07,0xdf,0xff,0xc0,0x00,0x00,0x00,0x00,0x0f,0xff,0xff,0xe0,0x00,0x00,
+    0x00,0x00,0x0d,0xff,0xff,0xa0,0x00,0x00,0x00,0x00,0x1e,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xff,0x60,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xff,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xf4,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x0c,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x02,0x80,0x00,0x00,0x00,0x00,0x00,0x10,0x03,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x30,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  }
+};
+
 // ================= OLED ANIMATION DISPLAY =================
 enum PetAge { INFANT = 0, CHILD = 1, ADULT = 2, OLD = 3 };
 PetAge petAge = INFANT;             // Default to INFANT - server manages aging
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
-const unsigned long DISPLAY_CHECK_INTERVAL = 2000;  // Poll server for OLED display state every 2 seconds
+const unsigned long DISPLAY_CHECK_INTERVAL = 5000;  // Poll server for OLED+events every 5 seconds (combined slot)
 const unsigned long ANIMATION_DISPLAY_INTERVAL = 100;  // Display animation every 100ms (~10 FPS smooth)
 uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false;  // Track if startup egg animation is done
 bool showHomeIcon = true;   // ESP32 controls: Always show on MAIN screen
-bool showFoodIcon = false;  // NEW: Show food icon when pet is hungry
-bool showPoopIcon = false;  // NEW: Show poop icon when poop present
+bool showFoodIcon = false;  // Show food icon when pet is hungry
+bool showPoopIcon = false;  // Show poop icon when poop present
 bool showSickIcon = false;  // Show heart/sick icon after poop ignored >15 min (only when poop cleared)
 bool showPlayIcon = false;  // Show play icon 1hr after last feed (blinks top-left, paused when sick)
-String currentScreenType = "MAIN";  // NEW: Track current screen state from server
-String currentEmotion = "IDLE";  // NEW: Track current emotion from server (IDLE, CRY, SAD, HAPPY, EATING, etc.)
-bool justFinishedEating = false;  // NEW: Track if just finished eating to show GOOD text
-unsigned long eatingFinishTime = 0;  // NEW: Track when eating finished
+String currentScreenType = "MAIN";  // Current menu — controlled locally via right-tilt gesture
+String currentEmotion = "IDLE";    // Current emotion from server (IDLE, CRY, SAD, HAPPY, EATING, SURPRISE)
+bool justFinishedEating = false;    // Show GOOD! text after eating animation
+unsigned long eatingFinishTime = 0; // When eating finished (for GOOD! text timer)
 
-// NEW: Mode and hunger tracking for conditional camera send
-String currentMode = "AUTOMATIC";  // Mode from server: AUTOMATIC or MANUAL
+// Pet state tracking — updated every 5s from server via NET_OLED
+String currentMode = "AUTOMATIC";  // Mode from server (informational only — menu controlled locally)
 bool petIsHungry = false;          // Hunger status from server (hunger > 70)
 int  petAgeInt   = 0;              // Actual integer age from server (increments every 24 h)
 int  petHappiness = 100;           // Happiness (0-100) from server, shown as bar
 int  petDiscipline = 100;          // Discipline (0-100) from server, shown as bar
 
-// Camera cover detection for menu switching
-#define BLACK_BRIGHTNESS_TH 90    // Brightness threshold (JPEG avg when covered ~70-85)
-
-// NEW: Menu cycling via consecutive black frame detection (uses 5-sec captures only)
-int consecutiveBlackFrames = 0;        // Count consecutive black frames
-unsigned long lastMenuCycleTime = 0;   // Cooldown between menu cycles (prevent spam)
+// Right-tilt hold for menu switching
+bool holdingRightForMenu = false;            // Track right-tilt hold for menu cycling
+unsigned long menuTiltHoldStartTime = 0;     // When right tilt started
+const unsigned long MENU_TILT_HOLD_TIME = 2000;  // Hold 2 seconds to cycle menu
+unsigned long lastMenuCycleTime = 0;         // Cooldown between menu cycles
 const unsigned long MENU_CYCLE_COOLDOWN = 3000;  // 3 seconds cooldown
 
 volatile bool cameraCapturing = false;  // Flag to prevent camera access conflicts
 bool imageAlreadySentThisSession = false;  // Track if image sent for current food session
+
+// ================= SLEEP MODE STATE =================
+bool isDeviceSleeping = false;           // True when in sleep mode (neutral >30s)
+unsigned long neutralStartTime = 0;      // When neutral state first detected
+unsigned long sleepStartTime   = 0;      // When sleep mode started
+uint32_t accumulatedSleepSec   = 0;      // Sleep seconds banked, sent on next sensor upload
+const unsigned long NEUTRAL_SLEEP_TIMEOUT = 60000;  // 30s neutral → sleep
+
+// Walking state — driven by hardware step counter (not server)
+bool petIsWalking = false;
+unsigned long lastWalkingStepTime = 0;  // millis() of last detected step
+const unsigned long WALKING_WINDOW_MS = 3000;  // animate walking for 3s after last step
+
+// ── HARDWARE STEP COUNTER ──────────────────────────────────────────────
+uint32_t hwStepCount   = 0;       // Steps accumulated since last sensor send
+unsigned long lastHwStepTime = 0; // millis() of last detected step (debounce)
+const float   STEP_BARRIER_G2 = 0.10f;   // calibrated: 1400x above rest noise (0.00007g²), 3x below weakest step (0.296g²)
+const unsigned long STEP_MIN_MS = 400;  // steps ~1000ms apart; 400ms debounce is safe
+const float   LP_ALPHA_STEP = 0.85f;    // low-pass filter weight for gravity estimate
+
+// ── OTA UPDATE STATE ───────────────────────────────────────────────────
+bool otaUpdateRequested = false;       // Set true when server sends ota_update flag
+
+// LP gravity estimate — tracks gravity at ANY tilt (initialised flat)
+float stepGravX = 0.0f, stepGravY = 0.0f, stepGravZ = 1.0f;
 
 // ================= PLAY MENU GAME STATE =================
 enum GameState {
@@ -180,7 +378,7 @@ int currentInjectionFrame = 0;  // Current frame in injection animation
 // Food Menu Feeding Gesture Variables
 bool holdingLeftForFeeding = false;  // Track if holding left tilt for feeding
 unsigned long feedingHoldStartTime = 0;  // Track when tilt started for feeding
-bool capturingForFeeding = false;  // Flag to pause cover detection during feeding
+bool capturingForFeeding = false;  // Flag: feeding gesture active, camera task will capture
 unsigned long feedingGestureStartTime = 0;  // Track when feeding gesture was triggered
 #define FEEDING_TIMEOUT 30000  // 30 second timeout for feeding gesture
 bool justFedPet = false;  // Flag to ignore server hunger updates after feeding
@@ -260,13 +458,12 @@ unsigned long lastImageCapture = 0;
 unsigned long lastEventPoll = 0;               // Event polling timing
 unsigned long lastInternalReadTime = 0;        // Fast internal sensor reading timing
 const unsigned long SEND_INTERVAL = 2000;      // Send sensor data batch every 2 seconds
-const unsigned long INTERNAL_READ_INTERVAL = 100;  // NEW: Read sensor every 100ms internally
-const unsigned long IMAGE_INTERVAL = 5000;     // Capture image every 5 seconds (continuous background)
+const unsigned long INTERNAL_READ_INTERVAL = 100;  // Read sensor batch every 100ms internally
 const unsigned long EVENT_POLL_INTERVAL = 5000; // Poll for events every 5 seconds
 unsigned long dynamicEventPollInterval = 5000;  // Dynamic backoff for event polling
 // Audio now triggered by speech detection, not timer
 
-// NEW: Sensor reading buffer
+// Sensor reading buffer (batched between network sends)
 SensorDataBatch sensorBatch = {};
 float totalMicLevel = 0.0;
 int micReadingCount = 0;
@@ -305,28 +502,31 @@ struct SensorData {
     // ESP32 internal temperature
     float chip_temperature;  // Internal chip temperature in °C
     
-    // NEW: Batch of sensor readings for better step detection
+    // Batch of sensor readings for better step detection
     SensorDataBatch sensor_batch;
 };
 
-// ================= NETWORK TASK QUEUE (FIX 3) =================
-// All HTTP calls dispatched through this queue to dedicated networkTask
+// ================= NETWORK TASK QUEUE =================
+// All HTTP calls dispatched through this queue to networkTask (Core 1)
+// Active types: NET_SENSOR, NET_OLED, NET_IMAGE, NET_CLEAN, NET_INJECT, NET_HAPPY
+// NET_EVENTS unused (events polled inside NET_OLED handler back-to-back)
 enum NetReqType : uint8_t {
-    NET_SENSOR = 0,  // Send sensor batch to server
-    NET_OLED   = 1,  // Poll OLED display state from server
-    NET_EVENTS = 2,  // Poll server for events
-    NET_IMAGE  = 3,  // Upload camera image to server
-    NET_CLEAN  = 4,  // Send cleaning request to server
-    NET_INJECT = 5,  // Send injection/medicine given to server
-    NET_HAPPY  = 6   // Camera cover detected → happiness +5
+    NET_SENSOR = 0,  // Send sensor batch to server (every 2s)
+    NET_OLED   = 1,  // Poll OLED state + events combined (every 5s)
+    NET_EVENTS = 2,  // UNUSED — events now handled inside NET_OLED
+    NET_IMAGE  = 3,  // Upload camera image to server (on feeding gesture)
+    NET_CLEAN  = 4,  // Send cleaning request (left tilt 3s on TOILET_MENU)
+    NET_INJECT = 5,  // Send medicine given (left tilt 3s on HEALTH_MENU)
+    NET_HAPPY  = 6   // Right tilt menu cycle interaction → happiness +5
 };
 
 QueueHandle_t networkQueue;           // Queue: loop() → networkTask
 SemaphoreHandle_t networkDataMutex;   // Protect g_pendingSensor
 SensorData g_pendingSensor;           // Shared sensor data for networkTask
 
-// ✅ FIX 6: Global StaticJsonDocuments — allocated once, no heap fragmentation
-StaticJsonDocument<768>  g_oledDoc;   // Reused for OLED display polling
+// ================= NETWORK TASK QUEUE =================
+// Global StaticJsonDocuments — allocated once, no heap fragmentation
+StaticJsonDocument<768>  g_oledDoc;   // Reused for OLED+events polling
 StaticJsonDocument<4096> g_sensorDoc; // Reused for sensor data sending
 
 // ================= ORIENTATION DETECTION =================
@@ -355,32 +555,35 @@ void acknowledgeEvent(int event_id);
 void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample_rate);
 void sendAllDataToServer(SensorData data);
 String recordAudioBase64();
-void notifyServerStartupComplete();  // NEW: Notify server startup is complete
-void getOLEDDisplayFromServer();  // NEW: Forward declaration
-void drawHomeIcon();  // NEW: Draw home icon pixel-by-pixel
-void drawFoodIcon();  // NEW: Draw food icon pixel-by-pixel (bottom-right)
-void drawPoopIcon();  // NEW: Draw poop icon pixel-by-pixel (bottom-right)
-void drawPlayIcon();  // NEW: Draw blinking play icon at top-left (1hr after feed)
-void drawSickIcon();  // NEW: Draw blinking heart/sick icon at bottom-right (after poop ignored >15 min)
-void playEatingAnimation();  // NEW: Play eating animation
-void drawStaticFoodIcon();  // NEW: Draw static food icon at top-left (food menu)
-void drawStaticToiletIcon();  // NEW: Draw static toilet icon at top-left (toilet menu)
-void drawCleanSpriteFrame(int frame, int xOffset);  // NEW: Draw clean slide sprite frame
-void drawStaticPlayIcon();  // NEW: Draw static play icon at top-left (play menu)
-void drawStaticHealthIcon();  // NEW: Draw static heart icon at top-left (health menu)
-void playInjectionAnimation();  // NEW: Play injection/medicine animation
-void sendInjectRequest();       // NEW: Notify server that injection was given
-void displayFoodMenu();  // NEW: Display food menu screen
-void displayToiletMenu();  // NEW: Display toilet menu screen
-void displayPlayMenu();  // NEW: Display play menu screen (static icon)
-void displayHealthMenu();  // NEW: Display health menu screen with heart icon
-void displayStatusInfoMenu();  // NEW: Display status info menu (smiley + age + flash + score)
-void displayStatsMenu();       // NEW: Display stats menu (happiness + discipline bars)
-bool isFrameMostlyBlack(camera_fb_t * fb);  // NEW: Check if camera is covered
-void cycleMenu();  // NEW: Cycle through menus (MAIN → FOOD → TOILET → PLAY)
-// void checkCameraCover();  // DISABLED: Check camera cover for menu switching (now uses 5-sec intervals)
-void oledTask(void *parameter);  // NEW: OLED animation task on Core 0
-void networkTask(void *parameter);  // ✅ FIX 3: Dedicated HTTP task on Core 1
+void notifyServerStartupComplete();  // Notify server startup is complete
+void getOLEDDisplayFromServer();     // GET /api/oled-display/get → update pet state vars
+void drawHomeIcon();       // Draw home icon pixel-by-pixel
+void drawFoodIcon();       // Draw food icon (bottom-right)
+void drawPoopIcon();       // Draw poop icon (bottom-right)
+void drawPlayIcon();       // Draw blinking play icon (top-left, 1hr after feed)
+void drawSickIcon();       // Draw blinking sick/heart icon (bottom-right)
+void playEatingAnimation(); // Play eating animation
+void drawStaticFoodIcon();  // Static food icon at top-left (food menu)
+void drawStaticToiletIcon(); // Static toilet icon at top-left (toilet menu)
+void drawCleanSpriteFrame(int frame, int xOffset); // Clean slide sprite frame
+void drawStaticPlayIcon();   // Static play icon at top-left (play menu)
+void drawStaticHealthIcon(); // Static heart icon at top-left (health menu)
+void playInjectionAnimation();  // Play injection/medicine animation
+void sendInjectRequest();       // Notify server that injection was given
+void displayFoodMenu();         // Display food menu screen
+void displayToiletMenu();       // Display toilet menu screen
+void displayPlayMenu();         // Display play menu screen
+void displayHealthMenu();       // Display health menu screen
+void displayStatusInfoMenu();   // Display status info menu (smiley + age + flash + score)
+void displayStatsMenu();        // Display stats menu (happiness + discipline bars)
+void checkMenuTiltGesture();    // Right tilt 2s hold → cycle menu
+bool isDeviceNeutral();          // True when device lies flat (no significant X/Y tilt)
+void detectHardwareStep();       // Count steps via MPU6050 stoss method
+void displaySleepingAnimation(); // 2-frame sleeping animation
+void displayWalkingAnimation();  // 6-frame walking animation (skips frame 2)
+void cycleMenu();               // Cycle menus: MAIN → FOOD → TOILET → PLAY → HEALTH → STATUS → STATS → MAIN
+void oledTask(void *parameter); // OLED animation task on Core 0
+void networkTask(void *parameter);  // Dedicated HTTP task on Core 1 (queue-driven)\nvoid checkAndPerformOTA();           // Check firmware server and perform OTA if newer version exists
 
 // ================= OLED ANIMATION TASK (Core 0) =================
 // Independent FreeRTOS task runs OLED animation on Core 0
@@ -392,7 +595,7 @@ void oledTask(void *parameter) {
         if (displayReady && startupComplete) {
             displayPetAnimation();  // Draw animation (non-blocking)
         }
-        vTaskDelay(pdMS_TO_TICKS(33));  // ~30 FPS refresh rate (every 33ms) — reduced from 60 FPS to free CPU
+        vTaskDelay(pdMS_TO_TICKS(60));  // ~16 FPS refresh rate
     }
 }
 
@@ -428,14 +631,14 @@ void setup() {
         Serial.println("⚠️  Server communication disabled - running in offline mode");
     }
     
-    // FIX 6: Enable WiFi modem sleep for power savings
+    // Enable WiFi modem sleep for power savings
     WiFi.setSleep(true);
     Serial.println("💤 WiFi sleep mode enabled");
     vTaskDelay(pdMS_TO_TICKS(20));  // 20ms settle after WiFi sleep config
     
-    // Dynamic CPU: idle at 80MHz (boosts to 160MHz only during HTTP/JSON)
-    setCpuFrequencyMhz(80);
-    Serial.println("⚡ CPU idle at 80MHz (boosts to 160MHz during network ops)");
+    // Dynamic CPU: idle at 40MHz (boosts to 160MHz only during HTTP/JSON)
+    setCpuFrequencyMhz(40);
+    Serial.println("⚡ CPU idle at 40MHz (boosts to 160MHz during network ops)");
     
     // Initialize I2C and MPU6050 with timeout protection
     Serial.println("Initializing I2C...");
@@ -498,6 +701,18 @@ void setup() {
             Serial.println("✅ MPU6050 initialized successfully!");
             mpuSuccess = true;
             mpuAvailable = true;  // Set flag for sensor readings
+
+            // Warm up LP gravity filter (1s) — prevents cold-start false steps
+            for (int i = 0; i < 40; i++) {
+                int16_t wx, wy, wz;
+                mpu.getAcceleration(&wx, &wy, &wz);
+                float fx = wx / 16384.0f, fy = wy / 16384.0f, fz = wz / 16384.0f;
+                stepGravX = LP_ALPHA_STEP * stepGravX + (1.0f - LP_ALPHA_STEP) * fx;
+                stepGravY = LP_ALPHA_STEP * stepGravY + (1.0f - LP_ALPHA_STEP) * fy;
+                stepGravZ = LP_ALPHA_STEP * stepGravZ + (1.0f - LP_ALPHA_STEP) * fz;
+                delay(25);
+            }
+            Serial.println("✅ Step gravity filter warmed up");
         } else {
             Serial.print(".");
             delay(500);
@@ -519,7 +734,7 @@ void setup() {
     audioMutex = xSemaphoreCreateMutex();
     cameraMutex = xSemaphoreCreateMutex();
     
-    // ✅ FIX 3: Create network queue and mutex
+    // Create network queue and mutex
     networkDataMutex = xSemaphoreCreateMutex();
     networkQueue = xQueueCreate(8, sizeof(uint8_t));  // Queue depth 8, each item 1 byte
     
@@ -556,7 +771,7 @@ void setup() {
         0                  // Core 0 (opposite of WiFi heavy Core 1)
     );
     
-    // ✅ FIX 3: Start dedicated network task on Core 1 (HTTP only, queue-driven)
+    // Start dedicated network task on Core 1 (HTTP only, queue-driven)
     xTaskCreatePinnedToCore(
         networkTask,         // Task function
         "Network",           // Task name
@@ -864,7 +1079,7 @@ void displayFoodMenu() {
     // Always draw food icon at top-left (menu identifier)
     drawStaticFoodIcon();
     
-    // NEW: Show EATING ANIMATION while image is uploading
+    // Show EATING ANIMATION while image is uploading
     // The captured frame IS the food - no AI detection needed
     if (isUploadingImage) {
         // Show looping eating animation (Pacman) - full screen, no food icon
@@ -1646,6 +1861,8 @@ void checkMedicineGesture() {
 
 // Check for feeding gesture (tilt left + hold 3 seconds)
 void checkFeedingGesture() {
+    // Block feeding during walking (MPU data unreliable) or sleeping
+    if (petIsWalking || isDeviceSleeping) return;
     if (!mpuAvailable) return;
     
     int16_t ax, ay, az;
@@ -1685,6 +1902,8 @@ void checkFeedingGesture() {
 
 // Check for cleaning gesture in toilet menu (tilt left + hold 3 seconds)
 void checkCleaningGesture() {
+    // Block cleaning gesture during walking or sleeping
+    if (petIsWalking || isDeviceSleeping) return;
     if (!mpuAvailable) return;
     if (!showPoopIcon) return;  // Only clean if poop present
     
@@ -1780,33 +1999,109 @@ void playInjectionAnimation() {
     }
 }
 
-// ================= CAMERA COVER DETECTION FOR MENU SWITCHING =================
-// Check if camera frame is mostly black (covered)
-bool isFrameMostlyBlack(camera_fb_t * fb) {
-    if (!fb || fb->len == 0) return false;
+// ================= MENU TILT GESTURE (RIGHT TILT 2 SEC) =================
+// Right tilt + hold 2 seconds → cycle through menus
+void checkMenuTiltGesture() {
+    if (!mpuAvailable) return;
+    if ((millis() - lastMenuCycleTime) < MENU_CYCLE_COOLDOWN) return;  // Respect cooldown
     
-    long total = 0;
-    int count = 0;
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
     
-    // Sample pixels (every 8th pixel for speed)
-    for (int i = 0; i < fb->len && i < 12000; i += 8) {
-        uint8_t p = fb->buf[i];
-        total += p;
-        count++;
+    float accelX = ax / 16384.0;
+    
+    if (accelX > 0.8) {
+        if (!holdingRightForMenu) {
+            holdingRightForMenu = true;
+            menuTiltHoldStartTime = millis();
+            Serial.println("📱 Menu tilt right started...");
+        }
+        
+        unsigned long heldFor = millis() - menuTiltHoldStartTime;
+        if (heldFor >= MENU_TILT_HOLD_TIME) {
+            Serial.println("🔄 Right tilt 2s held → Cycling menu...");
+            cycleMenu();
+            lastMenuCycleTime = millis();
+            holdingRightForMenu = false;
+            // Tilt interaction → happiness +5
+            uint8_t req = NET_HAPPY;
+            xQueueSend(networkQueue, &req, 0);
+        }
+    } else {
+        holdingRightForMenu = false;
     }
-    
-    if (count == 0) return false;
-    
-    int avg = total / count;
-    
-    // JPEG compression creates noise artifacts - only check brightness, ignore contrast
-    Serial.printf("🔍 Frame brightness: avg=%d (threshold=%d) | Size: %d bytes\n", 
-                 avg, BLACK_BRIGHTNESS_TH, fb->len);
-    
-    bool isBlack = (avg <= BLACK_BRIGHTNESS_TH);
-    Serial.printf("   Result: %s\n", isBlack ? "✅ BLACK" : "❌ NOT BLACK");
-    
-    return isBlack;
+}
+
+// ── NEUTRAL / SLEEP HELPERS ───────────────────────────────────────────────────
+
+// Hardware step counter — stoss/barrier method (same algorithm as original server detect_steps)
+// Uses g-unit values so barrier is sensor-independent
+void detectHardwareStep() {
+    if (!mpuAvailable) return;
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+
+    // Convert to g-units
+    float gx = ax / 16384.0f;
+    float gy = ay / 16384.0f;
+    float gz = az / 16384.0f;
+
+    // Low-pass filter — tracks gravity at ANY tilt orientation
+    stepGravX = LP_ALPHA_STEP * stepGravX + (1.0f - LP_ALPHA_STEP) * gx;
+    stepGravY = LP_ALPHA_STEP * stepGravY + (1.0f - LP_ALPHA_STEP) * gy;
+    stepGravZ = LP_ALPHA_STEP * stepGravZ + (1.0f - LP_ALPHA_STEP) * gz;
+
+    // Dynamic component only (gravity removed) — slow tilts disappear
+    float dx = gx - stepGravX;
+    float dy = gy - stepGravY;
+    float dz = gz - stepGravZ;
+    float stoss = dx*dx + dy*dy + dz*dz;
+
+    unsigned long now = millis();
+    if (stoss > STEP_BARRIER_G2 && (now - lastHwStepTime) > STEP_MIN_MS) {
+        hwStepCount++;
+        lastHwStepTime    = now;
+        lastWalkingStepTime = now;
+        Serial.printf("👣 HW Step #%u  stoss=%.4f\n", hwStepCount, stoss);
+    }
+}
+
+// Returns true when device lies flat (no significant X/Y tilt)
+bool isDeviceNeutral() {
+    if (!mpuAvailable) return false;
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    float x = ax / 16384.0f;
+    float y = ay / 16384.0f;
+    return (abs(x) < 0.3f && abs(y) < 0.3f);
+}
+
+// 2-frame sleeping animation (frame-timed)
+void displaySleepingAnimation() {
+    static uint8_t sleepFrame = 0;
+    static unsigned long lastSleepFrameTime = 0;
+    display.clearDisplay();
+    display.drawBitmap(0, 0, sleeping_frames[sleepFrame], SLEEPING_WIDTH, SLEEPING_HEIGHT, SSD1306_WHITE);
+    display.display();
+    if (millis() - lastSleepFrameTime >= pgm_read_word(&sleeping_delays[sleepFrame])) {
+        lastSleepFrameTime = millis();
+        sleepFrame = (sleepFrame + 1) % SLEEPING_FRAME_COUNT;
+    }
+}
+
+// 6-frame walking animation (skips frame 2 at runtime)
+void displayWalkingAnimation() {
+    static uint8_t wFrame = 0;
+    static unsigned long lastWFrameTime = 0;
+    if (wFrame == 2) wFrame = 3;   // skip frame 2 on entry guard
+    display.clearDisplay();
+    display.drawBitmap(0, 0, walking_animation[wFrame], WALKING_WIDTH, WALKING_HEIGHT, SSD1306_WHITE);
+    display.display();
+    if (millis() - lastWFrameTime >= pgm_read_word(&walking_delays[wFrame])) {
+        lastWFrameTime = millis();
+        wFrame = (wFrame + 1) % WALKING_FRAME_COUNT;
+        if (wFrame == 2) wFrame = 3;  // skip frame 2
+    }
 }
 
 // Cycle through menus: MAIN → FOOD_MENU → TOILET_MENU → PLAY_MENU → HEALTH_MENU → STATUS_INFO_MENU → MAIN
@@ -1854,9 +2149,9 @@ void cycleMenu() {
     // ESP32 runs independently - no server notification needed
 }
 
-// ================= CAMERA COVER DETECTION (DISABLED - Moved to 5-sec capture) =================
+// ================= CAMERA COVER DETECTION (DISABLED — replaced by right-tilt gesture) =================
 // OLD: Continuous frame checking every loop (causes hardware heating)
-// NEW: Black frame detection integrated into cameraMonitorTask() 5-second captures
+// Old: Black frame detection — removed. Menu now uses right-tilt gesture.
 /*
 void checkCameraCover() {
     // Skip cover detection if camera is currently capturing (prevent conflict)
@@ -1910,6 +2205,15 @@ void displayPetAnimation() {
             lastScreenDebug = millis();
         }
         
+        // Check for menu tilt gesture — blocked during game, walking, or sleeping
+        if (playGameState != GAME_PLAYING && !petIsWalking && !isDeviceSleeping) {
+            checkMenuTiltGesture();
+        }
+
+        // Hardware step detection — update petIsWalking from local timing
+        detectHardwareStep();
+        petIsWalking = (millis() - lastWalkingStepTime) < WALKING_WINDOW_MS;
+        
         // Check which screen to display
         if (currentScreenType == "FOOD_MENU") {
             displayFoodMenu();
@@ -1933,6 +2237,16 @@ void displayPetAnimation() {
             return;  // Exit early
         }
         
+        // ── SLEEP / WALKING overrides for MAIN screen ──────────────────────────
+        if (isDeviceSleeping) {
+            displaySleepingAnimation();
+            return;
+        }
+        if (petIsWalking) {
+            displayWalkingAnimation();
+            return;
+        }
+
         // Default: MAIN screen with pet animation
         display.clearDisplay();
         
@@ -2030,25 +2344,28 @@ void displayPetAnimation() {
         }
         
         // Draw home icon OR play icon at top-left (play icon overrides home when active)
-        if (showPlayIcon && currentScreenType == "MAIN") {
+        // Icons hidden during walking/sleeping — resume when animation ends
+        bool iconsAllowed = !petIsWalking && !isDeviceSleeping;
+
+        if (iconsAllowed && showPlayIcon && currentScreenType == "MAIN") {
             drawPlayIcon();  // Play reminder blinks at top-left
-        } else if (showHomeIcon && currentScreenType == "MAIN") {
+        } else if (iconsAllowed && showHomeIcon && currentScreenType == "MAIN") {
             drawHomeIcon();
         }
         
         // Draw food icon at bottom-right corner (shows when pet is hungry)
         // Priority: SICK > POOP > HUNGER — food hidden if poop or sick active (same as sick/poop mutual exclusion)
-        if (showFoodIcon && !showPoopIcon && !showSickIcon && currentScreenType == "MAIN") {
+        if (iconsAllowed && showFoodIcon && !showPoopIcon && !showSickIcon && currentScreenType == "MAIN") {
             drawFoodIcon();
         }
         
         // Draw poop icon at bottom-right corner (shows when poop present)
-        if (showPoopIcon && currentScreenType == "MAIN") {
+        if (iconsAllowed && showPoopIcon && currentScreenType == "MAIN") {
             drawPoopIcon();
         }
         
         // Draw sick/heart icon at bottom-right (only when poop cleared but was ignored >15 min)
-        if (showSickIcon && !showPoopIcon && currentScreenType == "MAIN") {
+        if (iconsAllowed && showSickIcon && !showPoopIcon && currentScreenType == "MAIN") {
             drawSickIcon();
         }
         
@@ -2060,7 +2377,7 @@ void displayPetAnimation() {
     }
 }
 
-// ================= NETWORK TASK (FIX 3 — Dedicated HTTP Task) =================
+// ================= NETWORK TASK (Core 1 — Queue-driven HTTP) =================
 // All HTTP calls happen here, queue-driven from loop()
 // Runs on Core 1 alongside loop() — decouples sensor reading from network blocking
 void networkTask(void *parameter) {
@@ -2081,25 +2398,26 @@ void networkTask(void *parameter) {
                     }
                     setCpuFrequencyMhz(160);  // Boost for JSON serialization + HTTP
                     sendSensorDataOnly(dataCopy);
-                    setCpuFrequencyMhz(80);   // Return to idle after send
+                    setCpuFrequencyMhz(40);   // Return to idle after send
                     break;
                 }
                 
                 case NET_OLED:
-                    // OLED poll is lightweight — no CPU boost needed
+                    // Combined: OLED state + events in one slot
                     getOLEDDisplayFromServer();
-                    break;
-                
-                case NET_EVENTS:
-                    setCpuFrequencyMhz(160);  // Boost for event processing
+                    setCpuFrequencyMhz(160);
                     pollForEvents();
-                    setCpuFrequencyMhz(80);
+                    setCpuFrequencyMhz(40);
+                    // If server flagged OTA update, perform it now
+                    if (otaUpdateRequested) {
+                        checkAndPerformOTA();
+                    }
                     break;
                 
                 case NET_IMAGE:
                     setCpuFrequencyMhz(160);  // Boost for binary image upload
                     sendImageData("");         // Uses shared capturedImageBuffer
-                    setCpuFrequencyMhz(80);
+                    setCpuFrequencyMhz(40);
                     break;
                 
                 case NET_CLEAN:
@@ -2113,7 +2431,7 @@ void networkTask(void *parameter) {
                     break;
                 
                 case NET_HAPPY:
-                    // Camera cover interaction → happiness +5 on server
+                    // Right-tilt menu cycle interaction → happiness +5 on server
                     sendCoverHappyRequest();
                     break;
             }
@@ -2124,7 +2442,7 @@ void networkTask(void *parameter) {
 
 void loop() {
     // This loop runs on Core 1 - handles sensors + queue dispatching ONLY
-    // HTTP calls moved to networkTask (FIX 3) — no blocking here
+    // HTTP calls moved to networkTask on Core 1 — no blocking here
     
     // Check WiFi connection with timeout protection
     if (WiFi.status() != WL_CONNECTED) {
@@ -2189,18 +2507,49 @@ void loop() {
         isUploadingImage = false;  // Also reset eating animation
     }
     
-    // ── STAGGERED NETWORK SCHEDULER (FIX 5) ───────────────────────────────────
+    // ── NEUTRAL / SLEEP STATE DETECTION ──────────────────────────────────────
+    // If the device stays flat (neutral) for 30 s enter sleep mode:
+    //   • network paused, WiFi modem sleeps, display shows sleeping animation
+    //   • sleep seconds accumulated and sent with the next sensor upload on wake
+    if (!isDeviceSleeping) {
+        if (isDeviceNeutral()) {
+            if (neutralStartTime == 0) neutralStartTime = millis();
+            if (millis() - neutralStartTime >= NEUTRAL_SLEEP_TIMEOUT) {
+                isDeviceSleeping = true;
+                sleepStartTime   = millis();
+                Serial.println("😴 Neutral 30s → SLEEP MODE (network paused)");
+            }
+        } else {
+            neutralStartTime = 0;  // reset if device is moved
+        }
+    } else {
+        // Already sleeping — wake on any meaningful movement
+        if (!isDeviceNeutral()) {
+            uint32_t sleptSec = (millis() - sleepStartTime) / 1000;
+            accumulatedSleepSec += sleptSec;
+            Serial.printf("⏰ Woke up — slept %us (banked: %us)\n", sleptSec, accumulatedSleepSec);
+            isDeviceSleeping = false;
+            neutralStartTime = 0;
+            sleepStartTime   = 0;
+        }
+    }
+
+    // While sleeping: skip all network work, yield CPU, and let oledTask render the animation
+    if (isDeviceSleeping) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        return;
+    }
+
+    // ── STAGGERED NETWORK SCHEDULER ───────────────────────────────────────────
     // Uses 500ms tick slots to spread requests — no simultaneous HTTP bursts
-    // Slot 0,4,8...  (t % 2000 ≈ 0)    → sensor every 2 s
-    // Slot 2,6,10... (t % 2000 ≈ 1000) → OLED   every 2 s  (1 s offset)
-    // Slot 5,15,25.. (t % 5000 ≈ 2500) → events every 5 s  (2.5 s offset)
+    // Slot 0,20,40...  (t % 10000 ≈ 0)    → sensor every 10 s
+    // Slot 5,15,25...  (t % 5000  ≈ 2500) → OLED + events every 5 s (2.5 s offset)
     static uint32_t lastSensorTick = 0;
     static uint32_t lastOledTick   = 0;
-    static uint32_t lastEventTick  = 0;
     uint32_t nowTick = millis() / 500;  // 500 ms resolution ticks
     
-    // SLOT A — Sensor data every 2 s (tick 0,4,8,...)
-    if (nowTick % 4 == 0 && nowTick != lastSensorTick && !isUploadingImage) {
+    // SLOT A — Sensor data every 10 s (tick 0,20,40,...)
+    if (nowTick % 20 == 0 && nowTick != lastSensorTick && !isUploadingImage) {
         lastSensorTick = nowTick;
         SensorData data = readAllSensors();
         data.sensor_batch = sensorBatch;
@@ -2218,17 +2567,10 @@ void loop() {
         micReadingCount = 0;
     }
     
-    // SLOT B — OLED display state every 2 s at +1 s offset (tick 2,6,10,...)
-    if (nowTick % 4 == 2 && nowTick != lastOledTick && startupComplete) {
+    // SLOT B — OLED state + events combined every 5 s at +2.5 s offset (tick 5,15,25,...)
+    if (nowTick % 10 == 5 && nowTick != lastOledTick && startupComplete && !isUploadingImage) {
         lastOledTick = nowTick;
         uint8_t req = NET_OLED;
-        xQueueSend(networkQueue, &req, 0);
-    }
-    
-    // SLOT C — Events every 5 s at +2.5 s offset (tick 5,15,25,...)
-    if (nowTick % 10 == 5 && nowTick != lastEventTick && !isUploadingImage) {
-        lastEventTick = nowTick;
-        uint8_t req = NET_EVENTS;
         xQueueSend(networkQueue, &req, 0);
     }
     
@@ -2330,89 +2672,35 @@ bool initAudio() {
 
 // ================= DUAL-CORE CAMERA MONITORING TASK =================
 void cameraMonitorTask(void *parameter) {
-    Serial.println("📸 Core 0: Camera monitoring task started");
+    Serial.println("📸 Core 0: Camera monitoring task started (on-demand only)");
     
-    unsigned long lastCapture = 0;
+    // Start at low frequency - camera is idle
+    setCpuFrequencyMhz(40);
+    Serial.println("⚡ CPU: 40MHz (camera idle)");
     
     while (true) {
         if (!cameraReady) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         
-        // PAUSE camera capture during game
-        if (currentScreenType == "PLAY_MENU" && playGameState == GAME_PLAYING) {
-            Serial.println("🎮 Game active - PAUSING camera capture");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        
-        // Capture image every 5 seconds (continuous background)
-        if (millis() - lastCapture >= IMAGE_INTERVAL) {
-            lastCapture = millis();
+        // Only capture when feeding gesture is triggered
+        if (capturingForFeeding && !isUploadingImage) {
+            // Boost CPU for capture
+            setCpuFrequencyMhz(240);
+            Serial.println("⚡ CPU: 240MHz (capturing)");
             
-            // Skip capture if currently uploading (prevent overlap)
-            if (isUploadingImage) {
-                Serial.println("⏭️  Skipping capture - upload in progress");
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-            
-            cameraCapturing = true;  // Set flag to prevent conflicts
-            Serial.println("📸 Core 0: Capturing image (5-sec interval)...");
+            Serial.println("📸 Core 0: Feeding triggered - capturing fresh image...");
+            cameraCapturing = true;
             camera_fb_t *fb = esp_camera_fb_get();
             
             if (fb) {
-                Serial.printf("✅ Core 0: Image captured: %d bytes (raw JPEG)\n", fb->len);
+                Serial.printf("✅ Core 0: Image captured: %d bytes\n", fb->len);
                 
-                // NEW: Check if frame is black (camera covered) for menu cycling
-                bool isBlack = isFrameMostlyBlack(fb);
-                unsigned long now = millis();
-                
-                // PAUSE cover detection during game or feeding
-                if (playGameState == GAME_PLAYING) {
-                    Serial.println("🎮 Game active - PAUSING cover detection");
-                    consecutiveBlackFrames = 0;  // Reset counter
-                } else if (capturingForFeeding) {
-                    Serial.println("🍽️ Feeding in progress - PAUSING cover detection");
-                    consecutiveBlackFrames = 0;  // Reset counter
-                } else if (isBlack) {
-                    consecutiveBlackFrames++;
-                    Serial.printf("🖤 Black frame detected (%d/1) | Cooldown: %lu / %lu ms\n", 
-                                 consecutiveBlackFrames,
-                                 now - lastMenuCycleTime,
-                                 MENU_CYCLE_COOLDOWN);
-                    
-                    // If 1 black frame detected AND cooldown passed → Cycle menu
-                    if (consecutiveBlackFrames >= 1 && (now - lastMenuCycleTime) > MENU_CYCLE_COOLDOWN) {
-                        Serial.println("🔄 Black frame detected → Attempting to cycle menu...");
-                        Serial.printf("   Current menu: %s\n", currentScreenType.c_str());
-                        cycleMenu();  // MAIN → FOOD_MENU → TOILET_MENU → MAIN
-                        lastMenuCycleTime = now;
-                        consecutiveBlackFrames = 0;  // Reset counter
-                        // Camera cover = interaction → happiness +5
-                        uint8_t req = NET_HAPPY;
-                        xQueueSend(networkQueue, &req, 0);
-                    } else if (consecutiveBlackFrames >= 1) {
-                        Serial.printf("   ⏳ Cooldown active: %lu ms remaining\n", 
-                                     MENU_CYCLE_COOLDOWN - (now - lastMenuCycleTime));
-                    }
-                } else {
-                    // Frame not black - reset counter
-                    if (consecutiveBlackFrames > 0) {
-                        Serial.println("✅ Camera uncovered - reset black frame counter");
-                    }
-                    consecutiveBlackFrames = 0;
-                }
-                
-                // Store raw binary in PSRAM with mutex protection
                 if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    // Free previous buffer if exists
                     if (capturedImageBuffer != NULL) {
                         free(capturedImageBuffer);
                     }
-                    
-                    // Allocate new buffer and copy data
                     capturedImageBuffer = (uint8_t*)ps_malloc(fb->len);
                     if (capturedImageBuffer) {
                         memcpy(capturedImageBuffer, fb->buf, fb->len);
@@ -2422,18 +2710,21 @@ void cameraMonitorTask(void *parameter) {
                     } else {
                         Serial.println("❌ Core 0: Failed to allocate image buffer");
                     }
-                    
                     xSemaphoreGive(cameraMutex);
                 }
-                
                 esp_camera_fb_return(fb);
             } else {
                 Serial.println("❌ Core 0: Camera capture failed");
             }
+            cameraCapturing = false;
+            
+            // Drop back to low frequency after capture
+            setCpuFrequencyMhz(40);
+            Serial.println("⚡ CPU: 40MHz (camera idle)");
         }
         
-        // Check every second
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Poll every 50ms (low CPU, on-demand only)
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -2504,10 +2795,17 @@ void audioMonitorTask(void *parameter) {
                 }
             }
         } else {
-            // Reset speech start if energy drops below threshold
-            if (currentTime - lastSoundTime > 200) { // 200ms of silence resets start
+            // Below threshold — reset speech start
+            if (currentTime - lastSoundTime > 200) {
                 speechStartTime = 0;
             }
+        }
+        
+        // Mic sleep: if silent for 3+ seconds and not recording, slow-poll to save power
+        if (!currentlyRecording && (currentTime - lastSoundTime) > 3000) {
+            audioEnergyLevel = 0;  // Report silence
+            vTaskDelay(pdMS_TO_TICKS(200));  // Sleep 200ms between reads
+            continue;
         }
         
         // If currently recording, add audio data to buffer
@@ -2555,7 +2853,7 @@ void audioMonitorTask(void *parameter) {
             speechStartTime = 0;
         }
         
-        // FIX 3: Increase VAD delay from 1ms to 10ms (no quality loss, big power savings)
+        // Increase VAD delay to 10ms (no quality loss, better power savings)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -2636,7 +2934,7 @@ bool isServerAlive() {
 // ================= OLED DISPLAY ANIMATION POLLING =================
 void getOLEDDisplayFromServer() {
     HTTPClient http;
-    http.setReuse(true);  // ✅ FIX 4: Reuse TCP/TLS connection
+    http.setReuse(true);  // Reuse TCP/TLS connection
     http.setConnectTimeout(3000);
     http.setTimeout(3000);
 
@@ -2649,7 +2947,7 @@ void getOLEDDisplayFromServer() {
     if (httpCode == 200) {
         String response = http.getString();
         
-        // ✅ FIX 6: Reuse global StaticJsonDocument (no heap allocation)
+        // Reuse global StaticJsonDocument (no heap allocation)
         g_oledDoc.clear();
         DeserializationError error = deserializeJson(g_oledDoc, response);
         
@@ -2676,8 +2974,7 @@ void getOLEDDisplayFromServer() {
                 }
             }
             
-            // NEW: Handle screen_type / screen_state (DISABLED - ESP32 controls menu locally)
-            // Server menu override disabled to allow local camera cover menu navigation
+            // screen_type / screen_state override DISABLED — ESP32 controls menu locally via tilt gesture
             /*
             if (g_oledDoc.containsKey("screen_type")) {
                 String newScreenType = g_oledDoc["screen_type"].as<String>();
@@ -2783,8 +3080,20 @@ void getOLEDDisplayFromServer() {
                     eatingFinishTime = millis();
                 }
             }
+
+            // is_walking is now driven by hardware step counter in loop()
+            // Server is_walking field ignored — hardware has lower latency
             
-            // DISABLED: Server menu control removed - ESP32 controls menu locally via camera cover
+            // OTA update flag — server sets this when dashboard "Enable OTA" is pressed
+            if (g_oledDoc.containsKey("ota_update")) {
+                bool otaFlag = g_oledDoc["ota_update"].as<bool>();
+                if (otaFlag && !otaUpdateRequested) {
+                    otaUpdateRequested = true;
+                    Serial.println("🔄 OTA update requested by server!");
+                }
+            }
+            
+            // DISABLED: Server menu control — ESP32 controls menu locally via right-tilt gesture
             /*
             if (g_oledDoc.containsKey("current_menu")) {
                 String menu = g_oledDoc["current_menu"].as<String>();
@@ -2802,6 +3111,209 @@ void getOLEDDisplayFromServer() {
     }
     
     http.end();
+}
+
+// ================= OTA FIRMWARE UPDATE =================
+// Called from networkTask when ota_update flag is received from server.
+// Uses ESP32 dual-partition OTA (automatic A/B swap) — safe rollback on failure.
+// Flow: check /api/firmware/latest → if newer → download .bin → flash → reboot
+void checkAndPerformOTA() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️ OTA: WiFi not connected, aborting");
+        otaUpdateRequested = false;
+        return;
+    }
+    
+    Serial.println("🔄 OTA: Checking for firmware update...");
+    Serial.printf("   Current version: %s\n", FIRMWARE_VERSION);
+    
+    // Show OTA status on OLED
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(2, 4);
+    display.println("OTA UPDATE");
+    display.setCursor(2, 16);
+    display.println("Checking...");
+    display.display();
+    
+    // Step 1: Check /api/firmware/latest for newer version
+    setCpuFrequencyMhz(240);  // Max CPU for OTA
+    
+    HTTPClient http;
+    http.setConnectTimeout(10000);
+    http.setTimeout(10000);
+    
+    if (!http.begin(firmwareCheckUrl)) {
+        Serial.println("❌ OTA: Failed to connect to firmware server");
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    http.addHeader("X-OTA-Token", OTA_AUTH_TOKEN);
+    int httpCode = http.GET();
+    
+    if (httpCode != 200) {
+        Serial.printf("❌ OTA: Firmware check failed, HTTP %d\n", httpCode);
+        http.end();
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    String response = http.getString();
+    http.end();
+    
+    // Parse response
+    StaticJsonDocument<512> otaDoc;
+    DeserializationError error = deserializeJson(otaDoc, response);
+    if (error) {
+        Serial.printf("❌ OTA: JSON parse error: %s\n", error.c_str());
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    bool updateAvailable = otaDoc["update_available"] | false;
+    if (!updateAvailable) {
+        Serial.println("✅ OTA: Firmware is up to date");
+        display.clearDisplay();
+        display.setCursor(2, 4);
+        display.println("OTA UPDATE");
+        display.setCursor(2, 16);
+        display.println("Up to date!");
+        display.display();
+        delay(2000);
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    const char* newVersion  = otaDoc["version"] | "?";
+    const char* downloadUrl = otaDoc["download_url"] | "";
+    int fileSize            = otaDoc["file_size"] | 0;
+    const char* checksum    = otaDoc["checksum"] | "";
+    
+    Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion, fileSize);
+    Serial.printf("   Download: %s\n", downloadUrl);
+    
+    // Step 2: Show downloading status on OLED
+    display.clearDisplay();
+    display.setCursor(2, 4);
+    display.println("UPDATING");
+    display.setCursor(2, 16);
+    display.print("v");
+    display.println(newVersion);
+    display.display();
+    
+    // Step 3: Download and flash firmware using HTTPClient + Update library
+    // This uses ESP32's dual-partition OTA — writes to inactive partition, then swaps on reboot
+    HTTPClient httpOTA;
+    httpOTA.setConnectTimeout(15000);
+    httpOTA.setTimeout(60000);  // 60s timeout for large firmware downloads
+    
+    if (!httpOTA.begin(downloadUrl)) {
+        Serial.println("❌ OTA: Failed to connect for firmware download");
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    httpOTA.addHeader("X-OTA-Token", OTA_AUTH_TOKEN);
+    int dlCode = httpOTA.GET();
+    
+    if (dlCode != 200) {
+        Serial.printf("❌ OTA: Download failed, HTTP %d\n", dlCode);
+        httpOTA.end();
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    int contentLength = httpOTA.getSize();
+    if (contentLength <= 0) {
+        Serial.println("❌ OTA: Invalid content length");
+        httpOTA.end();
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    Serial.printf("📦 OTA: Downloading %d bytes...\n", contentLength);
+    
+    // Begin OTA update with Update library (ESP32 dual-partition)
+    if (!Update.begin(contentLength)) {
+        Serial.printf("❌ OTA: Not enough space for update: %s\n", Update.errorString());
+        httpOTA.end();
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    WiFiClient *stream = httpOTA.getStreamPtr();
+    uint8_t buf[1024];
+    int written = 0;
+    int lastPct = -1;
+    
+    while (httpOTA.connected() && (written < contentLength)) {
+        size_t available = stream->available();
+        if (available) {
+            int bytesRead = stream->readBytes(buf, min((size_t)sizeof(buf), available));
+            Update.write(buf, bytesRead);
+            written += bytesRead;
+            
+            int pct = (written * 100) / contentLength;
+            if (pct != lastPct && pct % 10 == 0) {
+                lastPct = pct;
+                Serial.printf("   OTA: %d%%\n", pct);
+                // Update OLED progress
+                display.clearDisplay();
+                display.setCursor(2, 4);
+                display.println("FLASHING");
+                display.setCursor(2, 16);
+                display.printf("%d%%", pct);
+                // Draw progress bar
+                display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
+                display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
+                display.display();
+            }
+        }
+        vTaskDelay(1);  // Yield to RTOS
+    }
+    
+    httpOTA.end();
+    
+    if (written != contentLength) {
+        Serial.printf("❌ OTA: Download incomplete (%d/%d)\n", written, contentLength);
+        Update.abort();
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    if (!Update.end(true)) {
+        Serial.printf("❌ OTA: Flash failed: %s\n", Update.errorString());
+        otaUpdateRequested = false;
+        setCpuFrequencyMhz(40);
+        return;
+    }
+    
+    Serial.printf("✅ OTA: Firmware v%s flashed successfully! Rebooting...\n", newVersion);
+    
+    // Show success on OLED
+    display.clearDisplay();
+    display.setCursor(2, 4);
+    display.println("OTA DONE!");
+    display.setCursor(2, 16);
+    display.print("v");
+    display.println(newVersion);
+    display.setCursor(2, 26);
+    display.println("Rebooting..");
+    display.display();
+    delay(2000);
+    
+    ESP.restart();
 }
 
 // ================= STARTUP COMPLETE NOTIFICATION =================
@@ -2919,7 +3431,7 @@ bool sendSensorDataOnly(SensorData data) {
     }
     
     HTTPClient http;
-    http.setReuse(true);  // ✅ FIX 4: Reuse TCP/TLS connection
+    http.setReuse(true);  // Reuse TCP/TLS connection
     http.setConnectTimeout(2000);
     http.setTimeout(5000);
     
@@ -2930,7 +3442,7 @@ bool sendSensorDataOnly(SensorData data) {
     
     http.addHeader("Content-Type", "application/json");
     
-    // ✅ FIX 6: Reuse global StaticJsonDocument (no stack allocation each call)
+    // Reuse global StaticJsonDocument (no stack allocation each call)
     g_sensorDoc.clear();
     
     g_sensorDoc["accel_x"] = data.accel_x;
@@ -2942,6 +3454,10 @@ bool sendSensorDataOnly(SensorData data) {
     g_sensorDoc["mic_level"] = data.mic_level;
     g_sensorDoc["sound_data"] = data.sound_data;
     g_sensorDoc["chip_temperature"] = data.chip_temperature;  // ESP32 internal temperature
+    g_sensorDoc["sleep_seconds"] = accumulatedSleepSec;  // Seconds slept since last upload
+    accumulatedSleepSec = 0;  // Reset counter after reporting
+    g_sensorDoc["step_count"] = hwStepCount;  // Steps counted on hardware since last send
+    hwStepCount = 0;  // Reset after reporting
     
     // Add sensor batch with all buffered readings
     JsonObject batchObj = g_sensorDoc.createNestedObject("sensor_batch");
@@ -3063,7 +3579,7 @@ void sendImageData(String imageBase64) {
         lastFeedTime = millis();
         Serial.println("🍽️ Feeding complete - hunger reset locally (ignoring server for 10s)");
         
-        // NEW: Trigger "eating finished" state to show GOOD! text
+        // Trigger eating-finished state to show GOOD! text
         // Image upload = feeding complete (the frame IS the food)
         if (currentScreenType == "FOOD_MENU") {
             justFinishedEating = true;
@@ -3234,7 +3750,7 @@ void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample
 // ================= EVENT POLLING FUNCTIONS =================
 void pollForEvents() {
     HTTPClient http;
-    http.setReuse(true);  // ✅ FIX 4: Reuse TCP/TLS connection
+    http.setReuse(true);  // Reuse TCP/TLS connection
     
     Serial.println("🔍 Polling for important events...");
     
@@ -3375,7 +3891,7 @@ void sendCleanRequest() {
 // ================= SEND INJECTION REQUEST =================
 // Called after injection animation completes — clears sick_pending on server, resumes hunger
 // ================= SEND COVER HAPPY REQUEST =================
-// Called each time camera cover cycles the menu — happiness +5 on server
+// Called each time right-tilt gesture cycles the menu — happiness +5 on server
 void sendCoverHappyRequest() {
     if (WiFi.status() != WL_CONNECTED) return;
     
@@ -3468,7 +3984,7 @@ void processEvent(const char* event_type, const char* message) {
 
 void acknowledgeEvent(int event_id) {
     HTTPClient http;
-    http.setReuse(true);  // ✅ FIX 4: Reuse TCP/TLS connection
+    http.setReuse(true);  // Reuse TCP/TLS connection
     
     Serial.printf("📤 Acknowledging event #%d...\n", event_id);
     
