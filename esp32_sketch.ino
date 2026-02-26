@@ -57,6 +57,7 @@ const char* eventReceivedUrl = "https://kakuproject-90943350924.asia-south1.run.
 const char* oledDisplayUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/get";  // OLED display animation endpoint
 const char* firmwareCheckUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/firmware/latest?device_id=ESP32_001&current_version=" FIRMWARE_VERSION;
 const char* OTA_AUTH_TOKEN = "kaku-ota-2025";  // Must match server token
+const char* otaProgressUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/ota/report-progress";  // OTA progress reporting
 // NOTE: Orientation endpoint removed - server computes direction from sensor data
 
 // ================= CAMERA PINS (XIAO ESP32 S3 Sense) =================
@@ -320,6 +321,75 @@ WiFiClientSecure sslOTA;
 // Global SSL client for ALL network calls — shared across sensor/OLED/events/clean/inject
 WiFiClientSecure sslNet;
 uint8_t otaBuf[4096];  // OTA download buffer — global to save stack
+
+// HTTP error tracking — auto-reset SSL after consecutive failures
+int httpConsecutiveErrors = 0;
+const int HTTP_ERROR_RESET_THRESHOLD = 3;  // Reset SSL after 3 consecutive errors
+
+// Reset stale SSL connection (fixes HTTP -1 / connection refused after idle)
+void resetSSLConnection() {
+    Serial.println("🔄 Resetting SSL connection...");
+    sslNet.stop();
+    sslNet.setInsecure();
+    sslNet.setTimeout(10);
+    httpConsecutiveErrors = 0;
+    Serial.println("✅ SSL connection reset");
+}
+
+// Call after every HTTP result to track errors and auto-reset
+void trackHttpResult(int httpCode) {
+    if (httpCode > 0) {
+        httpConsecutiveErrors = 0;  // Success — reset counter
+    } else {
+        httpConsecutiveErrors++;
+        Serial.printf("⚠️ HTTP error %d (consecutive: %d/%d)\n", 
+                     httpCode, httpConsecutiveErrors, HTTP_ERROR_RESET_THRESHOLD);
+        if (httpConsecutiveErrors >= HTTP_ERROR_RESET_THRESHOLD) {
+            resetSSLConnection();
+        }
+    }
+}
+
+// Report OTA progress to server (non-blocking, best-effort)
+// Uses sslNet since sslOTA is busy with the firmware download
+void reportOTAProgress(const char* otaStatus, int progress, const char* version, const char* message) {
+    // Use a separate short-lived SSL client to avoid interfering with OTA download
+    WiFiClientSecure sslProgress;
+    sslProgress.setInsecure();
+    sslProgress.setTimeout(5);
+    
+    HTTPClient http;
+    http.setConnectTimeout(3000);
+    http.setTimeout(3000);
+    
+    if (!http.begin(sslProgress, String(otaProgressUrl))) {
+        Serial.println("⚠️ OTA progress report: connect failed");
+        return;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    
+    StaticJsonDocument<256> doc;
+    doc["device_id"] = "ESP32_001";
+    doc["token"] = OTA_AUTH_TOKEN;
+    doc["ota_status"] = otaStatus;
+    doc["progress"] = progress;
+    doc["version"] = version;
+    doc["message"] = message;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    int code = http.POST(payload);
+    http.end();
+    sslProgress.stop();
+    
+    if (code == 200) {
+        Serial.printf("📡 OTA progress reported: %s %d%%\n", otaStatus, progress);
+    } else {
+        Serial.printf("⚠️ OTA progress report failed: HTTP %d\n", code);
+    }
+}
 
 // CPU frequency guard — prevents Core 0/1 race condition on setCpuFrequencyMhz()
 SemaphoreHandle_t cpuFreqMutex = NULL;
@@ -3043,10 +3113,13 @@ void getOLEDDisplayFromServer() {
     http.setTimeout(3000);
 
     if (!http.begin(sslNet, String(oledDisplayUrl))) {
-        return;  // Silently fail, keep showing current animation
+        Serial.println("⚠️ OLED poll: begin failed, resetting SSL");
+        resetSSLConnection();
+        return;
     }
 
     int httpCode = http.GET();
+    trackHttpResult(httpCode);
     
     if (httpCode == 200) {
         String response = http.getString();
@@ -3241,6 +3314,9 @@ void checkAndPerformOTA() {
     display.println("Checking...");
     display.display();
     
+    // Report: checking for update
+    reportOTAProgress("checking", 0, FIRMWARE_VERSION, "Checking for updates...");
+    
     // Step 1: Check /api/firmware/latest for newer version
     setCpuFrequencyMhz(240);  // Max CPU for OTA
     
@@ -3308,6 +3384,11 @@ void checkAndPerformOTA() {
     
     Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion.c_str(), fileSize);
     Serial.printf("   Download: %s\n", downloadUrl.c_str());
+    
+    // Report: new version found, starting download
+    char msgBuf[64];
+    snprintf(msgBuf, sizeof(msgBuf), "Found v%s (%d KB), downloading...", newVersion.c_str(), fileSize / 1024);
+    reportOTAProgress("downloading", 0, newVersion.c_str(), msgBuf);
     
     // Step 2: Show downloading status on OLED
     display.clearDisplay();
@@ -3403,6 +3484,11 @@ void checkAndPerformOTA() {
                 display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
                 display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
                 display.display();
+                
+                // Report progress to server every 10%
+                char pctMsg[48];
+                snprintf(pctMsg, sizeof(pctMsg), "Downloading: %d%% (%d/%d KB)", pct, (int)(written/1024), (int)(contentLength/1024));
+                reportOTAProgress("downloading", pct, newVersion.c_str(), pctMsg);
             }
         } else {
             vTaskDelay(1);  // Yield to RTOS, retry quickly
@@ -3417,6 +3503,7 @@ void checkAndPerformOTA() {
     if (written != (size_t)contentLength) {
         Serial.printf("❌ OTA: Download incomplete (%d/%d)\n", written, contentLength);
         Update.abort();
+        reportOTAProgress("failed", lastPct > 0 ? lastPct : 0, newVersion.c_str(), "Download incomplete - connection lost");
         // Resume tasks on failure
         otaInProgress = false;
         if (oledTaskHandle) vTaskResume(oledTaskHandle);
@@ -3428,8 +3515,12 @@ void checkAndPerformOTA() {
         return;
     }
     
+    // Report: flashing firmware to partition
+    reportOTAProgress("flashing", 100, newVersion.c_str(), "Download complete, verifying & flashing...");
+    
     if (!Update.end(true)) {
         Serial.printf("❌ OTA: Flash failed: %s\n", Update.errorString());
+        reportOTAProgress("failed", 100, newVersion.c_str(), "Flash verification failed");
         // Resume tasks on failure
         otaInProgress = false;
         if (oledTaskHandle) vTaskResume(oledTaskHandle);
@@ -3442,6 +3533,9 @@ void checkAndPerformOTA() {
     }
     
     Serial.printf("✅ OTA: Firmware v%s flashed successfully! Rebooting...\n", newVersion.c_str());
+    
+    // Report: rebooting with new firmware
+    reportOTAProgress("rebooting", 100, newVersion.c_str(), "Flash successful! Rebooting...");
     
     // Show success on OLED
     display.clearDisplay();
@@ -3626,9 +3720,9 @@ bool sendSensorDataOnly(SensorData data) {
     Serial.printf("📊 Sending sensor data: %d bytes\n", payload.length());
     
     int httpCode = http.POST(payload);
+    trackHttpResult(httpCode);
     
     if (httpCode == 200) {
-        Serial.println("✅ Sensor data sent!");
         Serial.printf("    Accel: X=%.2f, Y=%.2f, Z=%.2f m/s²\n", 
                      data.accel_x, data.accel_y, data.accel_z);
         Serial.printf("    Gyro:  X=%.2f, Y=%.2f, Z=%.2f °/s\n", 
@@ -3845,6 +3939,7 @@ void sendAllDataToServer(SensorData data) {
     Serial.println("⏳ Waiting for server response...");
     
     int httpCode = http.POST(payload);
+    trackHttpResult(httpCode);
     
     if (httpCode > 0) {
         Serial.printf("📤 POST Response: %d\n", httpCode);
@@ -3914,9 +4009,10 @@ void pollForEvents() {
     
     // Make GET request
     int httpCode = http.GET();
+    trackHttpResult(httpCode);
     
     if (httpCode > 0) {
-        Serial.printf("📡 Server response: %d\n", httpCode);
+        Serial.printf("📡 Events response: %d\n", httpCode);
         
         if (httpCode == HTTP_CODE_OK) {
             String response = http.getString();
@@ -3925,8 +4021,6 @@ void pollForEvents() {
                 Serial.println("📋 Server Response:");
                 Serial.println("-------------------");
                 
-                // FIX: StaticJsonDocument avoids heap fragmentation
-                // DynamicJsonDocument(2048) was allocating 2KB on heap every 5s poll
                 StaticJsonDocument<2048> doc;
                 DeserializationError error = deserializeJson(doc, response);
                 
@@ -3953,13 +4047,9 @@ void pollForEvents() {
                                 Serial.printf("     Time: %s\n", created_at);
                                 Serial.println();
                                 
-                                // Process the event
                                 processEvent(event_type, message);
-                                
-                                // Acknowledge event received
                                 acknowledgeEvent(event_id);
-                                
-                                vTaskDelay(pdMS_TO_TICKS(100));  // Small delay between events
+                                vTaskDelay(pdMS_TO_TICKS(100));
                             }
                         } else {
                             Serial.println("✅ No new important events (all quiet)");
@@ -3971,7 +4061,6 @@ void pollForEvents() {
                     }
                 } else {
                     Serial.println("❌ JSON parsing error");
-                    Serial.println(response);
                 }
                 
                 Serial.println("-------------------");
@@ -3982,12 +4071,10 @@ void pollForEvents() {
             Serial.printf("⚠️ Unexpected response code: %d\n", httpCode);
         }
     } else {
-        Serial.printf("❌ HTTP request failed: %s\n", http.errorToString(httpCode).c_str());
-        Serial.println("   Server might be down or unreachable");
+        Serial.printf("❌ Events poll failed: %s\n", http.errorToString(httpCode).c_str());
     }
     
     http.end();
-    Serial.println("");
 }
 
 // Send cleaning request to server (remove poop)
@@ -4013,6 +4100,7 @@ void sendCleanRequest() {
     
     // Empty POST body
     int httpCode = http.POST("{}");
+    trackHttpResult(httpCode);
     
     if (httpCode > 0) {
         Serial.printf("📡 Server response: %d\n", httpCode);
@@ -4051,11 +4139,12 @@ void sendCoverHappyRequest() {
     
     http.addHeader("Content-Type", "application/json");
     int httpCode = http.POST("{}");
+    trackHttpResult(httpCode);
     
     if (httpCode == HTTP_CODE_OK) {
         Serial.println("\U0001f600 Cover detected → happiness +5 sent to server");
     } else {
-        Serial.printf("\u26a0\ufe0f cover-happy response: %d\n", httpCode);
+        Serial.printf("⚠️ cover-happy response: %d\n", httpCode);
     }
     http.end();
 }
@@ -4081,6 +4170,7 @@ void sendInjectRequest() {
     http.addHeader("Content-Type", "application/json");
     
     int httpCode = http.POST("{}");
+    trackHttpResult(httpCode);
     
     if (httpCode > 0) {
         Serial.printf("📡 Injection server response: %d\n", httpCode);
@@ -4157,6 +4247,7 @@ void acknowledgeEvent(int event_id) {
     
     // Send POST request
     int httpCode = http.POST(jsonString);
+    trackHttpResult(httpCode);
     
     if (httpCode > 0) {
         if (httpCode == HTTP_CODE_OK || httpCode == 200) {

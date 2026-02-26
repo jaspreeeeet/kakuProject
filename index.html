@@ -613,6 +613,25 @@
                     </div>
                     <span id="otaProgressText" style="font-size: 0.8em; color: #aaa;">Uploading...</span>
                 </div>
+
+                <!-- Live OTA Progress (shown when OTA is active on device) -->
+                <div id="otaLiveProgress" style="display: none; margin-top: 12px; padding: 12px; background: #0f3460; border-radius: 8px; border: 1px solid #e94560;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: bold; color: #e94560;" id="otaLiveTitle">📡 OTA In Progress</span>
+                        <span style="font-size: 0.8em; color: #aaa;" id="otaLiveElapsed">0s</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;">
+                        <div style="flex: 1; background: #333; border-radius: 4px; height: 12px; overflow: hidden;">
+                            <div id="otaLiveBar" style="background: linear-gradient(90deg, #e94560, #ff6b6b); height: 100%; width: 0%; transition: width 0.5s ease; border-radius: 4px;"></div>
+                        </div>
+                        <span style="font-weight: bold; color: #fff; min-width: 40px; text-align: right;" id="otaLivePct">0%</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.8em; color: #ccc;" id="otaLiveMsg">Waiting for device...</span>
+                        <span style="font-size: 0.75em; padding: 2px 8px; border-radius: 10px; font-weight: bold; background: #444; color: #fff;" id="otaLiveBadge">WAITING</span>
+                    </div>
+                    <div style="font-size: 0.75em; color: #888; margin-top: 6px;" id="otaLiveVersion"></div>
+                </div>
             </div>
         </div>
 
@@ -1378,6 +1397,13 @@
                     btn.textContent = otaEnabled ? '⏹️ Disable OTA' : '🚀 Enable OTA';
                     btn.style.background = otaEnabled ? '#0f3460' : '#e94560';
                     console.log('OTA ' + (otaEnabled ? 'enabled' : 'disabled'));
+                    // Start/stop live progress polling
+                    if (otaEnabled) {
+                        startOTAProgressPolling();
+                    } else {
+                        stopOTAProgressPolling();
+                        document.getElementById('otaLiveProgress').style.display = 'none';
+                    }
                 } else {
                     otaEnabled = !otaEnabled;
                     alert('Failed: ' + data.message);
@@ -1442,10 +1468,117 @@
                             const btn = document.getElementById('otaEnableBtn');
                             btn.textContent = '⏹️ Disable OTA';
                             btn.style.background = '#0f3460';
+                            startOTAProgressPolling();
                         }
                     }
                 })
                 .catch(err => console.log('Firmware status not available:', err));
+            
+            // Also check if there's an active OTA in progress (e.g., page refreshed mid-OTA)
+            fetch(API_BASE + '/api/ota/progress?device_id=ESP32_001')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success' && data.ota_active) {
+                        startOTAProgressPolling();
+                    }
+                })
+                .catch(() => {});
+        }
+
+        // ==================== OTA LIVE PROGRESS POLLING ====================
+        let otaProgressInterval = null;
+
+        function startOTAProgressPolling() {
+            if (otaProgressInterval) return; // Already polling
+            const liveDiv = document.getElementById('otaLiveProgress');
+            liveDiv.style.display = 'block';
+            otaProgressInterval = setInterval(pollOTAProgress, 2000); // Poll every 2s
+            pollOTAProgress(); // Immediate first poll
+        }
+
+        function stopOTAProgressPolling() {
+            if (otaProgressInterval) {
+                clearInterval(otaProgressInterval);
+                otaProgressInterval = null;
+            }
+        }
+
+        function pollOTAProgress() {
+            fetch(API_BASE + '/api/ota/progress?device_id=ESP32_001')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    
+                    const liveDiv = document.getElementById('otaLiveProgress');
+                    
+                    if (!data.ota_active) {
+                        // No active OTA — hide after a brief delay if it was previously shown
+                        if (otaProgressInterval) {
+                            stopOTAProgressPolling();
+                            // Keep showing final state for 5s then hide
+                            setTimeout(() => { liveDiv.style.display = 'none'; }, 5000);
+                        }
+                        return;
+                    }
+                    
+                    liveDiv.style.display = 'block';
+                    
+                    // Update progress bar
+                    document.getElementById('otaLiveBar').style.width = data.progress + '%';
+                    document.getElementById('otaLivePct').textContent = data.progress + '%';
+                    document.getElementById('otaLiveMsg').textContent = data.message || '';
+                    document.getElementById('otaLiveElapsed').textContent = formatElapsed(data.elapsed_seconds || 0);
+                    
+                    // Version info
+                    const verDiv = document.getElementById('otaLiveVersion');
+                    if (data.target_version) {
+                        verDiv.textContent = 'Target: v' + data.target_version;
+                    }
+                    
+                    // Status badge with colors
+                    const badge = document.getElementById('otaLiveBadge');
+                    const title = document.getElementById('otaLiveTitle');
+                    const statusColors = {
+                        'waiting':     { bg: '#444',    text: '#fff', label: 'WAITING',     icon: '⏳' },
+                        'checking':    { bg: '#1976d2', text: '#fff', label: 'CHECKING',    icon: '🔍' },
+                        'downloading': { bg: '#e94560', text: '#fff', label: 'DOWNLOADING', icon: '📥' },
+                        'flashing':    { bg: '#ff9800', text: '#000', label: 'FLASHING',    icon: '⚡' },
+                        'rebooting':   { bg: '#9c27b0', text: '#fff', label: 'REBOOTING',   icon: '🔄' },
+                        'done':        { bg: '#4caf50', text: '#fff', label: 'COMPLETE',    icon: '✅' },
+                        'failed':      { bg: '#f44336', text: '#fff', label: 'FAILED',      icon: '❌' }
+                    };
+                    const s = statusColors[data.ota_status] || statusColors['waiting'];
+                    badge.textContent = s.label;
+                    badge.style.background = s.bg;
+                    badge.style.color = s.text;
+                    title.textContent = s.icon + ' OTA: ' + s.label;
+                    
+                    // Update progress bar color based on status
+                    const bar = document.getElementById('otaLiveBar');
+                    if (data.ota_status === 'done') {
+                        bar.style.background = 'linear-gradient(90deg, #4caf50, #81c784)';
+                    } else if (data.ota_status === 'failed') {
+                        bar.style.background = 'linear-gradient(90deg, #f44336, #ef5350)';
+                    } else if (data.ota_status === 'flashing') {
+                        bar.style.background = 'linear-gradient(90deg, #ff9800, #ffb74d)';
+                    } else {
+                        bar.style.background = 'linear-gradient(90deg, #e94560, #ff6b6b)';
+                    }
+                    
+                    // Auto-stop polling on terminal states after delay
+                    if (data.ota_status === 'done' || data.ota_status === 'failed') {
+                        stopOTAProgressPolling();
+                        setTimeout(() => { liveDiv.style.display = 'none'; }, 10000);
+                    }
+                })
+                .catch(err => console.log('OTA progress poll error:', err));
+        }
+
+        function formatElapsed(seconds) {
+            if (seconds < 60) return seconds + 's';
+            const m = Math.floor(seconds / 60);
+            const s = seconds % 60;
+            return m + 'm ' + s + 's';
         }
     </script>
 </body>
