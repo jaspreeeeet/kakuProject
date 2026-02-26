@@ -866,7 +866,7 @@
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-            fetch(API_BASE + '/api/latest-image', { signal: controller.signal })
+            fetch(API_BASE + '/api/latest-image?t=' + Date.now(), { signal: controller.signal })
                 .then(response => {
                     clearTimeout(timeoutId);
                     return response.json();
@@ -1363,7 +1363,7 @@
         document.addEventListener('DOMContentLoaded', function () {
             initWebSocket();
             refreshData();
-            loadLatestImage(); // Load latest image on page load
+            loadLatestAIImage(); // Load latest image on page load
             loadFirmwareStatus(); // Load OTA firmware status
 
             // Setup event listeners
@@ -1381,23 +1381,6 @@
         });
 
         // Function to load the latest image
-        function loadLatestImage() {
-            fetch(API_BASE + '/api/latest-image')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success && data.image_url) {
-                        document.getElementById('cameraImage').src = data.image_url;
-                        document.getElementById('cameraPlaceholder').style.display = 'none';
-                        document.getElementById('cameraImage').style.display = 'block';
-                        console.log('Loaded latest image:', data.image_url);
-                    } else {
-                        console.log('No latest image available');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error loading latest image:', error);
-                });
-        }
 
         // ================= OTA FIRMWARE UPDATE =================
         let otaEnabled = false;

@@ -1694,7 +1694,7 @@ def get_latest_data():
                        CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                        CASE WHEN audio_data IS NOT NULL THEN 1 ELSE 0 END as has_audio
                 FROM sensor_readings 
-                ORDER BY timestamp DESC 
+                ORDER BY id DESC 
                 LIMIT ?
             ''', (limit,))
         else:
@@ -1704,7 +1704,7 @@ def get_latest_data():
                        CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                        0 as has_audio
                 FROM sensor_readings 
-                ORDER BY timestamp DESC 
+                ORDER BY id DESC 
                 LIMIT ?
             ''', (limit,))
         
@@ -1739,7 +1739,7 @@ def get_latest_image():
         cursor.execute('''
             SELECT id, camera_image, image_filename, ai_caption FROM sensor_readings 
             WHERE camera_image IS NOT NULL 
-            ORDER BY timestamp DESC 
+            ORDER BY id DESC 
             LIMIT 1
         ''')
         
@@ -3204,7 +3204,7 @@ def get_step_stats():
                         SUM(step_count) OVER (ORDER BY timestamp) as cumulative_steps
                     FROM sensor_readings
                     WHERE device_id = ? AND DATE(timestamp) = ?
-                    ORDER BY timestamp DESC
+                    ORDER BY id DESC
                     LIMIT 20
                 ''', (device_id, today))
                 
