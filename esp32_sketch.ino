@@ -12,7 +12,7 @@ ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
   - Left tilt + hold 3s  → context action (feed / clean / medicine depending on menu)
 
 ⚡ CPU FREQUENCY:
-  - Idle:          40 MHz
+  - Idle:          80 MHz
   - HTTP/JSON:    160 MHz
   - Camera capture: 240 MHz
 
@@ -44,11 +44,11 @@ Required Libraries:
 #include "all_pets.h"
 
 // ================= FIRMWARE VERSION (increment before each upload) =================
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.3"
 
 // ================= WIFI =================
-#define WIFI_SSID     "123"
-#define WIFI_PASSWORD "KUNAL 26"
+#define WIFI_SSID        "Airtel_BumbleBee-777"
+#define WIFI_PASSWORD    "kya karoge ."
 
 // ================= API =================
 const char* serverUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/sensor-data";  // Google Cloud Run Production
@@ -317,7 +317,18 @@ bool otaUpdateRequested = false;       // Set true when server sends ota_update 
 
 // Global SSL client for OTA — WiFiClientSecure is ~16KB, MUST be global (not on stack)
 WiFiClientSecure sslOTA;
+// Global SSL client for ALL network calls — shared across sensor/OLED/events/clean/inject
+WiFiClientSecure sslNet;
 uint8_t otaBuf[4096];  // OTA download buffer — global to save stack
+
+// CPU frequency guard — prevents Core 0/1 race condition on setCpuFrequencyMhz()
+SemaphoreHandle_t cpuFreqMutex = NULL;
+void safeCpuFreq(int mhz) {
+    if (cpuFreqMutex && xSemaphoreTake(cpuFreqMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        setCpuFrequencyMhz(mhz);
+        xSemaphoreGive(cpuFreqMutex);
+    }
+}
 
 // LP gravity estimate — tracks gravity at ANY tilt (initialised flat)
 float stepGravX = 0.0f, stepGravY = 0.0f, stepGravZ = 1.0f;
@@ -428,6 +439,10 @@ SemaphoreHandle_t audioMutex;
 SemaphoreHandle_t cameraMutex;
 TaskHandle_t audioTaskHandle = NULL;
 TaskHandle_t cameraTaskHandle = NULL;
+TaskHandle_t oledTaskHandle = NULL;
+
+// OTA in-progress flag — pauses all other tasks
+volatile bool otaInProgress = false;
 
 // Camera data ready flag
 volatile bool cameraImageReady = false;
@@ -634,14 +649,16 @@ void setup() {
         Serial.println("⚠️  Server communication disabled - running in offline mode");
     }
     
-    // Enable WiFi modem sleep for power savings
-    WiFi.setSleep(true);
-    Serial.println("💤 WiFi sleep mode enabled");
-    vTaskDelay(pdMS_TO_TICKS(20));  // 20ms settle after WiFi sleep config
+    // Disable WiFi modem sleep — keeps connection alive and stable
+    WiFi.setSleep(false);
+    // Max TX power for better range (RSSI was -94 dBm, too weak)
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    Serial.println("📶 WiFi: sleep OFF, TX power MAX for stable connection");
+    vTaskDelay(pdMS_TO_TICKS(20));  // 20ms settle after WiFi config
     
-    // Dynamic CPU: idle at 40MHz (boosts to 160MHz only during HTTP/JSON)
-    setCpuFrequencyMhz(40);
-    Serial.println("⚡ CPU idle at 40MHz (boosts to 160MHz during network ops)");
+    // Keep CPU at 240MHz during setup for stable I2C/camera/animation init
+    // Will drop to 80MHz AFTER all initialization is complete
+    Serial.println("⚡ CPU at 240MHz during setup (will idle at 80MHz after init)");
     
     // Initialize I2C and MPU6050 with timeout protection
     Serial.println("Initializing I2C...");
@@ -733,9 +750,14 @@ void setup() {
     // Initialize I2S Microphone
     initAudio();
     
+    // NOW drop CPU to idle frequency — all hardware init is done
+    setCpuFrequencyMhz(80);
+    Serial.println("⚡ CPU idle at 80MHz (boosts to 160MHz during network ops)");
+    
     // Create mutexes for synchronization
     audioMutex = xSemaphoreCreateMutex();
     cameraMutex = xSemaphoreCreateMutex();
+    cpuFreqMutex = xSemaphoreCreateMutex();  // CPU frequency race guard
     
     // Create network queue and mutex
     networkDataMutex = xSemaphoreCreateMutex();
@@ -770,13 +792,17 @@ void setup() {
         4096,              // Stack size
         NULL,              // Parameters
         1,                 // Priority (lower than audio)
-        NULL,              // Task handle
+        &oledTaskHandle,   // Task handle — needed for OTA suspend
         0                  // Core 0 (opposite of WiFi heavy Core 1)
     );
     
     // Init global OTA SSL client
     sslOTA.setInsecure();
     sslOTA.setTimeout(120);
+    
+    // Init global network SSL client (shared for sensor/OLED/events/etc)
+    sslNet.setInsecure();
+    sslNet.setTimeout(10);
 
     // Start dedicated network task on Core 1 (HTTP only, queue-driven)
     xTaskCreatePinnedToCore(
@@ -838,7 +864,7 @@ void playEggCrackingAnimation() {
             display.drawBitmap(0, 0, egg_crack_frames[i], EGG_CRACK_WIDTH, EGG_CRACK_HEIGHT, SSD1306_WHITE);
             display.display();
             Serial.printf("🥚 Egg frame %d/%d\n", i + 1, EGG_CRACK_FRAME_COUNT);
-            delay(egg_crack_delays[i]);  // Use delay from all_pets.h (2 seconds each)
+            vTaskDelay(pdMS_TO_TICKS(egg_crack_delays[i]));  // Non-blocking delay — feeds watchdog
         }
         Serial.println("🐣 Egg hatching complete!");
     }
@@ -862,7 +888,7 @@ void slideEggScreenOut() {
         display.drawBitmap(xPos, 0, egg_crack_frames[EGG_CRACK_FRAME_COUNT - 1], EGG_CRACK_WIDTH, EGG_CRACK_HEIGHT, SSD1306_WHITE);
         
         display.display();
-        delay(80);
+        vTaskDelay(pdMS_TO_TICKS(80));  // Non-blocking — feeds watchdog
     }
     Serial.println("✅ Egg screen exit complete!");
 }
@@ -886,7 +912,7 @@ void slideInfantSlowlyFromLeft() {
         
         // Animation only - no text!
         display.display();
-        delay(200);  // 15 steps × 200ms = 3 seconds total
+        vTaskDelay(pdMS_TO_TICKS(200));  // Non-blocking — feeds watchdog
     }
     
     // Final position - infant fully visible and centered
@@ -1532,12 +1558,14 @@ void drawDodgeGame() {
 }
 
 void playDodgeGameOverAnim() {
+    // FIX: Use vTaskDelay() instead of delay() to prevent TG1WDT_SYS_RST watchdog reset
+    // delay() blocks RTOS scheduler → watchdog triggers after ~3.5s of blocking
     // Explosion rings
     for (int r = 2; r < 14; r += 2) {
         display.clearDisplay();
         display.drawCircle((int)playerX + 4, 23, r, SSD1306_WHITE);
         display.display();
-        delay(70);
+        vTaskDelay(pdMS_TO_TICKS(70));
     }
     // Scatter pixels
     for (int i = 0; i < 8; i++) {
@@ -1548,7 +1576,7 @@ void playDodgeGameOverAnim() {
             display.drawPixel(px, py, SSD1306_WHITE);
         }
         display.display();
-        delay(60);
+        vTaskDelay(pdMS_TO_TICKS(60));
     }
     // Screen shake "CRASH!"
     for (int i = 0; i < 6; i++) {
@@ -1557,7 +1585,7 @@ void playDodgeGameOverAnim() {
         display.setCursor(10 + s, 10);
         display.print("CRASH!");
         display.display();
-        delay(90);
+        vTaskDelay(pdMS_TO_TICKS(90));
     }
     // Final score screen
     display.clearDisplay();
@@ -1568,7 +1596,7 @@ void playDodgeGameOverAnim() {
     display.print("KC:");
     display.print(kc, 1);
     display.display();
-    delay(2500);
+    vTaskDelay(pdMS_TO_TICKS(2500));
     dodgeGameOverAnimDone = true;
 }
 
@@ -1585,7 +1613,7 @@ void sendKakuCoinReward(int score, float kakucoin) {
     
     const char* rewardUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/game/reward";
     
-    if (!http.begin(rewardUrl)) {
+    if (!http.begin(sslNet, String(rewardUrl))) {
         Serial.println("❌ Failed to begin reward HTTP");
         return;
     }
@@ -2000,7 +2028,7 @@ void playInjectionAnimation() {
                 display.setCursor(10, 12);
                 display.print("All Good");
                 display.display();
-                delay(2000);  // Show for 2 seconds
+                vTaskDelay(pdMS_TO_TICKS(2000));  // FIX: vTaskDelay prevents WDT reset
             }
         }
     }
@@ -2472,18 +2500,18 @@ void networkTask(void *parameter) {
                         dataCopy = g_pendingSensor;
                         xSemaphoreGive(networkDataMutex);
                     }
-                    setCpuFrequencyMhz(160);  // Boost for JSON serialization + HTTP
+                    safeCpuFreq(160);  // FIX: Mutex-guarded CPU freq (prevents Core 0/1 race)
                     sendSensorDataOnly(dataCopy);
-                    setCpuFrequencyMhz(40);   // Return to idle after send
+                    safeCpuFreq(80);
                     break;
                 }
                 
                 case NET_OLED:
                     // Combined: OLED state + events in one slot
                     getOLEDDisplayFromServer();
-                    setCpuFrequencyMhz(160);
+                    safeCpuFreq(160);
                     pollForEvents();
-                    setCpuFrequencyMhz(40);
+                    safeCpuFreq(80);
                     // If server flagged OTA update, perform it now
                     if (otaUpdateRequested) {
                         checkAndPerformOTA();
@@ -2491,9 +2519,9 @@ void networkTask(void *parameter) {
                     break;
                 
                 case NET_IMAGE:
-                    setCpuFrequencyMhz(160);  // Boost for binary image upload
+                    safeCpuFreq(160);  // FIX: Mutex-guarded CPU freq
                     sendImageData("");         // Uses shared capturedImageBuffer
-                    setCpuFrequencyMhz(40);
+                    safeCpuFreq(80);
                     break;
                 
                 case NET_CLEAN:
@@ -2751,8 +2779,8 @@ void cameraMonitorTask(void *parameter) {
     Serial.println("📸 Core 0: Camera monitoring task started (on-demand only)");
     
     // Start at low frequency - camera is idle
-    setCpuFrequencyMhz(40);
-    Serial.println("⚡ CPU: 40MHz (camera idle)");
+    setCpuFrequencyMhz(80);
+    Serial.println("⚡ CPU: 80MHz (camera idle)");
     
     while (true) {
         if (!cameraReady) {
@@ -2763,7 +2791,7 @@ void cameraMonitorTask(void *parameter) {
         // Only capture when feeding gesture is triggered
         if (capturingForFeeding && !isUploadingImage) {
             // Boost CPU for capture
-            setCpuFrequencyMhz(240);
+            safeCpuFreq(240);  // FIX: Mutex-guarded — prevents race with networkTask
             Serial.println("⚡ CPU: 240MHz (capturing)");
             
             Serial.println("📸 Core 0: Feeding triggered - capturing fresh image...");
@@ -2795,8 +2823,8 @@ void cameraMonitorTask(void *parameter) {
             cameraCapturing = false;
             
             // Drop back to low frequency after capture
-            setCpuFrequencyMhz(40);
-            Serial.println("⚡ CPU: 40MHz (camera idle)");
+            safeCpuFreq(80);  // FIX: Mutex-guarded
+            Serial.println("⚡ CPU: 80MHz (camera idle)");
         }
         
         // Poll every 50ms (low CPU, on-demand only)
@@ -2994,10 +3022,10 @@ SensorData readAllSensors() {
 // ================= SERVER HEALTH CHECK =================
 bool isServerAlive() {
     HTTPClient http;
-    http.setConnectTimeout(2000);  // Reduced from 5s
-    http.setTimeout(3000);         // Reduced from 8s
+    http.setConnectTimeout(2000);
+    http.setTimeout(3000);
 
-    if (!http.begin("https://kakuproject-90943350924.asia-south1.run.app/api/health")) {
+    if (!http.begin(sslNet, "https://kakuproject-90943350924.asia-south1.run.app/api/health")) {
         return false;
     }
 
@@ -3010,11 +3038,11 @@ bool isServerAlive() {
 // ================= OLED DISPLAY ANIMATION POLLING =================
 void getOLEDDisplayFromServer() {
     HTTPClient http;
-    http.setReuse(true);  // Reuse TCP/TLS connection
+    http.setReuse(true);
     http.setConnectTimeout(3000);
     http.setTimeout(3000);
 
-    if (!http.begin(oledDisplayUrl)) {
+    if (!http.begin(sslNet, String(oledDisplayUrl))) {
         return;  // Silently fail, keep showing current animation
     }
 
@@ -3224,7 +3252,7 @@ void checkAndPerformOTA() {
     if (!http.begin(sslOTA, String(firmwareCheckUrl))) {
         Serial.println("❌ OTA: Failed to connect to firmware server");
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3235,7 +3263,7 @@ void checkAndPerformOTA() {
         Serial.printf("❌ OTA: Firmware check failed, HTTP %d\n", httpCode);
         http.end();
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3248,7 +3276,7 @@ void checkAndPerformOTA() {
     if (error) {
         Serial.printf("❌ OTA: JSON parse error: %s\n", error.c_str());
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3263,7 +3291,7 @@ void checkAndPerformOTA() {
         display.display();
         delay(2000);
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3299,7 +3327,7 @@ void checkAndPerformOTA() {
     if (!httpOTA.begin(sslOTA, downloadUrl)) {
         Serial.println("❌ OTA: Failed to connect for firmware download");
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3310,7 +3338,7 @@ void checkAndPerformOTA() {
         Serial.printf("❌ OTA: Download failed, HTTP %d\n", dlCode);
         httpOTA.end();
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3319,18 +3347,26 @@ void checkAndPerformOTA() {
         Serial.println("❌ OTA: Invalid content length");
         httpOTA.end();
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
     Serial.printf("📦 OTA: Downloading %d bytes...\n", contentLength);
+    
+    // ===== SUSPEND ALL OTHER TASKS DURING OTA =====
+    // Free up CPU, memory, and WiFi bandwidth for reliable OTA flash
+    otaInProgress = true;
+    if (audioTaskHandle) vTaskSuspend(audioTaskHandle);
+    if (cameraTaskHandle) vTaskSuspend(cameraTaskHandle);
+    if (oledTaskHandle) vTaskSuspend(oledTaskHandle);
+    Serial.println("⏸️  All tasks suspended for OTA");
     
     // Begin OTA update with Update library (ESP32 dual-partition)
     if (!Update.begin(contentLength)) {
         Serial.printf("❌ OTA: Not enough space for update: %s\n", Update.errorString());
         httpOTA.end();
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3381,15 +3417,27 @@ void checkAndPerformOTA() {
     if (written != (size_t)contentLength) {
         Serial.printf("❌ OTA: Download incomplete (%d/%d)\n", written, contentLength);
         Update.abort();
+        // Resume tasks on failure
+        otaInProgress = false;
+        if (oledTaskHandle) vTaskResume(oledTaskHandle);
+        if (cameraTaskHandle) vTaskResume(cameraTaskHandle);
+        if (audioTaskHandle) vTaskResume(audioTaskHandle);
+        Serial.println("▶️  Tasks resumed after OTA failure");
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
     if (!Update.end(true)) {
         Serial.printf("❌ OTA: Flash failed: %s\n", Update.errorString());
+        // Resume tasks on failure
+        otaInProgress = false;
+        if (oledTaskHandle) vTaskResume(oledTaskHandle);
+        if (cameraTaskHandle) vTaskResume(cameraTaskHandle);
+        if (audioTaskHandle) vTaskResume(audioTaskHandle);
+        Serial.println("▶️  Tasks resumed after OTA failure");
         otaUpdateRequested = false;
-        setCpuFrequencyMhz(40);
+        setCpuFrequencyMhz(80);
         return;
     }
     
@@ -3423,15 +3471,15 @@ void notifyServerStartupComplete() {
     
     const char* startupUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/startup-complete";
     
-    if (!http.begin(startupUrl)) {
+    if (!http.begin(sslNet, String(startupUrl))) {
         Serial.println("❌ Failed to connect for startup notification");
         return;
     }
     
     http.addHeader("Content-Type", "application/json");
     
-    // Create startup notification payload
-    DynamicJsonDocument doc(256);
+    // FIX: StaticJsonDocument — DynamicJsonDocument causes heap fragmentation at startup
+    StaticJsonDocument<256> doc;
     doc["device_id"] = "ESP32_001";
     doc["status"] = "startup_complete";
     doc["timestamp"] = millis();
@@ -3450,7 +3498,7 @@ void notifyServerStartupComplete() {
         Serial.printf("   Response: %s\n", response.c_str());
         
         // Parse response - server might send initial state
-        DynamicJsonDocument responseDoc(768);
+        StaticJsonDocument<768> responseDoc;
         DeserializationError error = deserializeJson(responseDoc, response);
         
         if (!error) {
@@ -3529,7 +3577,7 @@ bool sendSensorDataOnly(SensorData data) {
     http.setConnectTimeout(2000);
     http.setTimeout(5000);
     
-    if (!http.begin(serverUrl)) {
+    if (!http.begin(sslNet, String(serverUrl))) {
         Serial.println("❌ Failed to begin HTTP connection");
         return false;
     }
@@ -3640,6 +3688,8 @@ void sendImageData(String imageBase64) {
 
     Serial.printf("🖼️ Sending image: %d bytes (raw binary from Core 0)\n", data_length);
 
+    // NOTE: binary_data allocated with malloc() above — acceptable for network send buffer
+    // The source (capturedImageBuffer) correctly uses ps_malloc() in cameraMonitorTask
     WiFiClientSecure client;
     client.setInsecure();
 
@@ -3747,15 +3797,17 @@ void sendAllDataToServer(SensorData data) {
     http.setConnectTimeout(10000);  // 10 second connection timeout
     http.setTimeout(15000);          // 15 second read timeout (for large payloads)
     
-    if (!http.begin(serverUrl)) {
+    if (!http.begin(sslNet, String(serverUrl))) {
         Serial.println("❌ Failed to begin HTTP connection");
         return;
     }
     
     http.addHeader("Content-Type", "application/json");
     
-    // Create comprehensive JSON payload
-    StaticJsonDocument<8192> jsonDoc;  // Increased size for image/audio data
+    // FIX: 8KB StaticJsonDocument on stack risks stack overflow on 16KB task
+    // This function is rarely used (sendSensorDataOnly is primary) — keep but warn
+    // If sending image/audio, use dedicated sendImageData/sendAudioData instead
+    StaticJsonDocument<4096> jsonDoc;  // Reduced: image/audio sent via dedicated endpoints
     
     // Basic sensor data
     jsonDoc["accel_x"] = data.accel_x;
@@ -3844,11 +3896,11 @@ void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample
 // ================= EVENT POLLING FUNCTIONS =================
 void pollForEvents() {
     HTTPClient http;
-    http.setReuse(true);  // Reuse TCP/TLS connection
+    http.setReuse(true);
     
     Serial.println("🔍 Polling for important events...");
     
-    if (!http.begin(eventsUrl)) {
+    if (!http.begin(sslNet, String(eventsUrl))) {
         Serial.println("❌ Failed to initialize HTTP client for events");
         return;
     }
@@ -3873,8 +3925,9 @@ void pollForEvents() {
                 Serial.println("📋 Server Response:");
                 Serial.println("-------------------");
                 
-                // Parse JSON response
-                DynamicJsonDocument doc(2048);
+                // FIX: StaticJsonDocument avoids heap fragmentation
+                // DynamicJsonDocument(2048) was allocating 2KB on heap every 5s poll
+                StaticJsonDocument<2048> doc;
                 DeserializationError error = deserializeJson(doc, response);
                 
                 if (!error) {
@@ -3951,7 +4004,7 @@ void sendCleanRequest() {
     String cleanUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/clean";
     Serial.println("🧹 Sending cleaning request to server...");
     
-    if (!http.begin(cleanUrl)) {
+    if (!http.begin(sslNet, cleanUrl)) {
         Serial.println("❌ Failed to initialize HTTP client for cleaning");
         return;
     }
@@ -3994,7 +4047,7 @@ void sendCoverHappyRequest() {
     http.setTimeout(5000);
     
     String url = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/cover-happy";
-    if (!http.begin(url)) return;
+    if (!http.begin(sslNet, url)) return;
     
     http.addHeader("Content-Type", "application/json");
     int httpCode = http.POST("{}");
@@ -4020,7 +4073,7 @@ void sendInjectRequest() {
     String injectUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/inject";
     Serial.println("💉 Sending injection request to server...");
     
-    if (!http.begin(injectUrl)) {
+    if (!http.begin(sslNet, injectUrl)) {
         Serial.println("❌ Failed to initialize HTTP client for injection");
         return;
     }
@@ -4078,11 +4131,11 @@ void processEvent(const char* event_type, const char* message) {
 
 void acknowledgeEvent(int event_id) {
     HTTPClient http;
-    http.setReuse(true);  // Reuse TCP/TLS connection
+    http.setReuse(true);
     
     Serial.printf("📤 Acknowledging event #%d...\n", event_id);
     
-    if (!http.begin(eventReceivedUrl)) {
+    if (!http.begin(sslNet, String(eventReceivedUrl))) {
         Serial.println("❌ Failed to initialize HTTP client for acknowledgment");
         return;
     }
@@ -4092,8 +4145,8 @@ void acknowledgeEvent(int event_id) {
     http.addHeader("Content-Type", "application/json");
     http.addHeader("User-Agent", "ESP32-Dashboard/2.0");
     
-    // Create JSON payload
-    DynamicJsonDocument doc(256);
+    // FIX: StaticJsonDocument prevents heap fragmentation (called per event)
+    StaticJsonDocument<256> doc;
     doc["device_id"] = "ESP32_001";
     doc["event_id"] = event_id;
     doc["status"] = "received";

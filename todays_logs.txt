@@ -1,323 +1,298 @@
-═══════════════════════════════════════════════════════════════════════════════
-                           DAILY LOG - February 20, 2026
+﻿═══════════════════════════════════════════════════════════════════════════════
+                           DAILY LOG - February 25, 2026
 ═══════════════════════════════════════════════════════════════════════════════
 
-🔧 FIXES IMPLEMENTED TODAY:
+Total Commits Today: 7
+Total Files Modified: esp32_sketch.ino, all_pets.h, app.py, test_all_animations.ino
+HEAD Commit: 402e5e6
+
+═══════════════════════════════════════════════════════════════════════════════
 
 ─────────────────────────────────────────────────────────────────────────────
-1. FOOD_MENU DISPLAY BUG FIX 🍽️
+1. POOP / SICK / HUNGER ICON SYSTEM  [Commit: 6780e44]
 ─────────────────────────────────────────────────────────────────────────────
 
-PROBLEM:
-- User reported: When entering FOOD_MENU, ADULT animation was displaying
-- Root Cause: After eating, HAPPY face was hardcoded to `child_frames[0]`
-- This caused wrong character animation for ADULT/OLD stage pets
+OVERVIEW:
+- OLED now shows contextual icons on MAIN screen, driven by server state
+- Bottom-right corner (40,20), 24x12 pixels
 
-SOLUTION:
-- Modified displayFoodMenu() function in esp32_sketch.ino
-- Implemented age-appropriate HAPPY frame display:
-  * INFANT Stage → infant_frames[0]
-  * CHILD Stage → child_frames[0]
-  * ADULT Stage → adult_frames[0]
-  * OLD Stage → old_frames[0]
+ICON PRIORITY (highest to lowest):
+  SICK  >  POOP  >  FOOD
 
-ENHANCED DEBUG LOGGING:
-Added Serial output messages for all FOOD_MENU states:
-  ✓ "🍽️ FOOD_MENU: Showing EATING animation" - during image upload
-  ✓ "🍽️ FOOD_MENU: Showing GOOD text" - success message display
-  ✓ "🍽️ FOOD_MENU: Showing age-based HAPPY face after eating" - correct character
-  ✓ "🍽️ FOOD_MENU: Pet HUNGRY - showing SAD animation" - hungry state
-  ✓ "🍽️ FOOD_MENU: Pet NOT hungry - empty screen" - not hungry state
+IMPLEMENTATION:
 
-ADDED SYSTEM DEBUG OUTPUT:
-Every 3 seconds prints: "📺 Current Screen: [SCREEN_TYPE] | Age: [AGE] | Emotion: [EMOTION]"
-Helps verify correct screen type and pet state during testing
+  ESP32 Globals Added:
+    bool showFoodIcon  = false
+    bool showPoopIcon  = false
+    bool showSickIcon  = false
+    bool showHomeIcon  = true    (top-left, 24x12)
+
+  Draw Functions Added:
+    drawFoodIcon()   -- renders food_icon_frames[] at bottom-right
+    drawPoopIcon()   -- renders poop_frames[] at bottom-right
+    drawSickIcon()   -- renders heart_icon_frames[1] at bottom-right
+    drawHomeIcon()   -- renders home_icon_frames[0] at top-left
+
+  Mutual Exclusion Rule:
+    showFoodIcon displays only if (!showPoopIcon && !showSickIcon)
+
+  Server Endpoint Updated (/api/oled-display/get):
+    Returns: show_food_icon, show_poop_icon, show_sick_icon
+
+BUG FIXED:
+  drawSickIcon() was accidentally using heart_icon_frames[0] (all-zero/blank frame)
+  -- Fixed to heart_icon_frames[1] (actual filled heart sprite)
 
 FILES MODIFIED:
-- esp32_sketch.ino (displayFoodMenu function, displayPetAnimation debug logging)
-
-COMMIT:
-- Message: "Fix FOOD_MENU: Show age-appropriate HAPPY face after eating + add debug logging"
-- Changes: 37 insertions, 5 deletions
+  - esp32_sketch.ino (4 draw functions, globals, MAIN screen render logic)
+  - app.py (/api/oled-display/get response payload)
 
 ─────────────────────────────────────────────────────────────────────────────
-2. AGE CALCULATION OFFLINE SERVER BUG FIX 📅
+2. CAMERA COVER -> HAPPINESS +2  [Commits: f233b9b, 977f5bc]
 ─────────────────────────────────────────────────────────────────────────────
 
-PROBLEM:
-- Server offline for multiple days → age only increased by 1 (incorrect!)
-- Example: 3 days offline = age +1 (should be +3)
-- System was using simple boolean check for 24-hour threshold
+OVERVIEW:
+- Covering ESP32 camera (blocking light) increments pet happiness
+- Detects "brightened" frames after darkness = intentional wave gesture
 
-ROOT CAUSE:
-  if (datetime.now() - last_age_time) > timedelta(hours=24):
-      updates['age'] = state['age'] + 1  # ❌ Always +1, never catches up!
+LOGIC:
+  - Brightness threshold detection in cameraMonitorTask()
+  - 30-second cooldown between happiness triggers
+  - Calls sendHappyRequest() -> POST /api/pet/happy
+  - Server increments happiness +2 per trigger
 
-SOLUTION:
-Implemented catch-up system that calculates ALL missed days:
+CORRECTION:
+  - Initial commit (f233b9b) used +5 per trigger
+  - Immediately corrected (977f5bc) to +2 (balanced gameplay)
 
-  1. Calculate total hours passed:
-     hours_passed = (datetime.now() - last_age_time).total_seconds() / 3600
-  
-  2. Calculate how many 24-hour periods passed:
-     age_increments = int(hours_passed / 24)
-  
-  3. Apply all increments at once:
-     updates['age'] = state['age'] + age_increments
-     
-  4. Update stage based on final age
-  
-  5. Log missed days for debugging:
-     "🎂 Age catch-up! Server was offline for 3 days"
-
-EXAMPLE SCENARIOS NOW WORKING:
-- Offline 1 day → age increases by 1 ✓
-- Offline 3 days → age increases by 3 ✓
-- Offline 10 days → age increases by 10 ✓
-- Any duration calculated correctly ✓
-
-STAGE PROGRESSION RULES (unchanged):
-  Age 0-5:   INFANT  🐣
-  Age 6-10:  CHILD   👶
-  Age 11-17: ADULT   🧑
-  Age 18-21: OLD     👴
-  Age 22+:   END     💀
+NEW SERVER ENDPOINT:
+  POST /api/pet/happy
+  - Increments happiness column by +2
+  - Capped at 100
 
 FILES MODIFIED:
-- app.py (pet_engine_cycle function, age progression logic)
-
-COMMIT:
-- Message: "Fix age calculation: Catch up missed days when server is offline"
-- Changes: 28 insertions, 19 deletions
-
-═══════════════════════════════════════════════════════════════════════════════
-                            SUMMARY OF CHANGES
-═══════════════════════════════════════════════════════════════════════════════
-
-Total Commits: 2
-Total Files Modified: 2
-  - esp32_sketch.ino (ESP32 firmware)
-  - app.py (Backend server)
-
-Total Lines Added: 65
-Total Lines Deleted: 24
-
-═══════════════════════════════════════════════════════════════════════════════
-                              TESTING CHECKLIST
-═══════════════════════════════════════════════════════════════════════════════
-
-ESP32 FIRMWARE TESTING (esp32_sketch.ino):
-☐ Upload new sketch to ESP32
-☐ Check Serial Monitor for debug output
-☐ Enter FOOD_MENU and verify:
-  ✓ Correct age character displays after eating
-  ✓ INFANT shows infant_frames[0]
-  ✓ CHILD shows child_frames[0]
-  ✓ ADULT shows adult_frames[0]
-  ✓ OLD shows old_frames[0]
-☐ Verify debug output displays correctly
-☐ Check "📺 Current Screen" output every 3 seconds
-
-BACKEND SERVER TESTING (app.py):
-☐ Start Flask server
-☐ Check console for pet_engine_cycle output
-☐ Simulate offline period:
-  ✓ Manually modify last_age_increment timestamp to 3 days ago
-  ✓ Restart server and verify age increases by 3
-  ✓ Check "🎂 Age catch-up! Server was offline for X days" message
-☐ Verify stage transitions work correctly
-☐ Test age progression at different stages
-
-═══════════════════════════════════════════════════════════════════════════════
-                            KNOWN WORKING FEATURES
-═══════════════════════════════════════════════════════════════════════════════
-
-✅ INFANT always starts on boot (server reset)
-✅ Automatic mode only (no manual controls)
-✅ Emotion-based animations (CRY/SAD override default)
-✅ Home icon shows on MAIN screen
-✅ Black frame detection working (brightness=100)
-✅ Menu cycling local on ESP32 (camera cover trigger)
-✅ Startup notification removed (no freeze)
-✅ ESP32 controls home icon locally
-✅ FOOD_MENU hunger-based display
-✅ Server hunger updates every 360 seconds
-✅ Age-appropriate HAPPY face in FOOD_MENU (NEW - TODAY)
-✅ Age catch-up for offline server periods (NEW - TODAY)
-
-═══════════════════════════════════════════════════════════════════════════════
-                              NEXT STEPS
-═══════════════════════════════════════════════════════════════════════════════
-
-1. Upload updated ESP32 sketch and test FOOD_MENU display
-2. Start backend server and verify age progression
-3. Test offline server catch-up with modified timestamps
-4. Verify debug logging outputs in Serial Monitor
-5. Monitor hunger updates every 6 minutes
-
-═══════════════════════════════════════════════════════════════════════════════
-                           DAILY LOG - February 21, 2026
-═══════════════════════════════════════════════════════════════════════════════
-
-🎮 COMPLETE CATCH-FOOD GAME INTEGRATION
+  - esp32_sketch.ino (sendHappyRequest, brightness cooldown logic)
+  - app.py (/api/pet/happy endpoint)
 
 ─────────────────────────────────────────────────────────────────────────────
-3. GAME STATE & VARIABLES 🎮
+3. HEALTH / SICK / DISCIPLINE / STATS_MENU SYSTEM  [Commit: 5d66488]
 ─────────────────────────────────────────────────────────────────────────────
 
-ADDED TO esp32_sketch.ino (Lines 119-161):
-- enum GameState: GAME_IDLE, GAME_PLAYING, GAME_OVER_ANIM
-- Game variables:
-  * playerX (paddle position) - float with velocity
-  * foodX, foodY (falling food position)
-  * gameScore, missCount, comboCount, scoreIncrement
-  * lastFallTime, gameOverStartTime, gameStartTime
-  * holdStartTime, holdingLeft (for gesture detection)
-  * filteredX, velocity (smooth paddle control)
-  * coinX[6], coinY[6], coinSpeed[6] (KakuCoin animation)
+OVERVIEW:
+Complete game mechanics overhaul: sickness system, hunger pausing, health
+drain, discipline tracking, and a new STATS_MENU with visual progress bars.
 
-KEY FEATURES:
-✅ Smooth control with acceleration (0.9 filter)
-✅ Combo system (5 consecutive catches = 5x points)
-✅ Falling coins animation on game over
-✅ Hold gesture detection (left tilt 3 seconds to start)
+SICK_PENDING RULES:
+  Triggers when EITHER:
+    - Poop present for > 15 minutes without cleaning
+    - Pet health < 40
 
-─────────────────────────────────────────────────────────────────────────────
-4. GAME LOGIC FUNCTIONS (9 Total) 🎯
-─────────────────────────────────────────────────────────────────────────────
+HUNGER PAUSE:
+  - Hunger does NOT increase while sick_pending = true OR poop_present = true
+  - Prevents double-penalizing player during crisis state
 
-calculateKakuCoin(score): Score × 0.80 = KakuCoin reward
-readTiltForGame(): Convert MPU6050 tilt to paddle movement (smooth filter)
-updateFoodFalling(): Drop food 2px every 120ms, miss on screen exit
-checkGameCollision(): Pixel-perfect collision, increment score on catch
-resetFood(): Random X, Y=0 (top of screen)
-drawGamePlay(): Render paddle, food, score "S:XX M:Y"
-drawGameOverScreen(): Falling coins + "GAME OVER" + final score + KakuCoin
-checkStartGesture(): Hold left tilt 3 seconds to start game
-resetGameState(): Clear variables, randomize coin positions
-sendKakuCoinReward(): POST reward to /api/game/reward endpoint
+HEALTH DRAIN:
+  - If pet not fed within 30 minutes -> health -2 per daemon cycle
+  - Encourages regular feeding
 
-─────────────────────────────────────────────────────────────────────────────
-5. PLAY MENU STATE MACHINE 🎪
-─────────────────────────────────────────────────────────────────────────────
+DISCIPLINE SYSTEM:
+  - New discipline column added to database (0-100)
+  - Daemon rules per cycle:
+      Not fed in time     -> discipline -2
+      Poop not cleaned    -> discipline -3
+      Not played in 1hr   -> discipline -1
+      All needs met       -> discipline +1
 
-State: GAME_IDLE
-  - Display: Static "PLAY" text
-  - Logic: Check for start gesture
-  - Transition: → GAME_PLAYING on hold gesture
+NEW MENU: STATS_MENU
+  - Menu position: between STATUS_INFO_MENU and MAIN (wraps around)
+  - Full menu cycle:
+      MAIN -> FOOD -> TOILET -> PLAY -> HEALTH -> STATUS_INFO -> STATS -> MAIN
+  - Displays two animated bar graphs:
+      Happiness bar  (left label "H")
+      Discipline bar (right label "D")
+  - drawBar(x, y, w, h, value) renders filled rectangle scaled to value/100
 
-State: GAME_PLAYING
-  - Display: Live game (paddle, food, score)
-  - Logic: Tilt control, food falling, collision check
-  - Transition: → GAME_OVER_ANIM when 3 misses reached
+ESP32 GLOBALS ADDED:
+  int petHappiness  = 50
+  int petDiscipline = 50
 
-State: GAME_OVER_ANIM
-  - Display: Coins falling 5 seconds
-  - Shows: Final score + KakuCoin amount
-  - Sends reward to /api/game/reward
-  - Transition: → GAME_IDLE after animation
+SERVER RESPONSE UPDATED (/api/oled-display/get):
+  + happiness
+  + discipline
+  + show_play_icon
+
+FILES MODIFIED:
+  - esp32_sketch.ino (STATS_MENU, drawBar, petHappiness, petDiscipline)
+  - app.py (discipline column, daemon logic, OLED response)
 
 ─────────────────────────────────────────────────────────────────────────────
-6. CAMERA & COVER DETECTION PAUSE 📸 🔒
+4. DUAL MINI-GAMES: CATCH FOOD + DODGE OBSTACLE  [Commit: 7324f97]
 ─────────────────────────────────────────────────────────────────────────────
 
-Modified cameraMonitorTask() to add game pause checks:
+OVERVIEW:
+- PLAY_MENU now randomly selects one of two mini-games on each session start
+- activeGame = random(0, 2)
+  0 = Catch Food (original)
+  1 = Dodge Obstacle (new)
 
-1. CAMERA PAUSE:
-   if (currentScreenType == "PLAY_MENU" && playGameState == GAME_PLAYING)
-   → Skip image capture during game
-   → Still transmit sensor data (no interruption)
+GAME 1 -- CATCH FOOD (existing, unchanged):
+  - Tilt left/right to move paddle
+  - Catch falling food items
+  - 3 misses = game over
 
-2. COVER DETECTION PAUSE:
-   if (playGameState == GAME_PLAYING)
-   → Reset consecutiveBlackFrames counter
-   → Prevent menu cycling during game
-   → Resume when game ends
+GAME 2 -- DODGE OBSTACLE (new):
+  MECHANICS:
+    - Walking pet character at bottom of screen
+    - Obstacle falls from top at random X
+    - Dodge by tilting left/right
+    - Speed increases every 5 successful dodges
+    - Hit = explosion animation + game over
 
-Benefits:
-✅ No wasted camera captures during game
-✅ Smoother gameplay (less CPU heat)
-✅ Sensor data still sends every 2 seconds
-✅ No accidental menu cycling during play
+  NEW BITMAPS ADDED TO esp32_sketch.ino:
+    charFrame1[32]  -- walking pose 1
+    charFrame2[32]  -- walking pose 2
+
+  NEW FUNCTIONS:
+    readTiltForDodge()      -- tilt input mapped for dodge movement
+    updateObstacle()        -- obstacle fall physics, speed scaling
+    checkDodgeCollision()   -- bounding-box collision with pet char
+    drawDodgeGame()         -- render character + obstacle + dodge count
+    playDodgeGameOverAnim() -- 3-frame explosion on collision
+
+BOTH GAMES:
+  - Send game_type field to /api/game/reward
+    (CATCH_FOOD or DODGE_OBSTACLE)
+  - KakuCoin formula unchanged: score x 0.80
+
+FILES MODIFIED:
+  - esp32_sketch.ino (+dodge game functions, activeGame random select)
+  - app.py (game_type stored in game_rewards table)
 
 ─────────────────────────────────────────────────────────────────────────────
-7. BACKEND GAME REWARDS 🏆
+5. OLD PET EMOTION SPRITES  [Commits: fb0764b, 402e5e6]
 ─────────────────────────────────────────────────────────────────────────────
 
-NEW TABLE: game_rewards
-  - device_id: Which ESP32 (default ESP32_001)
-  - game_type: Game name (CATCH_FOOD)
-  - score: Raw points earned (0-999)
-  - kakucoin: Reward points (score × 0.80)
-  - play_duration: Game length in seconds
-  - created_at: Timestamp
+OVERVIEW:
+Replaced generic fallback animations for OLD-age pet with proper emotion
+sprites. All new arrays are 64x32, 2 frames, 256 bytes/frame, 100ms delay.
 
-NEW ENDPOINT: POST /api/game/reward
-  Request: {device_id, score, kakucoin, play_duration, game_type}
-  Response: {status: "success", score, kakucoin, game_type}
-  Called: After game over animation by sendKakuCoinReward()
+NEW ARRAYS ADDED TO all_pets.h:
+
+  old_happy[2][256]
+    - Used for: IDLE state, HAPPY emotion, default animation
+    - Animated: cycles between frame 0 and frame 1
+
+  old_sad[2][256]
+    - Used for: SAD, HUNGER, POOP emotions
+    - Replaces the drawSimpleSadFace() fallback for OLD age
+
+  old_cry[2][256]
+    - Used for: CRY emotion
+    - Priority: OLD+CRY branch fires before generic CRY branch
+
+  old_surprise[2][256]
+    - Used for: SURPRISE emotion
+    - Non-OLD ages fall back to: infant_surprise_frames
+
+NEW DEFINES PER ARRAY:
+  OLD_HAPPY_FRAME_COUNT / OLD_HAPPY_WIDTH / OLD_HAPPY_HEIGHT
+  OLD_SAD_FRAME_COUNT   / OLD_SAD_WIDTH   / OLD_SAD_HEIGHT
+  OLD_CRY_FRAME_COUNT   / OLD_CRY_WIDTH   / OLD_CRY_HEIGHT
+  OLD_SURPRISE_FRAME_COUNT / OLD_SURPRISE_WIDTH / OLD_SURPRISE_HEIGHT
+
+ANIMATION SWITCH ORDER IN esp32_sketch.ino:
+  1. CRY + INFANT         -> infant_cry_frames
+  2. CRY + OLD            -> old_cry
+  3. SURPRISE + OLD       -> old_surprise
+  4. SURPRISE (any age)   -> infant_surprise_frames (fallback)
+  5. SAD / HUNGER / POOP  -> age switch: OLD->old_sad, INFANT->infant_sad, others->drawSimpleSadFace()
+  6. IDLE                 -> age switch: OLD->old_happy[0] static, others->age_frames[0]
+  7. default (HAPPY)      -> age switch: OLD->old_happy animated, others->age_frames animated
+
+FOOD_MENU UPDATE:
+  OLD + hungry     -> old_cry
+  OLD + not hungry -> old_happy[0]
+
+FILES MODIFIED:
+  - all_pets.h (4 new arrays + defines, 228 lines added)
+  - esp32_sketch.ino (animation switch branches for OLD age)
+  - test_all_animations.ino (4 new OLD pet entries)
 
 ─────────────────────────────────────────────────────────────────────────────
-8. AGE-APPROPRIATE SAD FACE FALLBACK 😢
+6. TEST_ALL_ANIMATIONS.INO UPDATE  [Part of commits fb0764b + 402e5e6]
 ─────────────────────────────────────────────────────────────────────────────
 
-Added drawSimpleSadFace() function for ages without SAD animations:
+FULL ANIMATION LIST (21 total):
+  1.  Infant
+  2.  Child
+  3.  Adult
+  4.  Old Happy
+  5.  Old Sad
+  6.  Old Cry
+  7.  Old Surprise       <- new
+  8.  Egg Crack
+  9.  Cry
+  10. Surprise
+  11. Angry
+  12. Sad
+  13. Eating
+  14. Injection
+  15. Clean Slide
+  16. Home Icon
+  17. Food Icon
+  18. Poop Icon
+  19. Play Icon
+  20. Heart Icon
+  21. Aid Icon
 
-Design:
-- Large circle (face outline)
-- Two filled circles (eyes)
-- Pixel-based frown (parabola curve)
-- Fits 64×32 OLED screen
-
-Used in:
-- INFANT: Uses infant_sad_frames (animated)
-- CHILD/ADULT/OLD: Uses drawSimpleSadFace() (fallback)
-
-Applied to:
-- displayFoodMenu() when pet hungry
-- displayPetAnimation() when emotion is SAD
+Each animation plays for 3 seconds then advances. Cycles continuously.
 
 ═══════════════════════════════════════════════════════════════════════════════
-                              FILES MODIFIED
+                              COMMIT HISTORY (TODAY)
 ═══════════════════════════════════════════════════════════════════════════════
 
-esp32_sketch.ino: +441 lines, -87 lines
-  ✓ Game variables (enum + 19 vars)
-  ✓ 9 game functions (264 lines)
-  ✓ displayPlayMenu() state machine (102 lines)
-  ✓ Camera pause in cameraMonitorTask() (6 lines)
-  ✓ Cover detection pause (4 lines)
-  ✓ drawSimpleSadFace() (21 lines)
-  ✓ SAD animation age check
-
-app.py: +59 lines, -23 lines
-  ✓ game_rewards table creation (18 lines)
-  ✓ /api/game/reward endpoint (49 lines)
+  6780e44  feat: poop/sick/hunger icon system with server sync
+  f233b9b  feat: camera cover happiness +5
+  977f5bc  fix: camera happiness +5 -> +2
+  5d66488  feat: health<40->sick_pending, STATS_MENU bars, discipline rules
+  7324f97  feat: random game select - catch food OR dodge obstacle
+  fb0764b  feat: OLD pet proper emotion sprites (happy, sad, cry)
+  402e5e6  feat: old_surprise animation - SURPRISE emotion wired for OLD age
 
 ═══════════════════════════════════════════════════════════════════════════════
-                              GIT COMMIT
+                              CURRENT FEATURE STATUS
 ═══════════════════════════════════════════════════════════════════════════════
 
-Commit: 92117ee
-Message: "🎮 Complete game integration: Add camera/cover pause + KakuCoin rewards backend"
-Files: 2 changed, 434 insertions(+), 23 deletions(-)
-Pushed: main branch
+COMPLETED:
+  [x] MAIN screen icon priority: SICK > POOP > FOOD
+  [x] Home icon top-left (0,0), status icons bottom-right (40,20)
+  [x] Camera cover = happiness +2 (30s cooldown)
+  [x] sick_pending from poop >15min OR health <40
+  [x] Hunger pauses during sick_pending / poop_present
+  [x] Health drain -2/cycle if not fed 30min
+  [x] Discipline column with 4 daily rules
+  [x] STATS_MENU: happiness + discipline bar graphs
+  [x] Menu cycle: MAIN->FOOD->TOILET->PLAY->HEALTH->STATUS_INFO->STATS->MAIN
+  [x] Dual mini-games: Catch Food (game 0) + Dodge Obstacle (game 1)
+  [x] activeGame = random(0,2) per session
+  [x] Both games send game_type to /api/game/reward
+  [x] OLD pet: old_happy, old_sad, old_cry, old_surprise sprites
+  [x] SURPRISE fallback for non-OLD: infant_surprise_frames
+  [x] test_all_animations.ino: 21 animations including all OLD pet emotions
+  [x] drawSickIcon() bug fixed (heart_icon_frames[1])
+
+PENDING / NOT YET TESTED ON HARDWARE:
+  [ ] show_play_icon blinking verification on physical device
+  [ ] Dodge obstacle game tested on real ESP32 + MPU6050
 
 ═══════════════════════════════════════════════════════════════════════════════
-                              GAME CONTROLS
+                              SERVER CONFIG
 ═══════════════════════════════════════════════════════════════════════════════
 
-Tilt LEFT → Move paddle left
-Tilt RIGHT → Move paddle right
-Hold LEFT (3 sec) → Start game
-
-Scoring:
-- Base: 1 point per catch
-- Combo: 5 consecutive catches = 5x multiplier
-- KakuCoin: Score × 0.80
-
-Game Over At: 3 missed foods
-Animation Duration: 5 seconds
+Production URL:  https://kakuproject-90943350924.asia-south1.run.app
+ESP32 Target:    XIAO ESP32 S3
+OLED:            SSD1306 64x32, I2C 0x3C  (SDA=5, SCL=6)
+IMU:             MPU6050
 
 ═══════════════════════════════════════════════════════════════════════════════
                                 END OF LOG
