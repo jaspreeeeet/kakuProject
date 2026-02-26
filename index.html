@@ -1556,14 +1556,17 @@
                     msgEl.style.display = 'block';
                     msgEl.textContent = data.message || '';
 
-                    // Map intermediate statuses to "downloading" to strictly maintain 3 visual states as requested
+                    // Map intermediate statuses to "downloading" or "flashing"
                     let displayStatus = data.ota_status;
-                    if (['waiting', 'checking', 'flashing', 'rebooting'].includes(displayStatus)) {
-                        displayStatus = 'downloading';
+                    if (['waiting', 'checking'].includes(displayStatus)) {
+                        displayStatus = 'downloading'; // visually group with downloading
+                    }
+                    if (displayStatus === 'rebooting') {
+                        displayStatus = 'done'; // ESP32's final state is rebooting, so treat it as done
                     }
 
                     // Handle progress bar visibility and width
-                    if (displayStatus === 'downloading' || displayStatus === 'failed') {
+                    if (['downloading', 'flashing', 'failed'].includes(displayStatus)) {
                         barContainer.style.display = 'block';
                         barFill.style.width = (data.progress || 0) + '%';
                     } else {
@@ -1579,12 +1582,35 @@
                             titleEl.textContent = `Downloading (${data.progress || 0}%)`;
                             break;
 
+                        case 'flashing':
+                            liveDiv.style.borderColor = '#e67700'; // Orange
+                            barFill.style.background = '#fd7e14';
+                            iconEl.textContent = '⚡';
+                            titleEl.textContent = `Writing Flash (${data.progress || 0}%)`;
+                            break;
+
                         case 'done':
                             liveDiv.style.borderColor = '#4caf50'; // Green
                             iconEl.textContent = '✅';
                             titleEl.textContent = 'Update Successful!';
                             versionEl.textContent = data.target_version ? 'v' + data.target_version + ' is now running' : '';
                             stopOTAProgressPolling();
+
+                            // Automatically disable OTA on frontend
+                            otaEnabled = false;
+                            const btn = document.getElementById('otaEnableBtn');
+                            if (btn) {
+                                btn.textContent = '🚀 Enable OTA';
+                                btn.style.background = '#e94560';
+                            }
+
+                            // Let the backend know we disabled it locally
+                            fetch(API_BASE + '/api/firmware/enable-ota', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ device_id: 'ESP32_001', enable: false })
+                            }).catch(err => console.log('Auto-disable OTA error:', err));
+
                             setTimeout(() => { liveDiv.style.display = 'none'; }, 8000);
                             break;
 
