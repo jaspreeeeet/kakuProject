@@ -3374,9 +3374,6 @@ void checkAndPerformOTA() {
     Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion.c_str(), fileSize);
     Serial.printf("   Download: %s\n", downloadUrl.c_str());
     
-    // Report to server: confirmed new firmware found, about to download
-    postOTAProgress("checking", 10, newVersion, ("New firmware v" + newVersion + " found, preparing download...").c_str());
-    
     // Step 2: Show downloading status on OLED
     display.clearDisplay();
     display.setCursor(2, 4);
@@ -3444,7 +3441,6 @@ void checkAndPerformOTA() {
     WiFiClient *stream = httpOTA.getStreamPtr();
     size_t written = 0;
     int lastPct = -1;
-    int lastServerPct = -1;  // Track server progress reports (every 25%)
     unsigned long lastDataTime = millis();
     
     while (written < (size_t)contentLength) {
@@ -3475,12 +3471,6 @@ void checkAndPerformOTA() {
                 display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
                 display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
                 display.display();
-                
-                // Report progress to server every 25% (16% → 40% → 65% → 90% bucket)
-                if (pct / 25 != lastServerPct / 25) {
-                    lastServerPct = pct;
-                    postOTAProgress("downloading", pct, newVersion, ("Downloading... " + String(pct) + "%").c_str());
-                }
             }
         } else {
             vTaskDelay(1);  // Yield to RTOS, retry quickly
