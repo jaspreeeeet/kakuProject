@@ -95,9 +95,9 @@ ota_enabled_devices = {}          # {device_id: True/False}
 ota_device_auth_tokens = {}       # {device_id: token} — set on first registration
 OTA_AUTH_TOKEN = 'kaku-ota-2025'  # Shared secret for device authentication
 
-# OTA progress tracking: device_id → progress dict
-# Tracks real-time OTA download/flash progress for frontend display
-ota_progress = {}  # {device_id: {status, progress, target_version, message, started_at, updated_at}}
+# OTA live progress state per device (in-memory, resets on server restart)
+# {device_id: {ota_status, ota_active, progress, target_version, message, timestamp}}
+ota_progress_state = {}  # e.g. {'ESP32_001': {'ota_status': 'downloading', 'progress': 45, ...}}
 
 # ================= CREATE FLASK APP =================
 app = Flask(__name__, static_folder='.', static_url_path='')
@@ -2719,20 +2719,19 @@ def device_startup_complete():
         
         print(f'✅ Device startup notification received from {device_id}')
         print(f'   Status: {status} | Pet Stage: {pet_stage}')
-        
-        # Mark OTA as completed if progress was being tracked
-        if device_id in ota_progress:
-            prev = ota_progress[device_id]
-            if prev.get('status') in ('downloading', 'flashing', 'rebooting'):
-                ota_progress[device_id] = {
-                    'status': 'done',
-                    'progress': 100,
-                    'target_version': prev.get('target_version'),
-                    'message': 'Update complete! Device rebooted successfully.',
-                    'started_at': prev.get('started_at', time.time()),
-                    'updated_at': time.time()
-                }
-                print(f'✅ OTA completed for {device_id} → v{prev.get("target_version")}')
+
+        # ---- OTA completion detection ----
+        # If ESP32 rebooted after a successful OTA flash, detect it and mark "done"
+        ota_state = ota_progress_state.get(device_id, {})
+        if ota_state.get('ota_status') in ('rebooting', 'flashing'):
+            ota_progress_state[device_id] = {
+                **ota_state,
+                'ota_active': False,
+                'ota_status': 'done',
+                'progress': 100,
+                'message': f'✅ Flashed successfully! Device is back online.',
+            }
+            print(f'🎉 OTA complete for {device_id} — device rebooted with v{ota_state.get("target_version", "?")}')
         
         # RESET TO INFANT on every device startup
         animation_id = 0  # INFANT
@@ -3293,20 +3292,23 @@ def enable_ota():
         ota_enabled_devices[device_id] = bool(enable)
         status_str = 'enabled' if enable else 'disabled'
         print(f'🔄 OTA {status_str} for device {device_id}')
-        
-        # Initialize progress tracking when OTA is enabled
-        if enable:
-            ota_progress[device_id] = {
-                'status': 'waiting',       # waiting → checking → downloading → flashing → rebooting → done / failed
+
+        # Track live OTA progress state
+        if bool(enable):
+            ota_progress_state[device_id] = {
+                'ota_status': 'waiting',
+                'ota_active': True,
                 'progress': 0,
-                'target_version': None,
-                'message': 'Waiting for device to check in...',
-                'started_at': time.time(),
-                'updated_at': time.time()
+                'target_version': '',
+                'message': 'OTA enabled — waiting for device to check in...',
+                'timestamp': time.time()
             }
+            print(f'📡 OTA progress tracking started for {device_id}')
         else:
-            # Clear progress on disable
-            ota_progress.pop(device_id, None)
+            # Clear progress state on disable (unless it is in done/failed terminal state)
+            existing = ota_progress_state.get(device_id, {})
+            if existing.get('ota_status') not in ('done', 'failed'):
+                ota_progress_state.pop(device_id, None)
         
         return jsonify({
             'status': 'success',
@@ -3316,78 +3318,6 @@ def enable_ota():
         }), 200
     except Exception as e:
         print(f'❌ Error enabling OTA: {e}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/ota/report-progress', methods=['POST'])
-def ota_report_progress():
-    """ESP32 calls this during OTA to report download/flash progress.
-    Frontend polls /api/ota/progress to display these updates."""
-    try:
-        data = request.get_json()
-        device_id = data.get('device_id', 'ESP32_001')
-        auth_token = data.get('token', '')
-        
-        if auth_token != OTA_AUTH_TOKEN:
-            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-        
-        status = data.get('ota_status', 'unknown')    # checking, downloading, flashing, rebooting, done, failed
-        progress = data.get('progress', 0)             # 0-100
-        target_version = data.get('version', None)
-        message = data.get('message', '')
-        
-        ota_progress[device_id] = {
-            'status': status,
-            'progress': min(100, max(0, int(progress))),
-            'target_version': target_version,
-            'message': message,
-            'started_at': ota_progress.get(device_id, {}).get('started_at', time.time()),
-            'updated_at': time.time()
-        }
-        
-        print(f'📡 OTA Progress [{device_id}]: {status} {progress}% - {message}')
-        
-        return jsonify({'status': 'success'}), 200
-    except Exception as e:
-        print(f'❌ Error reporting OTA progress: {e}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/ota/progress', methods=['GET'])
-def ota_get_progress():
-    """Frontend polls this to get real-time OTA progress for display."""
-    try:
-        device_id = request.args.get('device_id', 'ESP32_001')
-        
-        progress_data = ota_progress.get(device_id, None)
-        if not progress_data:
-            return jsonify({
-                'status': 'success',
-                'ota_active': False,
-                'message': 'No OTA in progress'
-            }), 200
-        
-        # Auto-expire stale progress (no update in 5 minutes)
-        if time.time() - progress_data.get('updated_at', 0) > 300:
-            ota_progress.pop(device_id, None)
-            return jsonify({
-                'status': 'success',
-                'ota_active': False,
-                'message': 'OTA timed out'
-            }), 200
-        
-        return jsonify({
-            'status': 'success',
-            'ota_active': True,
-            'ota_status': progress_data['status'],
-            'progress': progress_data['progress'],
-            'target_version': progress_data.get('target_version'),
-            'message': progress_data.get('message', ''),
-            'started_at': progress_data.get('started_at'),
-            'elapsed_seconds': int(time.time() - progress_data.get('started_at', time.time()))
-        }), 200
-    except Exception as e:
-        print(f'❌ Error getting OTA progress: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -3500,15 +3430,6 @@ def get_latest_firmware():
             if device_id in ota_enabled_devices:
                 ota_enabled_devices[device_id] = False
             
-            # Update progress: device is now checking for update
-            if device_id in ota_progress and update_available:
-                ota_progress[device_id].update({
-                    'status': 'checking',
-                    'target_version': latest_version,
-                    'message': f'Device found v{latest_version}, starting download...',
-                    'updated_at': time.time()
-                })
-            
             return jsonify({
                 'status': 'success',
                 'update_available': update_available,
@@ -3611,6 +3532,83 @@ def firmware_status():
             
     except Exception as e:
         print(f'❌ Error getting firmware status: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ==================== OTA LIVE PROGRESS ENDPOINTS ====================
+
+@app.route('/api/ota/progress', methods=['GET'])
+def get_ota_progress():
+    """Frontend polls this every 2s to show live OTA status on ESP32.
+    
+    Returns current OTA state for a device: waiting/checking/downloading/flashing/rebooting/done/failed.
+    The 'ota_active' flag tells the frontend whether to show the live progress widget.
+    """
+    try:
+        device_id = request.args.get('device_id', 'ESP32_001')
+        state = ota_progress_state.get(device_id)
+        
+        if not state:
+            return jsonify({
+                'status': 'success',
+                'ota_active': False,
+                'ota_status': 'idle',
+                'progress': 0,
+                'target_version': '',
+                'message': 'No OTA in progress',
+                'elapsed_seconds': 0
+            }), 200
+        
+        elapsed = int(time.time() - state.get('timestamp', time.time()))
+        return jsonify({
+            'status': 'success',
+            'ota_active': state.get('ota_active', False),
+            'ota_status': state.get('ota_status', 'waiting'),
+            'progress': state.get('progress', 0),
+            'target_version': state.get('target_version', ''),
+            'message': state.get('message', ''),
+            'elapsed_seconds': elapsed
+        }), 200
+        
+    except Exception as e:
+        print(f'❌ Error getting OTA progress: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/ota/progress', methods=['POST'])
+def update_ota_progress():
+    """ESP32 calls this to report its OTA download/flash progress.
+    
+    Expected JSON: {device_id, ota_status, progress, target_version, message}
+    ota_status values: 'checking' | 'downloading' | 'flashing' | 'rebooting' | 'failed'
+    Progress 0-100 (percentage of firmware downloaded).
+    """
+    try:
+        data = request.get_json() or {}
+        device_id = data.get('device_id', 'ESP32_001')
+        ota_status = data.get('ota_status', 'downloading')
+        progress = int(data.get('progress', 0))
+        target_version = data.get('target_version', '')
+        message = data.get('message', '')
+        
+        # Preserve original start timestamp so elapsed_seconds is accurate
+        existing = ota_progress_state.get(device_id, {})
+        ts = existing.get('timestamp', time.time())
+        
+        ota_progress_state[device_id] = {
+            'ota_active': ota_status not in ('done', 'failed'),
+            'ota_status': ota_status,
+            'progress': progress,
+            'target_version': target_version,
+            'message': message,
+            'timestamp': ts
+        }
+        
+        print(f'📡 OTA [{device_id}] {ota_status} {progress}% — {message}')
+        return jsonify({'status': 'success'}), 200
+        
+    except Exception as e:
+        print(f'❌ Error updating OTA progress: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 

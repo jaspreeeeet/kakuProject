@@ -57,7 +57,6 @@ const char* eventReceivedUrl = "https://kakuproject-90943350924.asia-south1.run.
 const char* oledDisplayUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/get";  // OLED display animation endpoint
 const char* firmwareCheckUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/firmware/latest?device_id=ESP32_001&current_version=" FIRMWARE_VERSION;
 const char* OTA_AUTH_TOKEN = "kaku-ota-2025";  // Must match server token
-const char* otaProgressUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/ota/report-progress";  // OTA progress reporting
 // NOTE: Orientation endpoint removed - server computes direction from sensor data
 
 // ================= CAMERA PINS (XIAO ESP32 S3 Sense) =================
@@ -347,47 +346,6 @@ void trackHttpResult(int httpCode) {
         if (httpConsecutiveErrors >= HTTP_ERROR_RESET_THRESHOLD) {
             resetSSLConnection();
         }
-    }
-}
-
-// Report OTA progress to server (non-blocking, best-effort)
-// Uses sslNet since sslOTA is busy with the firmware download
-void reportOTAProgress(const char* otaStatus, int progress, const char* version, const char* message) {
-    // Use a separate short-lived SSL client to avoid interfering with OTA download
-    WiFiClientSecure sslProgress;
-    sslProgress.setInsecure();
-    sslProgress.setTimeout(5);
-    
-    HTTPClient http;
-    http.setConnectTimeout(3000);
-    http.setTimeout(3000);
-    
-    if (!http.begin(sslProgress, String(otaProgressUrl))) {
-        Serial.println("⚠️ OTA progress report: connect failed");
-        return;
-    }
-    
-    http.addHeader("Content-Type", "application/json");
-    
-    StaticJsonDocument<256> doc;
-    doc["device_id"] = "ESP32_001";
-    doc["token"] = OTA_AUTH_TOKEN;
-    doc["ota_status"] = otaStatus;
-    doc["progress"] = progress;
-    doc["version"] = version;
-    doc["message"] = message;
-    
-    String payload;
-    serializeJson(doc, payload);
-    
-    int code = http.POST(payload);
-    http.end();
-    sslProgress.stop();
-    
-    if (code == 200) {
-        Serial.printf("📡 OTA progress reported: %s %d%%\n", otaStatus, progress);
-    } else {
-        Serial.printf("⚠️ OTA progress report failed: HTTP %d\n", code);
     }
 }
 
@@ -3290,6 +3248,40 @@ void getOLEDDisplayFromServer() {
     http.end();
 }
 
+// ================= OTA PROGRESS REPORTING =================
+// Posts ESP32's live OTA state to the server so the dashboard can show progress.
+// Uses sslNet (separate from sslOTA which is busy streaming firmware).
+// Called at key milestones: checking, downloading (%), flashing, rebooting.
+void postOTAProgress(const char* otaStatus, int progress, const String& targetVersion, const char* message) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    
+    if (!http.begin(sslNet, "https://kakuproject-90943350924.asia-south1.run.app/api/ota/progress")) {
+        Serial.printf("⚠️ OTA progress report: connect failed (%s %d%%)\n", otaStatus, progress);
+        return;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    
+    StaticJsonDocument<256> doc;
+    doc["device_id"]      = "ESP32_001";
+    doc["ota_status"]     = otaStatus;
+    doc["progress"]       = progress;
+    doc["target_version"] = targetVersion;
+    doc["message"]        = message;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    int code = http.POST(payload);
+    http.end();
+    
+    Serial.printf("📡 OTA progress → server: %s %d%% (HTTP %d)\n", otaStatus, progress, code);
+}
+
 // ================= OTA FIRMWARE UPDATE =================
 // Called from networkTask when ota_update flag is received from server.
 // Uses ESP32 dual-partition OTA (automatic A/B swap) — safe rollback on failure.
@@ -3313,9 +3305,6 @@ void checkAndPerformOTA() {
     display.setCursor(2, 16);
     display.println("Checking...");
     display.display();
-    
-    // Report: checking for update
-    reportOTAProgress("checking", 0, FIRMWARE_VERSION, "Checking for updates...");
     
     // Step 1: Check /api/firmware/latest for newer version
     setCpuFrequencyMhz(240);  // Max CPU for OTA
@@ -3385,10 +3374,8 @@ void checkAndPerformOTA() {
     Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion.c_str(), fileSize);
     Serial.printf("   Download: %s\n", downloadUrl.c_str());
     
-    // Report: new version found, starting download
-    char msgBuf[64];
-    snprintf(msgBuf, sizeof(msgBuf), "Found v%s (%d KB), downloading...", newVersion.c_str(), fileSize / 1024);
-    reportOTAProgress("downloading", 0, newVersion.c_str(), msgBuf);
+    // Report to server: confirmed new firmware found, about to download
+    postOTAProgress("checking", 10, newVersion, ("New firmware v" + newVersion + " found, preparing download...").c_str());
     
     // Step 2: Show downloading status on OLED
     display.clearDisplay();
@@ -3434,6 +3421,9 @@ void checkAndPerformOTA() {
     
     Serial.printf("📦 OTA: Downloading %d bytes...\n", contentLength);
     
+    // Report to server: download is starting
+    postOTAProgress("downloading", 15, newVersion, ("Downloading " + String(contentLength / 1024) + " KB...").c_str());
+    
     // ===== SUSPEND ALL OTHER TASKS DURING OTA =====
     // Free up CPU, memory, and WiFi bandwidth for reliable OTA flash
     otaInProgress = true;
@@ -3454,6 +3444,7 @@ void checkAndPerformOTA() {
     WiFiClient *stream = httpOTA.getStreamPtr();
     size_t written = 0;
     int lastPct = -1;
+    int lastServerPct = -1;  // Track server progress reports (every 25%)
     unsigned long lastDataTime = millis();
     
     while (written < (size_t)contentLength) {
@@ -3485,10 +3476,11 @@ void checkAndPerformOTA() {
                 display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
                 display.display();
                 
-                // Report progress to server every 10%
-                char pctMsg[48];
-                snprintf(pctMsg, sizeof(pctMsg), "Downloading: %d%% (%d/%d KB)", pct, (int)(written/1024), (int)(contentLength/1024));
-                reportOTAProgress("downloading", pct, newVersion.c_str(), pctMsg);
+                // Report progress to server every 25% (16% → 40% → 65% → 90% bucket)
+                if (pct / 25 != lastServerPct / 25) {
+                    lastServerPct = pct;
+                    postOTAProgress("downloading", pct, newVersion, ("Downloading... " + String(pct) + "%").c_str());
+                }
             }
         } else {
             vTaskDelay(1);  // Yield to RTOS, retry quickly
@@ -3503,7 +3495,8 @@ void checkAndPerformOTA() {
     if (written != (size_t)contentLength) {
         Serial.printf("❌ OTA: Download incomplete (%d/%d)\n", written, contentLength);
         Update.abort();
-        reportOTAProgress("failed", lastPct > 0 ? lastPct : 0, newVersion.c_str(), "Download incomplete - connection lost");
+        // Report failure to server
+        postOTAProgress("failed", (written * 100) / contentLength, newVersion, "Download incomplete — aborted");
         // Resume tasks on failure
         otaInProgress = false;
         if (oledTaskHandle) vTaskResume(oledTaskHandle);
@@ -3515,12 +3508,10 @@ void checkAndPerformOTA() {
         return;
     }
     
-    // Report: flashing firmware to partition
-    reportOTAProgress("flashing", 100, newVersion.c_str(), "Download complete, verifying & flashing...");
-    
     if (!Update.end(true)) {
         Serial.printf("❌ OTA: Flash failed: %s\n", Update.errorString());
-        reportOTAProgress("failed", 100, newVersion.c_str(), "Flash verification failed");
+        // Report failure to server
+        postOTAProgress("failed", 95, newVersion, (String("Flash failed: ") + Update.errorString()).c_str());
         // Resume tasks on failure
         otaInProgress = false;
         if (oledTaskHandle) vTaskResume(oledTaskHandle);
@@ -3534,8 +3525,8 @@ void checkAndPerformOTA() {
     
     Serial.printf("✅ OTA: Firmware v%s flashed successfully! Rebooting...\n", newVersion.c_str());
     
-    // Report: rebooting with new firmware
-    reportOTAProgress("rebooting", 100, newVersion.c_str(), "Flash successful! Rebooting...");
+    // Report to server: flash done, about to reboot — server will mark "done" on next startup-complete
+    postOTAProgress("rebooting", 100, newVersion, ("v" + newVersion + " flashed! Rebooting...").c_str());
     
     // Show success on OLED
     display.clearDisplay();
