@@ -3374,6 +3374,10 @@ void checkAndPerformOTA() {
     Serial.printf("🆕 OTA: New firmware v%s available (%d bytes)\n", newVersion.c_str(), fileSize);
     Serial.printf("   Download: %s\n", downloadUrl.c_str());
     
+    // Report to server: about to start downloading
+    // MUST be done BEFORE sslOTA connects — ESP32 can't hold 2 concurrent SSL connections
+    postOTAProgress("downloading", 0, newVersion, ("Downloading v" + newVersion + "...").c_str());
+    
     // Step 2: Show downloading status on OLED
     display.clearDisplay();
     display.setCursor(2, 4);
@@ -3391,6 +3395,7 @@ void checkAndPerformOTA() {
     
     if (!httpOTA.begin(sslOTA, downloadUrl)) {
         Serial.println("❌ OTA: Failed to connect for firmware download");
+        postOTAProgress("failed", 0, newVersion, "Failed to connect for download");
         otaUpdateRequested = false;
         setCpuFrequencyMhz(80);
         return;
@@ -3402,6 +3407,7 @@ void checkAndPerformOTA() {
     if (dlCode != 200) {
         Serial.printf("❌ OTA: Download failed, HTTP %d\n", dlCode);
         httpOTA.end();
+        postOTAProgress("failed", 0, newVersion, ("Download HTTP error " + String(dlCode)).c_str());
         otaUpdateRequested = false;
         setCpuFrequencyMhz(80);
         return;
@@ -3411,15 +3417,13 @@ void checkAndPerformOTA() {
     if (contentLength <= 0) {
         Serial.println("❌ OTA: Invalid content length");
         httpOTA.end();
+        postOTAProgress("failed", 0, newVersion, "Invalid content length");
         otaUpdateRequested = false;
         setCpuFrequencyMhz(80);
         return;
     }
     
     Serial.printf("📦 OTA: Downloading %d bytes...\n", contentLength);
-    
-    // Report to server: download is starting
-    postOTAProgress("downloading", 15, newVersion, ("Downloading " + String(contentLength / 1024) + " KB...").c_str());
     
     // ===== SUSPEND ALL OTHER TASKS DURING OTA =====
     // Free up CPU, memory, and WiFi bandwidth for reliable OTA flash
@@ -3515,7 +3519,8 @@ void checkAndPerformOTA() {
     
     Serial.printf("✅ OTA: Firmware v%s flashed successfully! Rebooting...\n", newVersion.c_str());
     
-    // Report to server: flash done, about to reboot — server will mark "done" on next startup-complete
+    // sslOTA is now free (httpOTA.end() already called above) — report flash success BEFORE reboot
+    // Server will auto-mark "done" when startup-complete arrives, but also send "rebooting" as backup
     postOTAProgress("rebooting", 100, newVersion, ("v" + newVersion + " flashed! Rebooting...").c_str());
     
     // Show success on OLED

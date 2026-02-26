@@ -2721,9 +2721,9 @@ def device_startup_complete():
         print(f'   Status: {status} | Pet Stage: {pet_stage}')
 
         # ---- OTA completion detection ----
-        # If ESP32 rebooted after a successful OTA flash, detect it and mark "done"
+        # If ESP32 rebooted after OTA, mark it as done regardless of what state it was stuck in
         ota_state = ota_progress_state.get(device_id, {})
-        if ota_state.get('ota_status') in ('rebooting', 'flashing'):
+        if ota_state.get('ota_active') or ota_state.get('ota_status') in ('waiting', 'checking', 'downloading', 'flashing', 'rebooting'):
             ota_progress_state[device_id] = {
                 **ota_state,
                 'ota_active': False,
