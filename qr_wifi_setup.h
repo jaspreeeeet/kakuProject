@@ -24,7 +24,8 @@ ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
 Required Libraries:
 - ArduinoJson, WiFi, HTTPClient, I2Cdev, MPU6050, esp_camera
 */
-
+#include <WebServer.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -37,14 +38,11 @@ Required Libraries:
 #include "fb_gfx.h"
 #include "driver/i2s_pdm.h"
 #include "base64.h"
-#include <WebServer.h>
-#include <Preferences.h>
-
+#include <QRCodeGFX.h>
 // ================= OLED & PET ANIMATIONS =================
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "all_pets.h"
-#include <QRCodeGFX.h>
 
 // ================= FIRMWARE VERSION (increment before each upload) =================
 #define FIRMWARE_VERSION "1.0.3"
@@ -52,16 +50,6 @@ Required Libraries:
 // ================= WIFI =================
 #define WIFI_SSID        "Airtel_BumbleBee-777"
 #define WIFI_PASSWORD    "kya karoge ."
-
-// ================= WIFI PROVISIONING =================
-WebServer wifiConfigServer(80);
-Preferences wifiPrefs;
-bool wifiProvisioningMode = false;   // True = AP mode active, normal tasks paused
-bool phoneConnectedToAP = false;
-#define MAX_STORED_WIFI 5            // Maximum stored WiFi networks in NVS
-#define WIFI_CONNECT_RETRIES 3       // Retries per credential set
-const char* AP_SSID = "KAKU_SETUP";
-const char* AP_PASS = "12345678";
 
 // ================= API =================
 const char* serverUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/sensor-data";  // Google Cloud Run Production
@@ -108,7 +96,153 @@ const char* OTA_AUTH_TOKEN = "kaku-ota-2025";  // Must match server token
 #define SCREEN_HEIGHT 32
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+QRCodeGFX qrcode(display);
+WebServer server(80);
+Preferences prefs;
+const char* AP_SSID = "ESP32_SETUP";
+const char* AP_PASS = "12345678";
+bool phoneConnected = false;
+void drawQR(String data)
+{
+  display.clearDisplay();
 
+  qrcode.setScale(1);
+  qrcode.setBackgroundColor(WHITE);
+
+  qrcode.generateData(data);
+  qrcode.setRotation(QRCodeRotation::R90);
+  qrcode.draw(0,0,false);
+
+  display.display();
+}
+void showSuccess()
+{
+  display.clearDisplay();
+
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0,0);
+  display.println("WiFi Connected");
+
+  display.setCursor(0,12);
+  display.println(WiFi.SSID());
+
+  display.setCursor(0,24);
+  display.println(WiFi.localIP());
+
+  display.display();
+}
+void WiFiEvent(WiFiEvent_t event)
+{
+  if(event == ARDUINO_EVENT_WIFI_AP_STACONNECTED)
+  {
+    Serial.println("Phone connected to ESP32 AP");
+
+    phoneConnected = true;
+
+    drawQR("http://192.168.4.1");
+  }
+}
+String htmlPage()
+{
+  int n = WiFi.scanNetworks();
+
+  String page="<html><body>";
+  page+="<h2>Select WiFi</h2>";
+
+  for(int i=0;i<n;i++)
+  {
+    page+=WiFi.SSID(i);
+    page+="<br>";
+  }
+
+  page+="<form action='/save'>";
+  page+="SSID:<input name='s'><br>";
+  page+="PASS:<input name='p'><br>";
+  page+="<input type='submit'>";
+  page+="</form>";
+
+  page+="</body></html>";
+
+  return page;
+}
+
+void handleRoot()
+{
+  server.send(200,"text/html",htmlPage());
+}
+
+void handleSave()
+{
+  String ssid = server.arg("s");
+  String pass = server.arg("p");
+
+  prefs.begin("wifi",false);
+  prefs.putString("ssid",ssid);
+  prefs.putString("pass",pass);
+  prefs.end();
+
+  server.send(200,"text/html","Saved. Restarting...");
+
+  delay(2000);
+  ESP.restart();
+}
+
+void startAP()
+{
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID,AP_PASS);
+
+  WiFi.onEvent(WiFiEvent);
+
+  server.on("/",handleRoot);
+  server.on("/save",handleSave);
+  server.begin();
+
+  Serial.println("AP Started");
+
+  drawQR("WIFI:T:WPA;S:ESP32_SETUP;P:12345678;;");
+}
+
+
+
+// ---------- WIFI CONNECT ----------
+bool connectWiFi()
+{
+  prefs.begin("wifi",true);
+
+  String ssid = prefs.getString("ssid","");
+  String pass = prefs.getString("pass","");
+
+  prefs.end();
+
+  if(ssid == "")
+  return false;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(),pass.c_str());
+
+  int t=0;
+
+  while(WiFi.status()!=WL_CONNECTED && t<20)
+  {
+    delay(500);
+    Serial.print(".");
+    t++;
+  }
+
+  if(WiFi.status()==WL_CONNECTED)
+  {
+    Serial.println("\nConnected to WiFi");
+
+    showSuccess();
+
+    return true;
+  }
+
+  return false;
+}
 // ================= SLEEPING ANIMATION (2 frames, 64x32) =================
 #define SLEEPING_FRAME_COUNT 2
 #define SLEEPING_WIDTH  64
@@ -160,7 +294,7 @@ PROGMEM const uint8_t sleeping_frames[SLEEPING_FRAME_COUNT][256] = {
 const uint16_t walking_delays[WALKING_FRAME_COUNT] = {400,400,400,400,400,400};
 PROGMEM const uint8_t walking_animation[WALKING_FRAME_COUNT][256] = {
   { // Frame 0
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0xe0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x00,0x1f,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x37,0xfc,0x00,0x00,0x00,
     0x00,0x00,0x00,0x77,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xf3,0x7e,0x00,0x00,0x00,
     0x00,0x00,0x00,0xef,0xfe,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
@@ -178,9 +312,9 @@ PROGMEM const uint8_t walking_animation[WALKING_FRAME_COUNT][256] = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
   },
   { // Frame 1
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0xf0,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x07,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x1b,0xfc,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x0f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x1b,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xff,0x00,0x00,0x00,
     0x00,0x00,0x00,0x7f,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xff,0x80,0x00,0x00,
     0x00,0x00,0x00,0xf0,0xf8,0x80,0x00,0x00,0x00,0x00,0x00,0xf0,0xf8,0x80,0x00,0x00,
     0x00,0x00,0x00,0xf0,0xf8,0xc0,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xc0,0x00,0x00,
@@ -216,8 +350,26 @@ PROGMEM const uint8_t walking_animation[WALKING_FRAME_COUNT][256] = {
   { // Frame 3
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x00,0x0f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0xfc,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0x9e,0x00,0x00,0x00,
-    0x00,0x00,0x00,0xfd,0xff,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3f,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7e,0x7e,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xf9,0xf9,0x80,0x00,0x00,0x00,0x00,0x01,0xf1,0xf8,0x80,0x00,0x00,
+    0x00,0x00,0x01,0xf1,0xf8,0xc0,0x00,0x00,0x00,0x00,0x01,0xff,0xf9,0xc0,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x07,0xdf,0xff,0xc0,0x00,0x00,0x00,0x00,0x0f,0xff,0xff,0xe0,0x00,0x00,
+    0x00,0x00,0x0d,0xff,0xff,0xa0,0x00,0x00,0x00,0x00,0x1e,0xff,0xff,0xc0,0x00,0x00,
+    0x00,0x00,0x01,0xff,0xff,0x60,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x00,0x00,0x00,
+    0x00,0x00,0x00,0xff,0xfe,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xf4,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x0c,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x02,0x80,0x00,0x00,0x00,0x00,0x00,0x10,0x03,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x30,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+  },
+  { // Frame 4
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x1f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xf8,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xd7,0xfe,0x00,0x00,0x00,
+    0x00,0x00,0x01,0x7e,0xfe,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
     0x00,0x00,0x01,0xfe,0x7f,0x00,0x00,0x00,0x00,0x00,0x01,0xfe,0x3e,0x00,0x00,0x00,
     0x00,0x00,0x03,0xfe,0x3e,0x00,0x00,0x00,0x00,0x00,0x03,0xfe,0x73,0x00,0x00,0x00,
     0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0x7f,0xfe,0x80,0x00,0x00,
@@ -229,24 +381,6 @@ PROGMEM const uint8_t walking_animation[WALKING_FRAME_COUNT][256] = {
     0x00,0x00,0x00,0xff,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x7f,0xc8,0x00,0x00,0x00,
     0x00,0x00,0x00,0xa0,0x10,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x05,0x00,0x00,0x00,
     0x00,0x00,0x01,0x00,0x07,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x06,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-  },
-  { // Frame 4
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x1f,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x3f,0xf8,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x7f,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xd7,0xfe,0x00,0x00,0x00,
-    0x00,0x00,0x01,0x7e,0xfe,0x00,0x00,0x00,0x00,0x00,0x01,0xff,0xff,0x00,0x00,0x00,
-    0x00,0x00,0x01,0xff,0xc7,0x80,0x00,0x00,0x00,0x00,0x01,0xff,0xc7,0x80,0x00,0x00,
-    0x00,0x00,0x03,0xff,0xc7,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xe6,0x00,0x00,0x00,
-    0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0xc0,0x00,0x00,
-    0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0x80,0x00,0x00,
-    0x00,0x00,0x01,0xff,0xff,0x80,0x00,0x00,0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,
-    0x00,0x00,0x03,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x18,0xff,0xff,0x00,0x00,0x00,
-    0x00,0x00,0x1a,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x0f,0xff,0xfe,0x00,0x00,0x00,
-    0x00,0x00,0x03,0xff,0xfc,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xfc,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x7f,0xf0,0x00,0x00,0x00,0x00,0x00,0x01,0x38,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x01,0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x20,0x00,0x00,0x00,
-    0x00,0x00,0x01,0x00,0x20,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x70,0x00,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
   },
   { // Frame 5
@@ -644,372 +778,6 @@ void cycleMenu();               // Cycle menus: MAIN → FOOD → TOILET → PLA
 void oledTask(void *parameter); // OLED animation task on Core 0
 void networkTask(void *parameter);  // Dedicated HTTP task on Core 1 (queue-driven)\nvoid checkAndPerformOTA();           // Check firmware server and perform OTA if newer version exists
 
-// ================= WIFI PROVISIONING FUNCTIONS =================
-
-// QRCodeGFX object — initialised after display is ready
-QRCodeGFX* qrcode = nullptr;
-
-// Get count of stored WiFi credentials from NVS
-int getStoredWiFiCount() {
-    wifiPrefs.begin("wifi", true);  // Read-only
-    int count = wifiPrefs.getInt("wifi_count", 0);
-    wifiPrefs.end();
-    return count;
-}
-
-// Append a new WiFi credential to NVS (never overwrites previous entries)
-void appendWiFiCredential(String ssid, String pass) {
-    wifiPrefs.begin("wifi", false);  // Read-write
-    int count = wifiPrefs.getInt("wifi_count", 0);
-    
-    // Check for duplicate SSID — update password instead of adding duplicate
-    for (int i = 0; i < count; i++) {
-        String key_s = "wifi" + String(i) + "_s";
-        String stored = wifiPrefs.getString(key_s.c_str(), "");
-        if (stored == ssid) {
-            // Update existing entry's password
-            String key_p = "wifi" + String(i) + "_p";
-            wifiPrefs.putString(key_p.c_str(), pass);
-            wifiPrefs.end();
-            Serial.printf("📶 Updated password for existing SSID: %s (slot %d)\n", ssid.c_str(), i);
-            return;
-        }
-    }
-    
-    if (count >= MAX_STORED_WIFI) {
-        Serial.println("⚠️ Max stored WiFi networks reached, overwriting oldest");
-        // Shift all entries down by 1 (remove slot 0, move 1→0, 2→1, etc.)
-        for (int i = 0; i < count - 1; i++) {
-            String src_s = "wifi" + String(i + 1) + "_s";
-            String src_p = "wifi" + String(i + 1) + "_p";
-            String dst_s = "wifi" + String(i) + "_s";
-            String dst_p = "wifi" + String(i) + "_p";
-            wifiPrefs.putString(dst_s.c_str(), wifiPrefs.getString(src_s.c_str(), ""));
-            wifiPrefs.putString(dst_p.c_str(), wifiPrefs.getString(src_p.c_str(), ""));
-        }
-        count = MAX_STORED_WIFI - 1;  // Will be incremented below
-    }
-    
-    String key_s = "wifi" + String(count) + "_s";
-    String key_p = "wifi" + String(count) + "_p";
-    wifiPrefs.putString(key_s.c_str(), ssid);
-    wifiPrefs.putString(key_p.c_str(), pass);
-    wifiPrefs.putInt("wifi_count", count + 1);
-    wifiPrefs.end();
-    Serial.printf("📶 Saved WiFi credential: %s (slot %d)\n", ssid.c_str(), count);
-}
-
-// Try connecting to a specific WiFi network with retries
-bool tryConnectWiFi(const char* ssid, const char* pass, int retries) {
-    for (int attempt = 1; attempt <= retries; attempt++) {
-        Serial.printf("📶 Trying '%s' (attempt %d/%d)...\n", ssid, attempt, retries);
-        
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(ssid, pass);
-        
-        int timeout = 0;
-        while (WiFi.status() != WL_CONNECTED && timeout < 20) {
-            delay(500);
-            Serial.print(".");
-            timeout++;
-        }
-        Serial.println();
-        
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("✅ Connected to '%s' — IP: %s\n", ssid, WiFi.localIP().toString().c_str());
-            return true;
-        }
-        
-        Serial.printf("❌ Failed to connect to '%s' (attempt %d)\n", ssid, attempt);
-        WiFi.disconnect();
-        delay(500);
-    }
-    return false;
-}
-
-// Try all stored credentials + hardcoded fallback
-bool connectWithStoredCredentials() {
-    int count = getStoredWiFiCount();
-    Serial.printf("📶 Found %d stored WiFi network(s) in NVS\n", count);
-    
-    // 1. Try NVS-stored credentials (newest first for faster connect)
-    if (count > 0) {
-        wifiPrefs.begin("wifi", true);
-        for (int i = count - 1; i >= 0; i--) {
-            String key_s = "wifi" + String(i) + "_s";
-            String key_p = "wifi" + String(i) + "_p";
-            String ssid = wifiPrefs.getString(key_s.c_str(), "");
-            String pass = wifiPrefs.getString(key_p.c_str(), "");
-            wifiPrefs.end();
-            
-            if (ssid.length() > 0) {
-                if (tryConnectWiFi(ssid.c_str(), pass.c_str(), WIFI_CONNECT_RETRIES)) {
-                    return true;
-                }
-            }
-            
-            wifiPrefs.begin("wifi", true);  // Re-open for next iteration
-        }
-        wifiPrefs.end();
-    }
-    
-    // 2. Try hardcoded fallback credentials
-    Serial.println("📶 Trying hardcoded WiFi credentials...");
-    if (tryConnectWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_RETRIES)) {
-        return true;
-    }
-    
-    Serial.println("❌ All WiFi credentials failed!");
-    return false;
-}
-
-// Draw QR code on the 64x32 OLED
-void drawProvisioningQR(String data) {
-    if (!displayReady || !qrcode) return;
-    
-    display.clearDisplay();
-    qrcode->setScale(1);
-    qrcode->setBackgroundColor(WHITE);
-    qrcode->generateData(data);
-    qrcode->setRotation(QRCodeRotation::R90);
-    qrcode->draw(0, 0, false);
-    display.display();
-}
-
-// Show WiFi connected success screen on OLED
-void showWiFiSuccess() {
-    if (!displayReady) return;
-    
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.print("WiFi OK");
-    display.setCursor(0, 12);
-    display.print(WiFi.SSID());
-    display.setCursor(0, 24);
-    display.print(WiFi.localIP());
-    display.display();
-    delay(2000);
-}
-
-// WiFi event: detect phone connecting to our AP
-void WiFiProvisioningEvent(WiFiEvent_t event) {
-    if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
-        Serial.println("📱 Phone connected to KAKU_SETUP AP");
-        phoneConnectedToAP = true;
-        // Show URL QR so user can open config page
-        drawProvisioningQR("http://192.168.4.1");
-    }
-}
-
-// Generate HTML page with WiFi network list and form
-String wifiConfigHtmlPage() {
-    int n = WiFi.scanNetworks();
-    
-    String page = "<!DOCTYPE html><html><head>";
-    page += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
-    page += "<title>KAKU WiFi Setup</title>";
-    page += "<style>";
-    page += "*{margin:0;padding:0;box-sizing:border-box}";
-    // Animated gradient background
-    page += "body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;min-height:100vh;";
-    page += "background:linear-gradient(135deg,#0a0a1a 0%,#1a0a2e 25%,#0a1a2e 50%,#1a0a1a 75%,#0a0a2e 100%);";
-    page += "background-size:400% 400%;animation:bg 15s ease infinite;color:#e0e0e0;padding:20px}";
-    page += "@keyframes bg{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}";
-    // Glassmorphism card
-    page += ".card{max-width:420px;margin:20px auto;background:rgba(255,255,255,0.05);";
-    page += "backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);";
-    page += "border:1px solid rgba(255,255,255,0.08);border-radius:20px;padding:32px 24px;";
-    page += "box-shadow:0 8px 32px rgba(0,0,0,0.4)}";
-    // Logo / header
-    page += ".logo{text-align:center;margin-bottom:24px}";
-    page += ".logo span{font-size:40px;display:block;margin-bottom:8px}";
-    page += ".logo h1{font-size:22px;font-weight:700;color:#fff;letter-spacing:1px}";
-    page += ".logo p{font-size:13px;color:#8888aa;margin-top:4px}";
-    // Section title
-    page += ".section-title{font-size:12px;text-transform:uppercase;letter-spacing:2px;color:#7c6fa0;margin:20px 0 10px;font-weight:600}";
-    // Network list
-    page += ".nets{max-height:220px;overflow-y:auto;margin-bottom:16px;scrollbar-width:thin;scrollbar-color:#333 transparent}";
-    page += ".nets::-webkit-scrollbar{width:4px}.nets::-webkit-scrollbar-thumb{background:#444;border-radius:4px}";
-    page += ".net{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;margin:6px 0;";
-    page += "background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:12px;";
-    page += "cursor:pointer;transition:all 0.2s ease}";
-    page += ".net:hover,.net:active{background:rgba(233,69,96,0.12);border-color:rgba(233,69,96,0.3);transform:scale(1.01)}";
-    page += ".net.selected{background:rgba(233,69,96,0.18);border-color:#e94560}";
-    page += ".net-name{font-size:14px;font-weight:500;color:#fff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
-    // Signal strength bars
-    page += ".signal{display:flex;align-items:flex-end;gap:2px;margin-left:10px;min-width:20px}";
-    page += ".bar{width:3px;background:#333;border-radius:1px;transition:background 0.3s}";
-    page += ".bar.on{background:#e94560}";
-    // Form
-    page += ".input-group{position:relative;margin:10px 0}";
-    page += ".input-group input{width:100%;padding:14px 16px;background:rgba(255,255,255,0.06);";
-    page += "border:1px solid rgba(255,255,255,0.1);border-radius:12px;color:#fff;font-size:15px;";
-    page += "outline:none;transition:border-color 0.3s}";
-    page += ".input-group input:focus{border-color:#e94560;box-shadow:0 0 0 3px rgba(233,69,96,0.15)}";
-    page += ".input-group input::placeholder{color:#555}";
-    // Password toggle
-    page += ".eye{position:absolute;right:14px;top:50%;transform:translateY(-50%);cursor:pointer;color:#666;font-size:18px;user-select:none}";
-    page += ".eye:hover{color:#aaa}";
-    // Submit button
-    page += ".btn{width:100%;padding:14px;margin-top:20px;background:linear-gradient(135deg,#e94560,#c02050);";
-    page += "border:none;border-radius:12px;color:#fff;font-size:16px;font-weight:600;cursor:pointer;";
-    page += "letter-spacing:0.5px;transition:all 0.3s;position:relative;overflow:hidden}";
-    page += ".btn:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(233,69,96,0.4)}";
-    page += ".btn:active{transform:scale(0.98)}";
-    page += ".btn.loading{pointer-events:none;opacity:0.7}";
-    page += ".btn.loading::after{content:'';position:absolute;width:20px;height:20px;border:2px solid transparent;";
-    page += "border-top-color:#fff;border-radius:50%;animation:spin 0.8s linear infinite;top:50%;left:50%;margin:-10px 0 0 -10px}";
-    page += "@keyframes spin{to{transform:rotate(360deg)}}";
-    // No networks message
-    page += ".empty{text-align:center;padding:20px;color:#666;font-style:italic;font-size:13px}";
-    // Footer
-    page += ".footer{text-align:center;margin-top:20px;font-size:11px;color:#444}";
-    page += "</style></head><body>";
-    
-    page += "<div class='card'>";
-    page += "<div class='logo'><span>&#x1F43E;</span><h1>KAKU</h1><p>WiFi Setup</p></div>";
-    
-    // Network list
-    page += "<div class='section-title'>Available Networks</div>";
-    page += "<div class='nets'>";
-    if (n == 0) {
-        page += "<div class='empty'>No networks found. Type SSID manually below.</div>";
-    }
-    for (int i = 0; i < n; i++) {
-        int rssi = WiFi.RSSI(i);
-        // 4-level signal bars based on RSSI
-        int level = (rssi > -50) ? 4 : (rssi > -65) ? 3 : (rssi > -75) ? 2 : 1;
-        page += "<div class='net' onclick=\"pick('" + WiFi.SSID(i) + "',this)\">";
-        page += "<span class='net-name'>" + WiFi.SSID(i) + "</span>";
-        page += "<div class='signal'>";
-        page += "<div class='bar" + String(level >= 1 ? " on" : "") + "' style='height:4px'></div>";
-        page += "<div class='bar" + String(level >= 2 ? " on" : "") + "' style='height:7px'></div>";
-        page += "<div class='bar" + String(level >= 3 ? " on" : "") + "' style='height:10px'></div>";
-        page += "<div class='bar" + String(level >= 4 ? " on" : "") + "' style='height:13px'></div>";
-        page += "</div></div>";
-    }
-    page += "</div>";
-    
-    // Form
-    page += "<div class='section-title'>Credentials</div>";
-    page += "<form action='/save' id='wf' onsubmit='return go()'>";
-    page += "<div class='input-group'><input id='s' name='s' placeholder='WiFi Network Name' autocomplete='off' required></div>";
-    page += "<div class='input-group'><input id='p' name='p' type='password' placeholder='Password'>";
-    page += "<span class='eye' onclick='togglePw()'>&#x1F441;</span></div>";
-    page += "<button type='submit' class='btn' id='btn'>Connect</button>";
-    page += "</form>";
-    
-    page += "<div class='footer'>KAKU Tamagotchi &bull; v" FIRMWARE_VERSION "</div>";
-    page += "</div>";
-    
-    // JavaScript
-    page += "<script>";
-    page += "function pick(s,el){document.getElementById('s').value=s;";
-    page += "document.querySelectorAll('.net').forEach(e=>e.classList.remove('selected'));";
-    page += "el.classList.add('selected');document.getElementById('p').focus()}";
-    page += "function togglePw(){var p=document.getElementById('p');p.type=p.type==='password'?'text':'password'}";
-    page += "function go(){var s=document.getElementById('s').value;if(!s){alert('Enter a WiFi name');return false}";
-    page += "document.getElementById('btn').classList.add('loading');document.getElementById('btn').textContent='Connecting...';return true}";
-    page += "</script>";
-    page += "</body></html>";
-    
-    return page;
-}
-
-// Web server route: serve config page
-void handleWifiConfigRoot() {
-    wifiConfigServer.send(200, "text/html", wifiConfigHtmlPage());
-}
-
-// Web server route: save credentials and restart
-void handleWifiConfigSave() {
-    String ssid = wifiConfigServer.arg("s");
-    String pass = wifiConfigServer.arg("p");
-    
-    if (ssid.length() == 0) {
-        wifiConfigServer.send(400, "text/html", 
-            "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<style>body{font-family:'Segoe UI',sans-serif;min-height:100vh;"
-            "background:linear-gradient(135deg,#0a0a1a,#1a0a2e,#0a1a2e);color:#fff;"
-            "display:flex;align-items:center;justify-content:center}"
-            ".box{text-align:center;padding:40px;background:rgba(255,255,255,0.05);"
-            "border-radius:20px;border:1px solid rgba(255,255,255,0.08)}"
-            "a{color:#e94560;text-decoration:none}</style></head>"
-            "<body><div class='box'><div style='font-size:48px;margin-bottom:16px'>&#x26A0;</div>"
-            "<h2>SSID Required</h2><p style='color:#888;margin:12px 0'>Please enter a WiFi network name.</p>"
-            "<a href='/'>&#x2190; Go Back</a></div></body></html>");
-        return;
-    }
-    
-    // Append to NVS (does not overwrite existing entries)
-    appendWiFiCredential(ssid, pass);
-    
-    wifiConfigServer.send(200, "text/html", 
-        "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<style>body{font-family:'Segoe UI',sans-serif;min-height:100vh;"
-        "background:linear-gradient(135deg,#0a0a1a,#1a0a2e,#0a1a2e);color:#fff;"
-        "display:flex;align-items:center;justify-content:center}"
-        ".box{text-align:center;padding:40px;background:rgba(255,255,255,0.05);"
-        "backdrop-filter:blur(20px);border-radius:20px;border:1px solid rgba(255,255,255,0.08);"
-        "max-width:360px}"
-        ".check{font-size:56px;margin-bottom:16px;animation:pop 0.5s ease}"
-        "@keyframes pop{0%{transform:scale(0)}50%{transform:scale(1.2)}100%{transform:scale(1)}}"
-        "h2{margin-bottom:8px}p{color:#888;font-size:14px;margin:8px 0}"
-        ".ssid{color:#e94560;font-weight:600}"
-        ".bar{width:200px;height:4px;background:#222;border-radius:4px;margin:20px auto 8px;overflow:hidden}"
-        ".fill{height:100%;background:linear-gradient(90deg,#e94560,#ff6b8a);border-radius:4px;"
-        "animation:load 3s linear}</style></head>"
-        "<body><div class='box'><div class='check'>&#x2705;</div>"
-        "<h2>Saved!</h2>"
-        "<p>Network: <span class='ssid'>" + ssid + "</span></p>"
-        "<div class='bar'><div class='fill'></div></div>"
-        "<p>KAKU is restarting...</p>"
-        "<p style='font-size:12px;color:#555;margin-top:12px'>Connect your phone to <b>" + ssid + "</b></p>"
-        "</div></body></html>");
-    
-    delay(2000);
-    ESP.restart();
-}
-
-// Start WiFi AP mode for provisioning
-void startWiFiProvisioningAP() {
-    Serial.println("📡 Starting WiFi provisioning AP mode...");
-    wifiProvisioningMode = true;
-    
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASS);
-    
-    WiFi.onEvent(WiFiProvisioningEvent);
-    
-    wifiConfigServer.on("/", handleWifiConfigRoot);
-    wifiConfigServer.on("/save", handleWifiConfigSave);
-    wifiConfigServer.begin();
-    
-    Serial.printf("📡 AP Started: %s (pass: %s)\n", AP_SSID, AP_PASS);
-    Serial.println("📡 Config URL: http://192.168.4.1");
-    
-    // Show QR code with AP WiFi credentials for easy phone connection
-    if (qrcode) {
-        drawProvisioningQR("WIFI:T:WPA;S:KAKU_SETUP;P:12345678;;");
-    } else {
-        // Fallback: show text instructions on OLED
-        if (displayReady) {
-            display.clearDisplay();
-            display.setTextColor(SSD1306_WHITE);
-            display.setTextSize(1);
-            display.setCursor(0, 0);
-            display.print("WiFi Setup");
-            display.setCursor(0, 12);
-            display.print(AP_SSID);
-            display.setCursor(0, 24);
-            display.print(AP_PASS);
-            display.display();
-        }
-    }
-}
-
 // ================= OLED ANIMATION TASK (Core 0) =================
 // Independent FreeRTOS task runs OLED animation on Core 0
 // Decoupled from WiFi/HTTP calls on Core 1 for smooth 60 FPS display
@@ -1034,49 +802,32 @@ void setup() {
     // Initialize LED
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
-    
-    // ================= WIFI PROVISIONING FLOW =================
-    // 1. Try NVS stored credentials (3 retries each)
-    // 2. Try hardcoded fallback credentials (3 retries)
-    // 3. If all fail → start AP mode with QR code for provisioning
-    Serial.println("📶 Starting WiFi provisioning flow...");
-    
-    // Initialize I2C and OLED FIRST so we can show QR code during provisioning
-    Serial.println("Initializing I2C...");
-    Wire.begin(5, 6);  // XIAO ESP32 S3: SDA=5, SCL=6
-    Wire.setClock(400000);
-    delay(500);
-    
-    Serial.println("Initializing OLED Display...");
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-        Serial.println("❌ OLED initialization failed!");
-        displayReady = false;
+     display.begin(SSD1306_SWITCHCAPVCC,0x3C);
+  display.clearDisplay();
+  display.display();
+    // Connect to WiFi with timeout protection
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("Connecting WiFi");
+
+    // FIX: Add 30-second timeout to prevent infinite loop
+    unsigned long wifiStartTime = millis();
+    const unsigned long WIFI_TIMEOUT = 30000;  // 30 seconds
+     if(!connectWiFi())
+  {
+    startAP();
+  }
+    // while (WiFi.status() != WL_CONNECTED && (millis() - wifiStartTime < WIFI_TIMEOUT)) {
+    //     Serial.print(".");
+    //     delay(300);
+    // }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi Connected");
+        Serial.println(WiFi.localIP());
     } else {
-        Serial.println("✅ OLED initialized for provisioning");
-        displayReady = true;
-        // Create QRCodeGFX object now that display is ready
-        qrcode = new QRCodeGFX(display);
-        // Show "Connecting..." while trying credentials
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 8);
-        display.println("KAKU");
-        display.setCursor(0, 18);
-        display.println("Connecting..");
-        display.display();
+        Serial.println("\n⚠️  WiFi connection timeout! Continuing without WiFi...");
+        Serial.println("⚠️  Server communication disabled - running in offline mode");
     }
-    
-    if (!connectWithStoredCredentials()) {
-        // All credentials failed — enter AP provisioning mode
-        startWiFiProvisioningAP();
-        Serial.println("⚠️ Entered WiFi provisioning mode — loop() will serve config page");
-        return;  // Exit setup() early — loop() handles AP web server only
-    }
-    
-    Serial.println("\n✅ WiFi Connected!");
-    Serial.println(WiFi.localIP());
-    if (displayReady) showWiFiSuccess();
     
     // Disable WiFi modem sleep — keeps connection alive and stable
     WiFi.setSleep(false);
@@ -1089,13 +840,23 @@ void setup() {
     // Will drop to 80MHz AFTER all initialization is complete
     Serial.println("⚡ CPU at 240MHz during setup (will idle at 80MHz after init)");
     
-    // I2C and OLED already initialized above (before WiFi provisioning)
-    // No need to reinitialize Wire or display here
+    // Initialize I2C and MPU6050 with timeout protection
+    Serial.println("Initializing I2C...");
+    Wire.begin(5, 6);  // XIAO ESP32 S3: SDA=5, SCL=6
+    Wire.setClock(400000);  // Set I2C speed to 400kHz
+    delay(1000);
     
-    // OLED already initialized above (before WiFi provisioning).
-    // Run startup animation sequence now that WiFi is connected.
-    if (displayReady) {
+    // Initialize OLED Display
+    Serial.println("Initializing OLED Display...");
+    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+        Serial.println("❌ OLED initialization failed!");
+        displayReady = false;
+    } else {
+        Serial.println("✅ OLED initialized successfully!");
+        displayReady = true;
+        
         // ============ STARTUP SEQUENCE ============
+        // Display startup text
         display.clearDisplay();
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
@@ -2964,49 +2725,17 @@ void networkTask(void *parameter) {
 }
 
 void loop() {
-    // ── PROVISIONING MODE GUARD ────────────────────────────────────────────
-    // If in AP provisioning mode, only serve web config page — skip everything else
-    if (wifiProvisioningMode) {
-        wifiConfigServer.handleClient();
-        delay(10);
-        return;
-    }
-    
     // This loop runs on Core 1 - handles sensors + queue dispatching ONLY
     // HTTP calls moved to networkTask on Core 1 — no blocking here
-    
+    server.handleClient();
     // Check WiFi connection with timeout protection
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("❌ WiFi disconnected, attempting reconnect...");
-        // Try stored credentials first, then hardcoded fallback
-        bool reconnected = false;
-        int count = getStoredWiFiCount();
-        if (count > 0) {
-            wifiPrefs.begin("wifi", true);
-            // Try most recently added credential first (most likely current network)
-            String key_s = "wifi" + String(count - 1) + "_s";
-            String key_p = "wifi" + String(count - 1) + "_p";
-            String ssid = wifiPrefs.getString(key_s.c_str(), "");
-            String pass = wifiPrefs.getString(key_p.c_str(), "");
-            wifiPrefs.end();
-            if (ssid.length() > 0) {
-                WiFi.begin(ssid.c_str(), pass.c_str());
-                unsigned long reconnectStart = millis();
-                while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart < 10000)) {
-                    Serial.print(".");
-                    vTaskDelay(pdMS_TO_TICKS(300));
-                }
-                if (WiFi.status() == WL_CONNECTED) reconnected = true;
-            }
-        }
-        // Fallback to hardcoded credentials
-        if (!reconnected) {
-            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-            unsigned long reconnectStart = millis();
-            while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart < 10000)) {
-                Serial.print(".");
-                vTaskDelay(pdMS_TO_TICKS(300));
-            }
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        unsigned long reconnectStart = millis();
+        while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart < 20000)) {
+            Serial.print(".");
+            vTaskDelay(pdMS_TO_TICKS(300));
         }
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("\n✅ WiFi Reconnected: " + WiFi.localIP().toString());
@@ -3531,25 +3260,6 @@ void getOLEDDisplayFromServer() {
                     Serial.printf("🗓️  Pet age updated: %d yrs\n", petAgeInt);
                 }
             }
-            
-            // screen_type / screen_state override DISABLED — ESP32 controls menu locally via tilt gesture
-            /*
-            if (g_oledDoc.containsKey("screen_type")) {
-                String newScreenType = g_oledDoc["screen_type"].as<String>();
-                if (currentScreenType == "FOOD_MENU" && newScreenType != "FOOD_MENU") {
-                    imageAlreadySentThisSession = false;
-                }
-                currentScreenType = newScreenType;
-                Serial.printf("📺 Screen Type: %s\n", currentScreenType.c_str());
-            } else if (g_oledDoc.containsKey("screen_state")) {
-                String newScreenState = g_oledDoc["screen_state"].as<String>();
-                if (currentScreenType == "FOOD_MENU" && newScreenState != "FOOD_MENU") {
-                    imageAlreadySentThisSession = false;
-                }
-                currentScreenType = newScreenState;
-                Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
-            }
-            */
             
             if (currentScreenType == "MAIN") {
                 showHomeIcon = true;
@@ -4672,181 +4382,166 @@ void acknowledgeEvent(int event_id) {
     http.end();
 }
 
-/*
-WIRING DIAGRAM for XIAO ESP32 S3 Sense: 
-===========================================
+// ---------- QR WiFi Setup Feature ----------
+// Only runs at startup if WiFi fails, or on back tilt for 10s
 
-🔌 Built-in Components (No Wiring Needed):
-- Camera Module (OV2640) - Built into XIAO ESP32 S3 Sense
-- PDM Microphone - Built into XIAO ESP32 S3 Sense  
-- PSRAM - Built into XIAO ESP32 S3 Sense
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <QRCodeGFX.h>
 
-🔧 External Components to Connect:
+#define QR_SCREEN_WIDTH 64
+#define QR_SCREEN_HEIGHT 32
+#define QR_SDA_PIN 5
+#define QR_SCL_PIN 6
 
-MPU6050 (Accelerometer/Gyroscope):
-- VCC -> 3.3V
-- GND -> GND  
-- SDA -> GPIO 21 (I2C Data)
-- SCL -> GPIO 22 (I2C Clock)
-- INT -> Not connected (optional)
+Adafruit_SSD1306 qrDisplay(QR_SCREEN_WIDTH, QR_SCREEN_HEIGHT, &Wire, -1);
+QRCodeGFX qrQrcode(qrDisplay);
+WebServer qrServer(80);
+Preferences qrPrefs;
 
-LED Indicator:
-- + -> GPIO 2 (with 220Ω resistor)
-- - -> GND
+const char* QR_AP_SSID = "ESP32_SETUP";
+const char* QR_AP_PASS = "12345678";
+bool qrPhoneConnected = false;
 
-📋 PIN ASSIGNMENTS (XIAO ESP32 S3 Sense):
-==========================================
+void qrDrawQR(String data) {
+  qrDisplay.clearDisplay();
+  qrQrcode.setScale(1);
+  qrQrcode.setBackgroundColor(WHITE);
+  qrQrcode.generateData(data);
+  qrQrcode.setRotation(QRCodeRotation::R90);
+  qrQrcode.draw(0,0,false);
+  qrDisplay.display();
+}
 
-Camera Pins (Built-in OV2640):
-- XCLK  -> GPIO 10
-- SIOD  -> GPIO 40 (I2C SDA)
-- SIOC  -> GPIO 39 (I2C SCL) 
-- Y9    -> GPIO 48
-- Y8    -> GPIO 11
-- Y7    -> GPIO 12
-- Y6    -> GPIO 14
-- Y5    -> GPIO 16
-- Y4    -> GPIO 18
-- Y3    -> GPIO 17
-- Y2    -> GPIO 15
-- VSYNC -> GPIO 38
-- HREF  -> GPIO 47
-- PCLK  -> GPIO 13
+void qrShowSuccess() {
+  qrDisplay.clearDisplay();
+  qrDisplay.setTextColor(WHITE);
+  qrDisplay.setTextSize(1);
+  qrDisplay.setCursor(0,0);
+  qrDisplay.println("WiFi Connected");
+  qrDisplay.setCursor(0,12);
+  qrDisplay.println(WiFi.SSID());
+  qrDisplay.setCursor(0,24);
+  qrDisplay.println(WiFi.localIP());
+  qrDisplay.display();
+}
 
-I2S PDM Microphone (Built-in):
-- CLK -> GPIO 42 (I2S WS)
-- DATA-> GPIO 41 (I2S SD)
+void qrWiFiEvent(WiFiEvent_t event) {
+  if(event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+    Serial.println("Phone connected to ESP32 AP");
+    qrPhoneConnected = true;
+    qrDrawQR("http://192.168.4.1");
+  }
+}
 
-MPU6050 (External):
-- SDA -> GPIO 5  (XIAO ESP32 S3)
-- SCL -> GPIO 6  (XIAO ESP32 S3)
-  
-Alternative I2C pins if GPIO 6/7 don't work:
-- SDA -> GPIO 21, SCL -> GPIO 22 (Generic ESP32)
-- Check your specific board's pinout diagram
+String qrHtmlPage() {
+  int n = WiFi.scanNetworks();
+  String page="<html><body>";
+  page+="<h2>Select WiFi</h2>";
+  for(int i=0;i<n;i++) {
+    page+=WiFi.SSID(i);
+    page+="<br>";
+  }
+  page+="<form action='/save'>";
+  page+="SSID:<input name='s'><br>";
+  page+="PASS:<input name='p'><br>";
+  page+="<input type='submit'>";
+  page+="</form>";
+  page+="</body></html>";
+  return page;
+}
 
-Other:
-- LED -> GPIO 2
+void qrHandleRoot() {
+  qrServer.send(200,"text/html",qrHtmlPage());
+}
 
-⚠️  IMPORTANT NOTES:
-===================
-1. XIAO ESP32 S3 Sense has BUILT-IN camera and microphone
-2. No external camera/mic wiring needed
-3. Only connect MPU6050 externally via I2C
-4. Camera uses JPEG compression for efficient transmission
-5. 🎤 SMART AUDIO: Voice Activity Detection with dual-core processing
-6. All data sent to dashboard via WiFi
+void qrHandleSave() {
+  String ssid = qrServer.arg("s");
+  String pass = qrServer.arg("p");
+  qrPrefs.begin("wifi",false);
+  qrPrefs.putString("ssid",ssid);
+  qrPrefs.putString("pass",pass);
+  qrPrefs.end();
+  qrServer.send(200,"text/html","Saved. Restarting...");
+  delay(2000);
+  ESP.restart();
+}
 
-🚀 FEATURES:
-============
-- ✅ MPU6050 sensor data (every 1 second) - Core 1
-- ✅ Camera images (every 7 seconds) - Core 1
-- ✅ 🎤 SMART AUDIO: Voice Activity Detection - Core 0
-- ✅ Dual-core processing for optimal performance
-- ✅ Real-time dashboard updates
-- ✅ WiFi connectivity with auto-reconnect
-- ✅ LED status indicators
-- ✅ PSRAM for audio/image buffering
+void qrStartAP() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(QR_AP_SSID,QR_AP_PASS);
+  WiFi.onEvent(qrWiFiEvent);
+  qrServer.on("/",qrHandleRoot);
+  qrServer.on("/save",qrHandleSave);
+  qrServer.begin();
+  Serial.println("AP Started");
+  qrDrawQR("WIFI:T:WPA;S:ESP32_SETUP;P:12345678;;");
+}
 
-🧠 DUAL-CORE ARCHITECTURE:
-==========================
-**Core 0 (Audio Core):**
-- Continuous microphone monitoring
-- Voice Activity Detection (VAD)
-- Energy-based speech detection
-- Automatic audio recording when speech detected
-- Real-time audio processing (high priority)
+bool qrConnectWiFi() {
+  qrPrefs.begin("wifi",true);
+  String ssid = qrPrefs.getString("ssid","");
+  String pass = qrPrefs.getString("pass","");
+  qrPrefs.end();
+  if(ssid == "") return false;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(),pass.c_str());
+  int t=0;
+  while(WiFi.status()!=WL_CONNECTED && t<20) {
+    delay(500);
+    Serial.print(".");
+    t++;
+  }
+  if(WiFi.status()==WL_CONNECTED) {
+    Serial.println("\nConnected to WiFi");
+    qrShowSuccess();
+    return true;
+  }
+  return false;
+}
 
-**Core 1 (Main Core):**
-- WiFi management and HTTP transmission
-- Sensor data collection (MPU6050)
-- Camera image capture
-- Dashboard communications
-- LED status indicators
+void runQRWiFiSetup() {
+  Wire.begin(QR_SDA_PIN,QR_SCL_PIN);
+  qrDisplay.begin(SSD1306_SWITCHCAPVCC,0x3C);
+  qrDisplay.clearDisplay();
+  qrDisplay.display();
+  if(!qrConnectWiFi()) {
+    qrStartAP();
+    while(WiFi.status()!=WL_CONNECTED) {
+      qrServer.handleClient();
+      delay(10);
+    }
+  }
+}
 
-🎤 INTELLIGENT AUDIO SYSTEM:
-============================
-**Voice Activity Detection:**
-- Continuously monitors audio energy levels
-- Detects speech when energy > 1000 threshold
-- Requires minimum 500ms of continuous speech
-- Records up to 5 seconds of audio
-- Stops recording after 2 seconds of silence
-- Only transmits audio when speech is detected
+// Back tilt detection (10s)
+unsigned long qrBackTiltStart = 0;
+bool qrBackTiltActive = false;
+void checkBackTiltForQRSetup() {
+  int16_t ax, ay, az;
+  // Replace with your actual MPU read logic
+  mpu.getAcceleration(&ax, &ay, &az);
+  float z = az / 16384.0f;
+  if (z < -0.8f) {
+    if (!qrBackTiltActive) {
+      qrBackTiltActive = true;
+      qrBackTiltStart = millis();
+    } else if (millis() - qrBackTiltStart > 10000) {
+      Serial.println("Back tilt 10s detected: triggering QR WiFi setup...");
+      runQRWiFiSetup();
+      qrBackTiltActive = false;
+    }
+  } else {
+    qrBackTiltActive = false;
+    qrBackTiltStart = 0;
+  }
+}
 
-**Energy-Based Detection:**
-```
-Audio Energy > 1000    → Speech Detected 🗣️
-Audio Energy < 1000    → Silent 🔇
-Continuous Speech 500ms+ → Start Recording 🎙️
-Silence 2000ms+ → Stop Recording & Send 📤
-```
+// In setup()
 
-**Benefits:**
-- ⚡ No bandwidth wasted on silent audio
-- 🔋 Power efficient - only records when needed
-- 📡 Real-time speech detection and transmission
-- 🎯 High accuracy voice activity detection
-- 🚀 Multi-core performance optimization
 
-📊 DATA TRANSMISSION SCHEDULE:
-==============================
-**Real-time (Core 1):**
-- Sensor readings: Every 1 second (always)
-- Camera images: Every 7 seconds
-
-**Event-driven (Core 0 → Core 1):**
-- Audio: Only when speech detected
-- Voice detection: Continuous monitoring
-- Inter-core communication via mutex/semaphores
-
-🔧 SMART THRESHOLDS:
-===================
-- VAD_THRESHOLD: 1000 (adjust based on environment)
-- VAD_MIN_DURATION: 500ms (minimum speech length)
-- SILENCE_TIMEOUT: 2000ms (stop recording delay)
-- MAX_RECORDING: 5 seconds (prevent buffer overflow)
-
-🎛️ TUNING VOICE DETECTION:
-===========================
-**Quiet Environment:** Lower VAD_THRESHOLD to 500-800
-**Noisy Environment:** Raise VAD_THRESHOLD to 1500-2000
-**Sensitive Detection:** Decrease VAD_MIN_DURATION to 300ms
-**Less False Triggers:** Increase VAD_MIN_DURATION to 800ms
-
-💾 MEMORY USAGE:
-===============
-- Images: ~1-3KB (QQVGA 160x120, quality 20)
-- Audio: ~32KB per 1-second recording (only when speech)
-- VAD Buffer: 1KB for real-time energy analysis
-- PSRAM: Dynamic allocation for recordings
-- Automatic cleanup after transmission
-
-🌐 NETWORK ENDPOINTS:
-====================
-- Sensors: POST /api/sensor-data (small, frequent)
-- Images: POST /upload (binary, every 7s)
-- Audio: POST /upload-audio (JSON, speech-triggered)
-
-⚡ PERFORMANCE BENEFITS:
-========================
-1. **Dual-Core**: Audio processing doesn't block main operations
-2. **Event-Driven**: Audio only sent when speech detected
-3. **Energy-Efficient**: No continuous audio transmission
-4. **Real-Time**: Voice detection with minimal latency
-5. **Intelligent**: Automatic silence detection and recording stop
-
-🔧 CONFIGURATION:
-=================
-Update these before uploading:
-1. WIFI_SSID and WIFI_PASSWORD
-2. Server URL: "https://kakuproject-90943350924.asia-south1.run.app"
-3. Adjust VAD_THRESHOLD for your environment
-4. Three separate optimized endpoints for different data types
-
-**Data Sending Examples:**
-- Sensor readings: Every 1 second (always) - 146 bytes JSON
-- Camera images: Every 7 seconds - 1-3KB binary
-- Audio recordings: Only when you speak - 32KB+ base64
-- Silence periods: 0 bytes audio transmission ✨
-*/
+/

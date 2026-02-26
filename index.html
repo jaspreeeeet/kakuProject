@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -95,18 +96,18 @@
             font-size: 0.9em;
             color: #333;
             transition: all 0.3s ease;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
 
         .pet-btn:hover {
             transform: translateY(-3px);
-            box-shadow: 0 6px 16px rgba(0,0,0,0.2);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
         }
 
         .pet-btn.active {
             border: 3px solid #FFD700;
             transform: scale(1.05);
-            box-shadow: 0 6px 20px rgba(255,215,0,0.4);
+            box-shadow: 0 6px 20px rgba(255, 215, 0, 0.4);
         }
 
         .card-icon {
@@ -167,7 +168,7 @@
             font-size: 3em;
             font-weight: bold;
             margin: 10px 0;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
         }
 
         .direction-values {
@@ -178,7 +179,7 @@
         }
 
         .axis-value {
-            background: rgba(255,255,255,0.2);
+            background: rgba(255, 255, 255, 0.2);
             padding: 8px;
             border-radius: 6px;
             text-align: center;
@@ -198,7 +199,7 @@
         .confidence-bar {
             margin-top: 10px;
             height: 8px;
-            background: rgba(255,255,255,0.3);
+            background: rgba(255, 255, 255, 0.3);
             border-radius: 4px;
             overflow: hidden;
         }
@@ -405,6 +406,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <header>
@@ -414,16 +416,19 @@
 
         <div class="dashboard">
             <!-- Pet Status (Automatic Mode) -->
-            <div class="card" style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E72 100%); grid-column: 1 / -1;">
+            <div class="card"
+                style="background: linear-gradient(135deg, #FF6B6B 0%, #FF8E72 100%); grid-column: 1 / -1;">
                 <h2><span class="card-icon">🐣</span> Pet Status</h2>
                 <div class="sensor-label">🤖 AUTOMATIC MODE - Pet evolves based on your care!</div>
-                <div id="petStatus" style="color: white; font-weight: bold; font-size: 1.1em; margin-top: 10px; text-align: center;">
+                <div id="petStatus"
+                    style="color: white; font-weight: bold; font-size: 1.1em; margin-top: 10px; text-align: center;">
                     Loading pet status...
                 </div>
             </div>
 
             <!-- Step Counter Card -->
-            <div class="card" style="background: linear-gradient(135deg, #4CAF50 0%, #81C784 100%); grid-column: 1 / -1;">
+            <div class="card"
+                style="background: linear-gradient(135deg, #4CAF50 0%, #81C784 100%); grid-column: 1 / -1;">
                 <h2><span class="card-icon">👟</span> Step Counter</h2>
                 <div class="sensor-label">Real-time steps walked detected by accelerometer</div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
@@ -432,14 +437,17 @@
                         <div style="font-size: 0.9em; color: rgba(255,255,255,0.9); margin-top: 5px;">Total Steps</div>
                     </div>
                     <div style="display: flex; flex-direction: column; justify-content: center;">
-                        <div style="font-size: 0.9em; color: rgba(255,255,255,0.9); margin-bottom: 5px;">Daily Steps</div>
+                        <div style="font-size: 0.9em; color: rgba(255,255,255,0.9); margin-bottom: 5px;">Daily Steps
+                        </div>
                         <div style="font-size: 2em; font-weight: bold; color: white;" id="dailyStepCountDisplay">0</div>
-                        <button class="pet-btn" onclick="resetStepCounter()" style="background: rgba(255,255,255,0.3); color: white; margin-top: 10px; font-weight: bold;">
+                        <button class="pet-btn" onclick="resetStepCounter()"
+                            style="background: rgba(255,255,255,0.3); color: white; margin-top: 10px; font-weight: bold;">
                             🔄 Reset Counter
                         </button>
                     </div>
                 </div>
-                <div id="stepStatus" style="margin-top: 15px; text-align: center; color: rgba(255,255,255,0.9); font-size: 0.9em;">
+                <div id="stepStatus"
+                    style="margin-top: 15px; text-align: center; color: rgba(255,255,255,0.9); font-size: 0.9em;">
                     Waiting for sensor data...
                 </div>
             </div>
@@ -466,7 +474,7 @@
                     <img id="cameraImage" class="camera-img" src="" alt="ESP32 Camera Feed">
                     <div class="camera-placeholder" id="cameraPlaceholder">📷</div>
                 </div>
-                
+
                 <!-- AI Caption Section -->
                 <div id="aiCaption" class="ai-caption">
                     <div class="ai-caption-header">
@@ -562,7 +570,7 @@
                 <h2><span class="card-icon">🧭</span> Device Orientation</h2>
                 <div class="orientation-display">
                     <div class="direction-indicator" id="directionIndicator">NEUTRAL</div>
-                    
+
                     <div class="direction-values">
                         <div class="axis-value">
                             <div class="axis-label">CAL_AX</div>
@@ -577,7 +585,7 @@
                             <div class="axis-number" id="calAZ">0.000</div>
                         </div>
                     </div>
-                    
+
                     <div class="confidence-bar">
                         <div class="confidence-fill" id="confidenceFill"></div>
                     </div>
@@ -598,28 +606,37 @@
             </div>
 
             <!-- OTA Firmware Update -->
-            <div style="margin-top: 15px; padding: 15px; background: #1a1a2e; border-radius: 10px; border: 1px solid #333;">
+            <div
+                style="margin-top: 15px; padding: 15px; background: #1a1a2e; border-radius: 10px; border: 1px solid #333;">
                 <h3 style="margin: 0 0 10px 0; color: #e94560;">🔄 OTA Firmware Update</h3>
-                <div id="otaStatus" style="font-size: 0.85em; color: #aaa; margin-bottom: 10px;">No firmware uploaded yet</div>
+                <div id="otaStatus" style="font-size: 0.85em; color: #aaa; margin-bottom: 10px;">No firmware uploaded
+                    yet</div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-                    <button class="btn-primary" id="otaEnableBtn" onclick="toggleOTA()" style="background: #e94560;">🚀 Enable OTA</button>
-                    <input type="file" id="firmwareFile" accept=".bin" style="display: none;" onchange="handleFirmwareFile(this)">
-                    <button class="btn-secondary" onclick="document.getElementById('firmwareFile').click()">📁 Upload .bin</button>
-                    <input type="text" id="firmwareVersion" placeholder="Version (e.g. 1.0.1)" style="padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #0f3460; color: #fff; width: 150px;">
+                    <button class="btn-primary" id="otaEnableBtn" onclick="toggleOTA()" style="background: #e94560;">🚀
+                        Enable OTA</button>
+                    <input type="file" id="firmwareFile" accept=".bin" style="display: none;"
+                        onchange="handleFirmwareFile(this)">
+                    <button class="btn-secondary" onclick="document.getElementById('firmwareFile').click()">📁 Upload
+                        .bin</button>
+                    <input type="text" id="firmwareVersion" placeholder="Version (e.g. 1.0.1)"
+                        style="padding: 8px 12px; border-radius: 6px; border: 1px solid #444; background: #0f3460; color: #fff; width: 150px;">
                 </div>
                 <div id="otaUploadProgress" style="display: none; margin-top: 10px;">
                     <div style="background: #333; border-radius: 4px; height: 8px; overflow: hidden;">
-                        <div id="otaProgressBar" style="background: #e94560; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                        <div id="otaProgressBar"
+                            style="background: #e94560; height: 100%; width: 0%; transition: width 0.3s;"></div>
                     </div>
                     <span id="otaProgressText" style="font-size: 0.8em; color: #aaa;">Uploading...</span>
                 </div>
 
                 <!-- Live OTA Progress — shows only while downloading, then on flash complete -->
-                <div id="otaLiveProgress" style="display: none; margin-top: 12px; padding: 14px 16px; background: #0f3460; border-radius: 8px; border: 2px solid #e94560;">
+                <div id="otaLiveProgress"
+                    style="display: none; margin-top: 12px; padding: 14px 16px; background: #0f3460; border-radius: 8px; border: 2px solid #e94560;">
                     <div style="display: flex; align-items: center; gap: 12px;">
                         <span id="otaLiveIcon" style="font-size: 1.6em;">📥</span>
                         <div>
-                            <div id="otaLiveTitle" style="font-weight: bold; font-size: 1em; color: #fff;">Downloading firmware...</div>
+                            <div id="otaLiveTitle" style="font-weight: bold; font-size: 1em; color: #fff;">Downloading
+                                firmware...</div>
                             <div id="otaLiveVersion" style="font-size: 0.8em; color: #aaa; margin-top: 2px;"></div>
                         </div>
                     </div>
@@ -630,12 +647,15 @@
         <!-- Data Table with Filters -->
         <div class="data-table">
             <h2>Sensor Data History</h2>
-            
+
             <!-- Filter Controls -->
-            <div style="margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f9f9f9; padding: 15px; border-radius: 8px;">
+            <div
+                style="margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f9f9f9; padding: 15px; border-radius: 8px;">
                 <div>
-                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #333;">Records to Show:</label>
-                    <select id="recordLimit" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #333;">Records to
+                        Show:</label>
+                    <select id="recordLimit"
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;">
                         <option value="10">Last 10</option>
                         <option value="50" selected>Last 50</option>
                         <option value="100">Last 100</option>
@@ -647,27 +667,33 @@
 
                 <div>
                     <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #333;">From Date:</label>
-                    <input type="datetime-local" id="filterFrom" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <input type="datetime-local" id="filterFrom"
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
 
                 <div>
                     <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #333;">To Date:</label>
-                    <input type="datetime-local" id="filterTo" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <input type="datetime-local" id="filterTo"
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
 
                 <div>
-                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #333;">Search in Table:</label>
-                    <input type="text" id="tableSearch" placeholder="Search data..." style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #333;">Search in
+                        Table:</label>
+                    <input type="text" id="tableSearch" placeholder="Search data..."
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                 </div>
 
                 <div style="display: flex; gap: 10px; align-items: flex-end;">
-                    <button class="btn-primary" onclick="refreshData()" style="flex: 1; padding: 8px;">🔄 Refresh</button>
+                    <button class="btn-primary" onclick="refreshData()" style="flex: 1; padding: 8px;">🔄
+                        Refresh</button>
                     <button class="btn-secondary" onclick="clearFilters()" style="flex: 1; padding: 8px;">Reset</button>
                 </div>
             </div>
 
             <!-- Stats Bar -->
-            <div style="margin-bottom: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
+            <div
+                style="margin-bottom: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
                 <div style="background: #e3f2fd; padding: 10px; border-radius: 8px; text-align: center;">
                     <div style="font-size: 0.9em; color: #666;">Total Records</div>
                     <div style="font-size: 1.5em; font-weight: bold; color: #1976d2;" id="totalRecords">0</div>
@@ -707,7 +733,8 @@
 
             <!-- Load More Button -->
             <div style="text-align: center; margin-top: 20px;">
-                <button class="btn-primary" id="loadMoreBtn" onclick="loadMore()" style="display: none;">📥 Load More Records</button>
+                <button class="btn-primary" id="loadMoreBtn" onclick="loadMore()" style="display: none;">📥 Load More
+                    Records</button>
                 <div id="loadingIndicator" style="display: none; color: #999; padding: 10px;">Loading...</div>
             </div>
         </div>
@@ -728,20 +755,20 @@
         let displayLimit = 50;
         let displayedCount = 0;
         let socket = null;
-        
+
         // ==================== OLED DISPLAY ANIMATION CONTROL ====================
         const animationNames = ["🐣 INFANT", "👶 CHILD", "👨 ADULT", "👴 OLD"];
-        
+
         // AUTOMATIC MODE ONLY
         // Pet animation controlled by AI based on pet state (health, hunger, care)
         // No manual controls
-        
+
         function getOLEDDisplay() {
             // Add timeout to fetch request
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-            
-            fetch(API_BASE +'/api/oled-display/get', { signal: controller.signal })
+
+            fetch(API_BASE + '/api/oled-display/get', { signal: controller.signal })
                 .then(response => {
                     clearTimeout(timeoutId);
                     return response.json();
@@ -749,7 +776,7 @@
                 .then(data => {
                     if (data.status === 'success') {
                         console.log('🤖 AUTOMATIC MODE - Pet:', data.animation_name, 'Health:', data.health, 'Hunger:', data.hunger);
-                        
+
                         // Update pet status display
                         const petStatusDiv = document.getElementById('petStatus');
                         if (petStatusDiv) {
@@ -759,7 +786,7 @@
                                 'ADULT': '👨',
                                 'OLD': '👴'
                             }[data.stage] || '🐣';
-                            
+
                             petStatusDiv.textContent = `${stageEmoji} ${data.stage} | Health: ${data.health}% | Hunger: ${data.hunger}% | Happiness: ${data.happiness}%`;
                         }
                     } else {
@@ -785,8 +812,8 @@
             // Add timeout to fetch request
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-            
-            fetch(API_BASE +'/api/step-counter/get', { signal: controller.signal })
+
+            fetch(API_BASE + '/api/step-counter/get', { signal: controller.signal })
                 .then(response => {
                     clearTimeout(timeoutId);
                     return response.json();
@@ -810,21 +837,21 @@
 
         function resetStepCounter() {
             if (confirm('Are you sure you want to reset the step counter to 0?')) {
-                fetch(API_BASE +'/api/step-counter/reset', {
+                fetch(API_BASE + '/api/step-counter/reset', {
                     method: 'POST'
                 })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        console.log('🔄 Step counter reset:', data.message);
-                        updateStepCounterUI(0, 0);
-                        alert('✅ Step counter has been reset to 0');
-                    }
-                })
-                .catch(error => {
-                    console.error('❌ Error resetting step counter:', error);
-                    alert('❌ Error resetting counter: ' + error);
-                });
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            console.log('🔄 Step counter reset:', data.message);
+                            updateStepCounterUI(0, 0);
+                            alert('✅ Step counter has been reset to 0');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('❌ Error resetting step counter:', error);
+                        alert('❌ Error resetting counter: ' + error);
+                    });
             }
         }
 
@@ -838,8 +865,8 @@
         function loadLatestAIImage() {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
-            
-            fetch(API_BASE +'/api/latest-image', { signal: controller.signal })
+
+            fetch(API_BASE + '/api/latest-image', { signal: controller.signal })
                 .then(response => {
                     clearTimeout(timeoutId);
                     return response.json();
@@ -850,22 +877,22 @@
                         document.getElementById('cameraImage').src = data.image_url;
                         document.getElementById('cameraPlaceholder').style.display = 'none';
                         document.getElementById('cameraImage').style.display = 'block';
-                        
+
                         // Update AI caption
                         const aiCaptionElement = document.getElementById('aiCaption');
                         const aiCaptionTextElement = document.getElementById('aiCaptionText');
                         const aiTimestampElement = document.getElementById('aiTimestamp');
-                        
+
                         if (data.ai_caption && data.ai_caption !== 'Waiting for AI analysis...') {
                             aiCaptionTextElement.textContent = data.ai_caption;
-                            
+
                             if (data.timestamp) {
                                 const timestamp = new Date(data.timestamp);
                                 aiTimestampElement.textContent = `Analyzed at ${timestamp.toLocaleString()}`;
                             }
-                            
+
                             aiCaptionElement.classList.add('show');
-                            
+
                             console.log('🤖 Loaded latest image from database:', data.source || 'database');
                         }
                     } else {
@@ -886,61 +913,61 @@
             });
 
 
-            socket.on('connect', function() {
+            socket.on('connect', function () {
                 console.log('Socket.IO connected');
                 updateConnectionStatus(true);
-                
+
                 // Get current OLED display animation on connection
                 getOLEDDisplay();
-                
+
                 // 👟 Get current step counter on connection
                 getStepCounter();
-                
+
                 // Load latest AI-analyzed image on connection
                 loadLatestAIImage();
             });
-            
+
             // Listen for OLED display changes from other clients
-            socket.on('oled_display_changed', function(data) {
+            socket.on('oled_display_changed', function (data) {
                 console.log('🎬 Pet state changed by system:', data.animation_name);
                 // Pet automatically reflects state from server - no UI update needed
             });
 
             // 👟 Listen for step counter updates
-            socket.on('step_counter_updated', function(data) {
+            socket.on('step_counter_updated', function (data) {
                 console.log('👟 Step counter updated:', data.total_steps);
                 updateStepCounterUI(data.total_steps, data.daily_steps);
             });
 
-            socket.on('sensor_update', function(data) {
+            socket.on('sensor_update', function (data) {
                 console.log('Received sensor update:', data);
                 updateDashboard(data);
                 if (recordingActive) {
-                    dataBuffer.push({...data, timestamp: new Date().toISOString()});
+                    dataBuffer.push({ ...data, timestamp: new Date().toISOString() });
                 }
             });
 
-            socket.on('camera_update', function(data) {
+            socket.on('camera_update', function (data) {
                 if (data.image_url) {
                     document.getElementById('cameraImage').src = data.image_url;
                     document.getElementById('cameraPlaceholder').style.display = 'none';
                     document.getElementById('cameraImage').style.display = 'block';
-                    
+
                     // Display AI caption if available
                     if (data.ai_caption) {
                         const aiCaptionElement = document.getElementById('aiCaption');
                         const aiCaptionTextElement = document.getElementById('aiCaptionText');
                         const aiTimestampElement = document.getElementById('aiTimestamp');
-                        
+
                         aiCaptionTextElement.textContent = data.ai_caption;
-                        
+
                         if (data.timestamp) {
                             const timestamp = new Date(data.timestamp);
                             aiTimestampElement.textContent = `Analyzed at ${timestamp.toLocaleTimeString()}`;
                         }
-                        
+
                         aiCaptionElement.classList.add('show');
-                        
+
                         // Add a gentle animation
                         aiCaptionElement.style.opacity = '0';
                         aiCaptionElement.style.transform = 'translateY(10px)';
@@ -958,28 +985,28 @@
                 }
             });
 
-            socket.on('orientation_update', function(data) {
+            socket.on('orientation_update', function (data) {
                 console.log('Received orientation update:', data);
-                
+
                 // Update direction indicator
                 const directionElement = document.getElementById('directionIndicator');
                 directionElement.textContent = data.direction || 'UNKNOWN';
-                
+
                 // Update calibrated accelerometer values
                 document.getElementById('calAX').textContent = (data.calibrated_ax || 0).toFixed(3);
                 document.getElementById('calAY').textContent = (data.calibrated_ay || 0).toFixed(3);
                 document.getElementById('calAZ').textContent = (data.calibrated_az || 0).toFixed(3);
-                
+
                 // Update confidence bar and text
                 const confidence = data.confidence || 0;
                 document.getElementById('orientationConfidence').textContent = confidence.toFixed(0);
                 document.getElementById('confidenceFill').style.width = confidence + '%';
-                
+
                 // Add visual feedback with colors based on direction
                 const orientationCard = document.querySelector('.orientation-card');
                 orientationCard.className = 'card orientation-card'; // Reset classes
-                
-                switch(data.direction) {
+
+                switch (data.direction) {
                     case 'FORWARD':
                         orientationCard.style.background = 'linear-gradient(135deg, #2196F3 0%, #1976D2 100%)';
                         break;
@@ -1002,12 +1029,12 @@
                 }
             });
 
-            socket.on('disconnect', function() {
+            socket.on('disconnect', function () {
                 console.log('Socket.IO disconnected');
                 updateConnectionStatus(false);
             });
 
-            socket.on('connect_error', function(error) {
+            socket.on('connect_error', function (error) {
                 console.error('Socket.IO error:', error);
                 updateConnectionStatus(false);
             });
@@ -1093,7 +1120,7 @@
 
         function addTableRow(data) {
             const tbody = document.getElementById('tableBody');
-            
+
             // Clear placeholder row
             if (tbody.rows.length === 1 && tbody.rows[0].cells.length === 8) {
                 tbody.innerHTML = '';
@@ -1126,13 +1153,13 @@
             const toDate = document.getElementById('filterTo').value;
 
             displayedCount = 0;
-            
+
             fetch(API_BASE + '/api/latest?limit=' + (limit === 'all' ? 100000 : limit))
                 .then(response => response.json())
                 .then(data => {
                     if (data.success && data.records.length > 0) {
                         allData = data.records;
-                        
+
                         // Filter by date if specified
                         let filteredData = allData;
                         if (fromDate) {
@@ -1143,21 +1170,21 @@
                             const to = new Date(toDate).getTime();
                             filteredData = filteredData.filter(r => new Date(r.timestamp).getTime() <= to);
                         }
-                        
+
                         allHistoricalData = filteredData;
                         populateTable(filteredData.slice(0, displayLimit));
-                        
+
                         // Update stats
                         document.getElementById('totalRecords').textContent = allData.length;
                         document.getElementById('displayedRecords').textContent = allHistoricalData.length;
-                        
+
                         if (allHistoricalData.length > 0) {
                             const dates = allHistoricalData.map(r => r.timestamp);
                             const earliest = new Date(dates[dates.length - 1]).toLocaleDateString();
                             const latest = new Date(dates[0]).toLocaleDateString();
                             document.getElementById('dateRange').textContent = `${earliest} to ${latest}`;
                         }
-                        
+
                         // Show/hide load more button
                         if (allHistoricalData.length > displayLimit) {
                             document.getElementById('loadMoreBtn').style.display = 'block';
@@ -1200,7 +1227,7 @@
         function loadMore() {
             const nextLimit = displayedCount + 50;
             populateTable(allHistoricalData.slice(0, nextLimit));
-            
+
             if (nextLimit >= allHistoricalData.length) {
                 document.getElementById('loadMoreBtn').style.display = 'none';
             }
@@ -1230,7 +1257,7 @@
                 if (typeof aVal === 'number' && typeof bVal === 'number') {
                     return currentSortAsc ? aVal - bVal : bVal - aVal;
                 } else {
-                    return currentSortAsc ? 
+                    return currentSortAsc ?
                         aVal.toString().localeCompare(bVal.toString()) :
                         bVal.toString().localeCompare(aVal.toString());
                 }
@@ -1241,10 +1268,10 @@
         }
 
         // Add search functionality
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
             const searchInput = document.getElementById('tableSearch');
             if (searchInput) {
-                searchInput.addEventListener('keyup', function() {
+                searchInput.addEventListener('keyup', function () {
                     const searchTerm = this.value.toLowerCase();
                     const tbody = document.getElementById('tableBody');
                     const rows = Array.from(tbody.querySelectorAll('tr'));
@@ -1333,17 +1360,17 @@
         }
 
         // Initialize on page load
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
             initWebSocket();
             refreshData();
             loadLatestImage(); // Load latest image on page load
             loadFirmwareStatus(); // Load OTA firmware status
-            
+
             // Setup event listeners
             document.getElementById('recordLimit').addEventListener('change', refreshData);
-            
+
             // Fallback: Try to load data even if WebSocket fails to connect within 3 seconds
-            setTimeout(function() {
+            setTimeout(function () {
                 if (!socket || !socket.connected) {
                     console.log('⚠️ WebSocket not connected after 3 seconds, attempting direct API calls...');
                     getOLEDDisplay();
@@ -1355,7 +1382,7 @@
 
         // Function to load the latest image
         function loadLatestImage() {
-            fetch(API_BASE +'/api/latest-image')
+            fetch(API_BASE + '/api/latest-image')
                 .then(response => response.json())
                 .then(data => {
                     if (data.success && data.image_url) {
@@ -1383,25 +1410,25 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ device_id: 'ESP32_001', enable: otaEnabled })
             })
-            .then(r => r.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    btn.textContent = otaEnabled ? '⏹️ Disable OTA' : '🚀 Enable OTA';
-                    btn.style.background = otaEnabled ? '#0f3460' : '#e94560';
-                    console.log('OTA ' + (otaEnabled ? 'enabled' : 'disabled'));
-                    // Start/stop live progress polling
-                    if (otaEnabled) {
-                        startOTAProgressPolling();
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        btn.textContent = otaEnabled ? '⏹️ Disable OTA' : '🚀 Enable OTA';
+                        btn.style.background = otaEnabled ? '#0f3460' : '#e94560';
+                        console.log('OTA ' + (otaEnabled ? 'enabled' : 'disabled'));
+                        // Start/stop live progress polling
+                        if (otaEnabled) {
+                            startOTAProgressPolling();
+                        } else {
+                            stopOTAProgressPolling();
+                            document.getElementById('otaLiveProgress').style.display = 'none';
+                        }
                     } else {
-                        stopOTAProgressPolling();
-                        document.getElementById('otaLiveProgress').style.display = 'none';
+                        otaEnabled = !otaEnabled;
+                        alert('Failed: ' + data.message);
                     }
-                } else {
-                    otaEnabled = !otaEnabled;
-                    alert('Failed: ' + data.message);
-                }
-            })
-            .catch(err => { otaEnabled = !otaEnabled; console.error('OTA toggle error:', err); });
+                })
+                .catch(err => { otaEnabled = !otaEnabled; console.error('OTA toggle error:', err); });
         }
 
         function handleFirmwareFile(input) {
@@ -1426,24 +1453,24 @@
                 method: 'POST',
                 body: formData
             })
-            .then(r => r.json())
-            .then(data => {
-                progressBar.style.width = '100%';
-                if (data.status === 'success') {
-                    progressText.textContent = '✅ v' + data.version + ' uploaded (' + (data.file_size / 1024).toFixed(1) + ' KB, md5:' + data.checksum.substring(0, 8) + ')';
-                    document.getElementById('otaStatus').textContent = 'Latest: v' + data.version + ' | ' + (data.file_size / 1024).toFixed(1) + ' KB | md5:' + data.checksum.substring(0, 8);
-                    document.getElementById('firmwareVersion').value = '';
-                } else {
-                    progressText.textContent = '❌ ' + data.message;
-                }
-                input.value = '';
-            })
-            .catch(err => {
-                progressBar.style.width = '100%';
-                progressBar.style.background = '#ff4444';
-                progressText.textContent = '❌ Upload failed: ' + err.message;
-                input.value = '';
-            });
+                .then(r => r.json())
+                .then(data => {
+                    progressBar.style.width = '100%';
+                    if (data.status === 'success') {
+                        progressText.textContent = '✅ v' + data.version + ' uploaded (' + (data.file_size / 1024).toFixed(1) + ' KB, md5:' + data.checksum.substring(0, 8) + ')';
+                        document.getElementById('otaStatus').textContent = 'Latest: v' + data.version + ' | ' + (data.file_size / 1024).toFixed(1) + ' KB | md5:' + data.checksum.substring(0, 8);
+                        document.getElementById('firmwareVersion').value = '';
+                    } else {
+                        progressText.textContent = '❌ ' + data.message;
+                    }
+                    input.value = '';
+                })
+                .catch(err => {
+                    progressBar.style.width = '100%';
+                    progressBar.style.background = '#ff4444';
+                    progressText.textContent = '❌ Upload failed: ' + err.message;
+                    input.value = '';
+                });
         }
 
         // Load firmware status on page load
@@ -1465,7 +1492,7 @@
                     }
                 })
                 .catch(err => console.log('Firmware status not available:', err));
-            
+
             // Also check if there's an active OTA in progress (e.g., page refreshed mid-OTA)
             fetch(API_BASE + '/api/ota/progress?device_id=ESP32_001')
                 .then(r => r.json())
@@ -1474,7 +1501,7 @@
                         startOTAProgressPolling();
                     }
                 })
-                .catch(() => {});
+                .catch(() => { });
         }
 
         // ==================== OTA LIVE PROGRESS POLLING ====================
@@ -1500,27 +1527,80 @@
                 .then(data => {
                     if (data.status !== 'success') return;
                     const liveDiv = document.getElementById('otaLiveProgress');
+                    const iconEl = document.getElementById('otaLiveIcon');
+                    const titleEl = document.getElementById('otaLiveTitle');
+                    const versionEl = document.getElementById('otaLiveVersion');
 
-                    if (data.ota_status === 'downloading') {
-                        liveDiv.style.borderColor = '#e94560';
-                        liveDiv.style.display = 'block';
-                        document.getElementById('otaLiveIcon').textContent = '📥';
-                        document.getElementById('otaLiveTitle').textContent = 'Downloading firmware...';
-                        document.getElementById('otaLiveVersion').textContent = data.target_version ? 'v' + data.target_version : '';
-
-                    } else if (data.ota_status === 'done') {
-                        liveDiv.style.borderColor = '#4caf50';
-                        liveDiv.style.display = 'block';
-                        document.getElementById('otaLiveIcon').textContent = '✅';
-                        document.getElementById('otaLiveTitle').textContent = 'Flashed successfully!';
-                        document.getElementById('otaLiveVersion').textContent = data.target_version ? 'v' + data.target_version + ' is now running' : '';
-                        stopOTAProgressPolling();
-                        setTimeout(() => { liveDiv.style.display = 'none'; }, 8000);
+                    // Inject a progress bar container if it doesn't exist
+                    if (!document.getElementById('otaLiveBarContainer')) {
+                        const barHtml = `
+                            <div id="otaLiveBarContainer" style="margin-top: 10px; background: rgba(0,0,0,0.3); border-radius: 4px; height: 6px; overflow: hidden; display: none;">
+                                <div id="otaLiveBarFill" style="background: #e94560; height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                            </div>
+                            <div id="otaLiveMessage" style="font-size: 0.8em; color: #888; margin-top: 6px; display: none;"></div>
+                        `;
+                        liveDiv.querySelector('div').insertAdjacentHTML('afterend', barHtml);
                     }
-                    // All other states (idle, waiting, checking, rebooting, failed) — widget stays hidden
+
+                    const barContainer = document.getElementById('otaLiveBarContainer');
+                    const barFill = document.getElementById('otaLiveBarFill');
+                    const msgEl = document.getElementById('otaLiveMessage');
+
+                    if (!data.ota_active && data.ota_status === 'idle') {
+                        liveDiv.style.display = 'none';
+                        return;
+                    }
+
+                    liveDiv.style.display = 'block';
+                    versionEl.textContent = data.target_version ? 'Target: v' + data.target_version : '';
+                    msgEl.style.display = 'block';
+                    msgEl.textContent = data.message || '';
+
+                    // Map intermediate statuses to "downloading" to strictly maintain 3 visual states as requested
+                    let displayStatus = data.ota_status;
+                    if (['waiting', 'checking', 'flashing', 'rebooting'].includes(displayStatus)) {
+                        displayStatus = 'downloading';
+                    }
+
+                    // Handle progress bar visibility and width
+                    if (displayStatus === 'downloading' || displayStatus === 'failed') {
+                        barContainer.style.display = 'block';
+                        barFill.style.width = (data.progress || 0) + '%';
+                    } else {
+                        barContainer.style.display = 'none';
+                    }
+
+                    // Update UI based on simplified status
+                    switch (displayStatus) {
+                        case 'downloading':
+                            liveDiv.style.borderColor = '#2b8a3e'; // Greenish
+                            barFill.style.background = '#40c057';
+                            iconEl.textContent = '📥';
+                            titleEl.textContent = `Downloading (${data.progress || 0}%)`;
+                            break;
+
+                        case 'done':
+                            liveDiv.style.borderColor = '#4caf50'; // Green
+                            iconEl.textContent = '✅';
+                            titleEl.textContent = 'Update Successful!';
+                            versionEl.textContent = data.target_version ? 'v' + data.target_version + ' is now running' : '';
+                            stopOTAProgressPolling();
+                            setTimeout(() => { liveDiv.style.display = 'none'; }, 8000);
+                            break;
+
+                        case 'failed':
+                            liveDiv.style.borderColor = '#e03131'; // Red
+                            barFill.style.background = '#fa5252';
+                            iconEl.textContent = '❌';
+                            titleEl.textContent = 'Update Failed';
+                            stopOTAProgressPolling();
+                            setTimeout(() => { liveDiv.style.display = 'none'; }, 10000);
+                            break;
+                    }
                 })
                 .catch(err => console.log('OTA progress poll error:', err));
         }
     </script>
 </body>
+
 </html>
