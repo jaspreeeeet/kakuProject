@@ -261,7 +261,7 @@ enum PetAge { INFANT = 0, CHILD = 1, ADULT = 2, OLD = 3 };
 PetAge petAge = INFANT;             // Default to INFANT - server manages aging
 unsigned long lastAnimationTime = 0;
 unsigned long lastDisplayCheckTime = 0;  // Track when we last checked server for OLED display state
-const unsigned long DISPLAY_CHECK_INTERVAL = 5000;  // Poll server for OLED+events every 5 seconds (combined slot)
+const unsigned long DISPLAY_CHECK_INTERVAL = 3000;  // Poll server for OLED+events every 3 seconds (combined slot)
 const unsigned long ANIMATION_DISPLAY_INTERVAL = 100;  // Display animation every 100ms (~10 FPS smooth)
 uint8_t currentFrame = 0;
 bool displayReady = false;
@@ -505,8 +505,8 @@ unsigned long lastEventPoll = 0;               // Event polling timing
 unsigned long lastInternalReadTime = 0;        // Fast internal sensor reading timing
 const unsigned long SEND_INTERVAL = 2000;      // Send sensor data batch every 2 seconds
 const unsigned long INTERNAL_READ_INTERVAL = 100;  // Read sensor batch every 100ms internally
-const unsigned long EVENT_POLL_INTERVAL = 5000; // Poll for events every 5 seconds
-unsigned long dynamicEventPollInterval = 5000;  // Dynamic backoff for event polling
+const unsigned long EVENT_POLL_INTERVAL = 3000; // Poll for events every 3 seconds
+unsigned long dynamicEventPollInterval = 3000;  // Dynamic backoff for event polling
 // Audio now triggered by speech detection, not timer
 
 // Sensor reading buffer (batched between network sends)
