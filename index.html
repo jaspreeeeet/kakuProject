@@ -987,46 +987,7 @@
 
             socket.on('orientation_update', function (data) {
                 console.log('Received orientation update:', data);
-
-                // Update direction indicator
-                const directionElement = document.getElementById('directionIndicator');
-                directionElement.textContent = data.direction || 'UNKNOWN';
-
-                // Update calibrated accelerometer values
-                document.getElementById('calAX').textContent = (data.calibrated_ax || 0).toFixed(3);
-                document.getElementById('calAY').textContent = (data.calibrated_ay || 0).toFixed(3);
-                document.getElementById('calAZ').textContent = (data.calibrated_az || 0).toFixed(3);
-
-                // Update confidence bar and text
-                const confidence = data.confidence || 0;
-                document.getElementById('orientationConfidence').textContent = confidence.toFixed(0);
-                document.getElementById('confidenceFill').style.width = confidence + '%';
-
-                // Add visual feedback with colors based on direction
-                const orientationCard = document.querySelector('.orientation-card');
-                orientationCard.className = 'card orientation-card'; // Reset classes
-
-                switch (data.direction) {
-                    case 'FORWARD':
-                        orientationCard.style.background = 'linear-gradient(135deg, #2196F3 0%, #1976D2 100%)';
-                        break;
-                    case 'BACK':
-                        orientationCard.style.background = 'linear-gradient(135deg, #FF9800 0%, #F57C00 100%)';
-                        break;
-                    case 'LEFT':
-                        orientationCard.style.background = 'linear-gradient(135deg, #9C27B0 0%, #7B1FA2 100%)';
-                        break;
-                    case 'RIGHT':
-                        orientationCard.style.background = 'linear-gradient(135deg, #E91E63 0%, #C2185B 100%)';
-                        break;
-                    case 'INVERTED':
-                        orientationCard.style.background = 'linear-gradient(135deg, #F44336 0%, #D32F2F 100%)';
-                        break;
-                    case 'NEUTRAL':
-                    default:
-                        orientationCard.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
-                        break;
-                }
+                updateOrientationUI(data);
             });
 
             socket.on('disconnect', function () {
@@ -1108,6 +1069,54 @@
             }
         }
 
+        function updateOrientationUI(data) {
+            if (!data) return;
+
+            // Update direction indicator
+            const directionElement = document.getElementById('directionIndicator');
+            if (directionElement) directionElement.textContent = data.direction || 'UNKNOWN';
+
+            // Update calibrated accelerometer values
+            if (data.calibrated_ax !== undefined) document.getElementById('calAX').textContent = data.calibrated_ax.toFixed(3);
+            if (data.calibrated_ay !== undefined) document.getElementById('calAY').textContent = data.calibrated_ay.toFixed(3);
+            if (data.calibrated_az !== undefined) document.getElementById('calAZ').textContent = data.calibrated_az.toFixed(3);
+
+            // Update confidence bar and text
+            const confidence = data.confidence || 0;
+            const confidenceEl = document.getElementById('orientationConfidence');
+            const confidenceFill = document.getElementById('confidenceFill');
+            if (confidenceEl) confidenceEl.textContent = confidence.toFixed(0);
+            if (confidenceFill) confidenceFill.style.width = confidence + '%';
+
+            // Add visual feedback with colors based on direction
+            const orientationCard = document.querySelector('.orientation-card');
+            if (orientationCard) {
+                orientationCard.className = 'card orientation-card'; // Reset classes
+
+                switch (data.direction) {
+                    case 'FORWARD':
+                        orientationCard.style.background = 'linear-gradient(135deg, #2196F3 0%, #1976D2 100%)';
+                        break;
+                    case 'BACK':
+                        orientationCard.style.background = 'linear-gradient(135deg, #FF9800 0%, #F57C00 100%)';
+                        break;
+                    case 'LEFT':
+                        orientationCard.style.background = 'linear-gradient(135deg, #9C27B0 0%, #7B1FA2 100%)';
+                        break;
+                    case 'RIGHT':
+                        orientationCard.style.background = 'linear-gradient(135deg, #E91E63 0%, #C2185B 100%)';
+                        break;
+                    case 'INVERTED':
+                        orientationCard.style.background = 'linear-gradient(135deg, #F44336 0%, #D32F2F 100%)';
+                        break;
+                    case 'NEUTRAL':
+                    default:
+                        orientationCard.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
+                        break;
+                }
+            }
+        }
+
         function formatUptime(ms) {
             const seconds = Math.floor(ms / 1000);
             const minutes = Math.floor(seconds / 60);
@@ -1173,6 +1182,13 @@
 
                         allHistoricalData = filteredData;
                         populateTable(filteredData.slice(0, displayLimit));
+
+                        // ✅ Populate dashboard cards with the latest incoming data
+                        if (allData.length > 0) {
+                            console.log('🚀 Initializing dashboard with latest DB record');
+                            updateDashboard(allData[0]);
+                            updateOrientationUI(allData[0]);
+                        }
 
                         // Update stats
                         document.getElementById('totalRecords').textContent = allData.length;

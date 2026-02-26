@@ -1691,6 +1691,9 @@ def get_latest_data():
             cursor.execute('''
                 SELECT id, timestamp, accel_x, accel_y, accel_z, 
                        gyro_x, gyro_y, gyro_z, mic_level, sound_data, image_filename,
+                       chip_temperature, device_orientation as direction, 
+                       orientation_confidence as confidence,
+                       calibrated_ax, calibrated_ay, calibrated_az,
                        CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                        CASE WHEN audio_data IS NOT NULL THEN 1 ELSE 0 END as has_audio
                 FROM sensor_readings 
@@ -1701,6 +1704,9 @@ def get_latest_data():
             cursor.execute('''
                 SELECT id, timestamp, accel_x, accel_y, accel_z, 
                        gyro_x, gyro_y, gyro_z, mic_level, sound_data, image_filename,
+                       chip_temperature, device_orientation as direction, 
+                       orientation_confidence as confidence,
+                       calibrated_ax, calibrated_ay, calibrated_az,
                        CASE WHEN camera_image IS NOT NULL THEN 1 ELSE 0 END as has_image,
                        0 as has_audio
                 FROM sensor_readings 
