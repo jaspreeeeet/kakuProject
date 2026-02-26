@@ -3122,8 +3122,8 @@ void loop() {
         micReadingCount = 0;
     }
     
-    // SLOT B — OLED state + events combined every 5 s at +2.5 s offset (tick 5,15,25,...)
-    if (nowTick % 10 == 5 && nowTick != lastOledTick && startupComplete && !isUploadingImage) {
+    // SLOT B — OLED state + events combined every 2.5 s (tick 2,7,12,17...)
+    if (nowTick % 5 == 2 && nowTick != lastOledTick && startupComplete && !isUploadingImage) {
         lastOledTick = nowTick;
         uint8_t req = NET_OLED;
         xQueueSend(networkQueue, &req, 0);
@@ -3888,6 +3888,9 @@ void checkAndPerformOTA() {
             if (pct / 10 != lastPct / 10) {
                 lastPct = pct;
                 Serial.printf("   OTA: %d%% (%d/%d)\n", pct, written, contentLength);
+                // Report "flashing" progress to the server
+                postOTAProgress("flashing", pct, newVersion, (String("Writing Flash (") + pct + "%)").c_str());
+                
                 // Update OLED progress
                 display.clearDisplay();
                 display.setCursor(2, 4);
