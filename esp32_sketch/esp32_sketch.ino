@@ -389,7 +389,7 @@ bool isDeviceSleeping = false;           // True when in sleep mode (neutral >30
 unsigned long neutralStartTime = 0;      // When neutral state first detected
 unsigned long sleepStartTime   = 0;      // When sleep mode started
 uint32_t accumulatedSleepSec   = 0;      // Sleep seconds banked, sent on next sensor upload
-const unsigned long NEUTRAL_SLEEP_TIMEOUT = 60000;  // 30s neutral → sleep
+const unsigned long NEUTRAL_SLEEP_TIMEOUT = 30000;  // 30s inversion → sleep
 
 // Walking state — driven by hardware step counter (not server)
 bool petIsWalking = false;
@@ -2624,10 +2624,16 @@ void detectHardwareStep() {
 // Returns true when device lies flat (no significant X/Y tilt)
 // Check if the device is inverted (face-down) to trigger sleep
 bool isDeviceNeutral() {
-    // We check the calibrated Z-axis. 
-    // If Z is around -9.8 (or -1.0g), it's face down.
-    // Normalized accel_z in sketch is m/s², so -9.81 * 0.7 approx -7
-    if (abs(calibrated_ax) < 3.0f && abs(calibrated_ay) < 3.0f && calibrated_az < -7.0f) {
+    if (!mpuAvailable) return false;
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    float gx = ax / 16384.0f;
+    float gy = ay / 16384.0f;
+    float gz = az / 16384.0f;
+    
+    // Inverted (face-down) means Z is around -1.0g
+    // Check if flat-ish (abs X/Y < 0.3) and facing down (Z < -0.7)
+    if (abs(gx) < 0.3f && abs(gy) < 0.3f && gz < -0.7f) {
         return true;
     }
     return false;

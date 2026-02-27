@@ -324,6 +324,32 @@ def sync_pet_state_to_db(device_id, pet_state):
                 pet_state.get('is_sick', 0), pet_state.get('has_poop', 0), device_id
             ))
             conn.commit()
+            
+            # 📢 Broadcast updated pet state to all connected clients for real-time dashboard updates
+            try:
+                def emit_sync_update():
+                    with app.app_context():
+                        socketio.emit('pet_state_update', {
+                            'device_id': device_id,
+                            'age': pet_state.get('age', 0),
+                            'level': pet_state.get('level', 1),
+                            'xp': pet_state.get('xp', 0),
+                            'health': pet_state.get('health', 100),
+                            'hunger': pet_state.get('hunger', 0),
+                            'thirst': pet_state.get('thirst', 0),
+                            'happiness': pet_state.get('happiness', 100),
+                            'energy': pet_state.get('energy', 100),
+                            'discipline': pet_state.get('discipline', 100),
+                            'has_poop': bool(pet_state.get('has_poop', 0)),
+                            'is_sick': bool(pet_state.get('is_sick', 0)),
+                            'current_menu': pet_state.get('current_menu', 'MAIN'),
+                            'uptime': pet_state.get('uptime', 0),
+                            'timestamp': datetime.now().isoformat()
+                        })
+                socketio.start_background_task(emit_sync_update)
+            except Exception as socket_err:
+                print(f"⚠️ Socket broadcast failed during sync: {socket_err}")
+
         except sqlite3.Error as e:
             print(f"❌ Pet Sync Error: {e}")
         finally:

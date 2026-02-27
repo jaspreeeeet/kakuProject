@@ -1106,6 +1106,16 @@
                 updateStepCounterUI(data.total_steps, data.daily_steps);
             });
 
+            // 🐾 Listen for pet state updates (Age, Hunger, Health, etc.)
+            socket.on('pet_state_update', function (data) {
+                console.log('🐾 Pet state updated:', data);
+                updateDebugDashboard(data);
+                // Also trigger an OLED display refresh to update the main status card
+                if (typeof getOLEDDisplay === 'function') {
+                    getOLEDDisplay();
+                }
+            });
+
             socket.on('sensor_update', function (data) {
                 console.log('Received sensor update:', data);
                 updateDashboard(data);
