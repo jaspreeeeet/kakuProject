@@ -14,6 +14,9 @@ import os
 import time
 from datetime import datetime
 from threading import Thread, Lock
+import base64
+import hashlib
+
 # AI Vision disabled via user request
 AI_AVAILABLE = False
 AI_MODE = "NONE"
