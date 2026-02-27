@@ -47,7 +47,7 @@ Required Libraries:
 #include <QRCodeGFX.h>
 
 // ================= FIRMWARE VERSION (increment before each upload) =================
-#define FIRMWARE_VERSION "1.0.3"
+#define FIRMWARE_VERSION "1.0.4"
 
 // ================= WIFI =================
 #define WIFI_SSID        "Airtel_BumbleBee-777"
@@ -694,7 +694,7 @@ String captureImageBase64();
 bool sendSensorDataOnly(SensorData data);
 void sendImageData(String imageBase64);
 void sendAudioData(String audioBase64);
-void pollForEvents();
+// void pollForEvents(); // Removed - now bundled with OLED poll
 bool isServerAlive();
 void scanI2CDevices();
 bool initCamera();
@@ -3053,14 +3053,13 @@ void networkTask(void *parameter) {
                 }
                 
                 case NET_OLED:
-                    // Combined: OLED state + events in one slot
+                    // Consolidated: fetch OLED state + bundled events in one SSL handshake
                     getOLEDDisplayFromServer();
-                    safeCpuFreq(160);
-                    pollForEvents();
-                    safeCpuFreq(80);
                     // If server flagged OTA update, perform it now
                     if (otaUpdateRequested) {
+                        safeCpuFreq(160);
                         checkAndPerformOTA();
+                        safeCpuFreq(80);
                     }
                     break;
                 
@@ -3322,8 +3321,8 @@ void loop() {
         micReadingCount = 0;
     }
     
-    // SLOT B — OLED state + events combined every 2.5 s (tick 2,7,12,17...)
-    if (nowTick % 5 == 2 && nowTick != lastOledTick && startupComplete && !isUploadingImage) {
+    // SLOT B — OLED state + events combined every 2 s (tick 4,8,12,16...) - FASTER POLLING
+    if (nowTick % 4 == 0 && nowTick != lastOledTick && startupComplete && !isUploadingImage) {
         lastOledTick = nowTick;
         uint8_t req = NET_OLED;
         xQueueSend(networkQueue, &req, 0);
@@ -3858,21 +3857,20 @@ void getOLEDDisplayFromServer() {
                     Serial.println("🔄 OTA update requested by server!");
                 }
             }
-            
-            // DISABLED: Server menu control — ESP32 controls menu locally via right-tilt gesture
-            /*
-            if (g_oledDoc.containsKey("current_menu")) {
-                String menu = g_oledDoc["current_menu"].as<String>();
-                
-                // Don't allow server to override menu during feeding gesture
-                if (capturingForFeeding) {
-                    Serial.println("🍽️ Feeding in progress - ignoring server menu override");
-                } else if (currentScreenType != menu) {
-                    currentScreenType = menu;
-                    Serial.printf("📱 Menu Changed: %s\n", currentScreenType.c_str());
+
+            // Process bundled events (saves one SSL handshake!)
+            if (g_oledDoc.containsKey("events")) {
+                JsonArray events = g_oledDoc["events"];
+                if (events.size() > 0) {
+                    Serial.printf("🚨 Bundled Events: %d\n", events.size());
+                    for (size_t i = 0; i < events.size(); i++) {
+                        JsonObject event = events[i];
+                        const char* event_type = event["event_type"];
+                        const char* message = event["message"];
+                        processEvent(event_type, message);
+                    }
                 }
             }
-            */
         }
     }
     
@@ -4093,7 +4091,8 @@ void checkAndPerformOTA() {
             lastDataTime = millis();
             
             int pct = (written * 100) / contentLength;
-            if (pct / 10 != lastPct / 10) {
+            // Update OLED and server every 5% (instead of every 1) to reduce I2C/network overhead
+            if (pct >= lastPct + 5 || pct == 100) {
                 lastPct = pct;
                 Serial.printf("   OTA: %d%% (%d/%d)\n", pct, written, contentLength);
                 // Report "flashing" progress to the server
@@ -4624,93 +4623,7 @@ void generate_wav_header(uint8_t* wav_header, uint32_t wav_size, uint32_t sample
 }
 
 // ================= EVENT POLLING FUNCTIONS =================
-void pollForEvents() {
-    HTTPClient http;
-    http.setReuse(true);
-    
-    Serial.println("🔍 Polling for important events...");
-    
-    if (!http.begin(sslNet, String(eventsUrl))) {
-        Serial.println("❌ Failed to initialize HTTP client for events");
-        return;
-    }
-    
-    // Set timeout
-    http.setTimeout(5000);
-    
-    // Add headers
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("User-Agent", "ESP32-Dashboard/2.0");
-    
-    // Make GET request
-    int httpCode = http.GET();
-    trackHttpResult(httpCode);
-    
-    if (httpCode > 0) {
-        Serial.printf("📡 Events response: %d\n", httpCode);
-        
-        if (httpCode == HTTP_CODE_OK) {
-            String response = http.getString();
-            
-            if (response.length() > 0) {
-                Serial.println("📋 Server Response:");
-                Serial.println("-------------------");
-                
-                StaticJsonDocument<2048> doc;
-                DeserializationError error = deserializeJson(doc, response);
-                
-                if (!error) {
-                    if (doc.containsKey("events")) {
-                        JsonArray events = doc["events"];
-                        
-                        if (events.size() > 0) {
-                            Serial.printf("🚨 FOUND %d IMPORTANT EVENT(S):\n", events.size());
-                            Serial.println("========================================");
-                            
-                            for (int i = 0; i < events.size(); i++) {
-                                JsonObject event = events[i];
-                                
-                                int event_id = event["id"].as<int>();
-                                const char* event_type = event["event_type"];
-                                const char* message = event["message"];
-                                const char* created_at = event["created_at"];
-                                
-                                Serial.printf("   🚨 EVENT #%d:\n", i + 1);
-                                Serial.printf("     ID: %d\n", event_id);
-                                Serial.printf("     Type: %s\n", event_type);
-                                Serial.printf("     Message: %s\n", message);
-                                Serial.printf("     Time: %s\n", created_at);
-                                Serial.println();
-                                
-                                processEvent(event_type, message);
-                                acknowledgeEvent(event_id);
-                                vTaskDelay(pdMS_TO_TICKS(100));
-                            }
-                        } else {
-                            Serial.println("✅ No new important events (all quiet)");
-                        }
-                    }
-                    
-                    if (doc.containsKey("message")) {
-                        Serial.printf("💬 Status: %s\n", doc["message"].as<const char*>());
-                    }
-                } else {
-                    Serial.println("❌ JSON parsing error");
-                }
-                
-                Serial.println("-------------------");
-            } else {
-                Serial.println("✅ Empty response (no events)");
-            }
-        } else {
-            Serial.printf("⚠️ Unexpected response code: %d\n", httpCode);
-        }
-    } else {
-        Serial.printf("❌ Events poll failed: %s\n", http.errorToString(httpCode).c_str());
-    }
-    
-    http.end();
-}
+/******** pollForEvents removed - bundled with OLED poll ********/
 
 // Send cleaning request to server (remove poop)
 void sendCleanRequest() {

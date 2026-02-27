@@ -2363,6 +2363,37 @@ def get_oled_display():
             'INFANT': 0, 'CHILD': 1, 'ADULT': 2, 'OLD': 3, 'END': 3
         }
         
+        # 🧠 Get unsent important events to bundle in this response (Saves one SSL handshake)
+        events_list = []
+        try:
+            with db_lock:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, event_type, message, created_at
+                    FROM important_events 
+                    WHERE device_id = ? AND is_sent = 0
+                    ORDER BY created_at ASC
+                    LIMIT 5
+                ''', (device_id,))
+                
+                rows = cursor.fetchall()
+                if rows:
+                    for row in rows:
+                        event_id, event_type, message, created_at = row
+                        events_list.append({
+                            "id": event_id,
+                            "event_type": event_type, 
+                            "message": message,
+                            "created_at": created_at
+                        })
+                        # Auto-mark as sent since we are bundling it
+                        cursor.execute('UPDATE important_events SET is_sent = 1 WHERE id = ?', (event_id,))
+                    conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to bundle events: {e}")
+
         response_data = {
             'status': 'success',
             'animation_id': stage_to_id.get(pet.get('stage', 'INFANT'), 0),
@@ -2382,6 +2413,7 @@ def get_oled_display():
             'mode': 'HARDWARE (Authoritative)',
             'current_menu': pet.get('current_menu', 'MAIN'),
             'ota_update': ota_enabled_devices.get(device_id, False),
+            'events': events_list,
             'timestamp': datetime.now().isoformat()
         }
         
