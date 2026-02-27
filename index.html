@@ -961,10 +961,10 @@
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 0.9em;">
                                     <div>❤️ Health: ${data.health}%</div>
                                     <div>🍔 Hunger: ${data.hunger}%</div>
-                                    <div>💧 Thirst: ${data.thirst}%</div>
-                                    <div>💩 Clean: ${data.cleanliness}%</div>
+                                    <div>💧 Thirst: ${data.thirst !== undefined ? data.thirst : 0}%</div>
+                                    <div>💩 Clean: ${data.has_poop ? '0' : '100'}%</div>
                                     <div style="grid-column: span 2; border-top: 1px solid rgba(0,0,0,0.05); padding-top: 5px; margin-top: 5px; color: #666;">
-                                        🕒 Age: <b>${data.age || 0}</b> Days
+                                        🕒 Age: <b>${data.age !== undefined ? data.age : 0}</b> Days
                                     </div>
                                 </div>
                             `;
@@ -1304,21 +1304,21 @@
         // Update dashboard with sensor data
         function updateDashboard(data) {
             // Update accelerometer
-            if (data.accel_x !== undefined) {
+            if (data.accel_x !== undefined && data.accel_x !== null) {
                 document.getElementById('accelX').textContent = data.accel_x.toFixed(2);
                 document.getElementById('accelY').textContent = data.accel_y.toFixed(2);
                 document.getElementById('accelZ').textContent = data.accel_z.toFixed(2);
             }
 
             // Update gyroscope
-            if (data.gyro_x !== undefined) {
+            if (data.gyro_x !== undefined && data.gyro_x !== null) {
                 document.getElementById('gyroX').textContent = data.gyro_x.toFixed(2);
                 document.getElementById('gyroY').textContent = data.gyro_y.toFixed(2);
                 document.getElementById('gyroZ').textContent = data.gyro_z.toFixed(2);
             }
 
             // Update microphone
-            if (data.mic_level !== undefined) {
+            if (data.mic_level !== undefined && data.mic_level !== null) {
                 document.getElementById('micValue').innerHTML = data.mic_level.toFixed(1) + '<span class="sound-unit">dB</span>';
                 updateAudioVisualizer(data.mic_level);
             }
@@ -1329,7 +1329,7 @@
             }
 
             // Update chip temperature
-            if (data.chip_temperature !== undefined) {
+            if (data.chip_temperature !== undefined && data.chip_temperature !== null) {
                 document.getElementById('chipTemp').innerHTML = data.chip_temperature.toFixed(1) + '<span style="font-size: 0.6em;"> °C</span>';
             }
 
