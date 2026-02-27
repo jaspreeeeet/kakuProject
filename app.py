@@ -18,9 +18,10 @@ import base64
 import hashlib
 
 # AI Vision disabled via user request
-AI_AVAILABLE = False
-AI_MODE = "NONE"
-print("❌ AI Vision models are explicitly disabled")
+# AI / Sensory Analysis Configuration
+AI_AVAILABLE = True
+AI_MODE = "FULL"  # "FULL" uses Google ViT, "SIMPLE" uses keyword mock
+print("🤖 Sensory AI Vision is ENABLED (Sensory Interpreter Mode)")
 
 # ================= STEP COUNTER STATE =================
 from collections import deque
@@ -255,10 +256,13 @@ def analyze_image_with_ai(image_data, is_path=False):
 
 # ================= BACKGROUND AI ANALYSIS (ENABLED) =================
 def analyze_and_store_image_blob(reading_id, image_blob):
-    """Background task: Run ViT analysis and store result"""
+    """Background task: Run ViT analysis, store result, and trigger emotional override"""
     try:
         print(f"🤖 [BACKGROUND] Starting ViT analysis for reading #{reading_id}...")
         ai_caption = analyze_image_with_ai(image_blob, is_path=False)
+        
+        # Determine device_id from reading
+        device_id = 'ESP32_001'
         
         # Store in database
         with db_lock:
@@ -271,14 +275,66 @@ def analyze_and_store_image_blob(reading_id, image_blob):
                         SET ai_caption = ?
                         WHERE id = ?
                     ''', (ai_caption, reading_id))
+                    
+                    # Fetch device_id for this reading
+                    cursor.execute('SELECT device_id FROM sensor_readings WHERE id = ?', (reading_id,))
+                    row = cursor.fetchone()
+                    if row: device_id = row[0]
+                    
                     conn.commit()
-                    print(f"✅ [BG] Stored BLIP caption for reading #{reading_id}")
+                    print(f"✅ [BG] Stored BLIP caption for reading #{reading_id}: {ai_caption}")
                 except sqlite3.Error as e:
                     print(f"❌ [BG] DB Error: {e}")
                 finally:
                     conn.close()
+        
+        # 🧠 SENSORY INTELLIGENCE: Trigger emotion based on AI analysis
+        if ai_caption:
+            caption_lower = ai_caption.lower()
+            positive_keywords = ["food", "fruit", "bottle", "toy", "person", "man", "woman", "face", "dog", "cat", "snack"]
+            negative_keywords = ["trash", "dirty", "fire", "dark", "scary"]
+            
+            if any(k in caption_lower for k in positive_keywords):
+                print(f"💖 AI Senses: POSITIVE ({ai_caption}) -> Triggering HAPPY emotion")
+                trigger_pet_emotion(device_id, "HAPPY", duration_secs=60)
+            elif any(k in caption_lower for k in negative_keywords):
+                print(f"😨 AI Senses: NEGATIVE ({ai_caption}) -> Triggering CRY emotion")
+                trigger_pet_emotion(device_id, "CRY", duration_secs=60)
+            
     except Exception as e:
         print(f"❌ [BG] Analysis failed: {e}")
+
+def trigger_pet_emotion(device_id, emotion, duration_secs=60):
+    """Set a temporary emotional override in the database for the ESP32 to fetch"""
+    from datetime import datetime, timedelta
+    expire_at = (datetime.now() + timedelta(seconds=duration_secs)).isoformat()
+    
+    with db_lock:
+        conn = get_db_connection()
+        if not conn: return
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE pet_state 
+                SET current_emotion = ?, 
+                    emotion_expire_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE device_id = ?
+            ''', (emotion, expire_at, device_id))
+            conn.commit()
+            print(f"🎭 [EMOTION] Set {emotion} override for {device_id} (expires in {duration_secs}s)")
+            
+            # Broadcast update
+            socketio.emit('pet_state_update', {
+                'device_id': device_id,
+                'current_emotion': emotion,
+                'emotion_locked': True,
+                'expire_at': expire_at
+            })
+        except Exception as e:
+            print(f"❌ [EMOTION] Failed to set override: {e}")
+        finally:
+            conn.close()
 
 def sync_pet_state_to_db(device_id, pet_state):
     """Update mirrored pet state in database using hardware-authoritative values"""
@@ -978,38 +1034,35 @@ def get_pet_state(device_id='ESP32_001'):
 
 def get_emotion_priority(state):
     """
-    Return highest priority emotion based on pet state
-    Priority: SICK > POOP > HUNGER > PLAY > SLEEP > IDLE
+    Return highest priority emotion based on server-side sensory analysis.
+    Basic physiology (Hunger, Sleep) is now handled LOCALLY on the ESP32 hardware.
+    
+    Priority: SENSORY_OVERRIDE (AI) > SICK > POOP > IDLE (Local Control)
     """
-    # Check if emotion is locked (temporary emotion active)
+    # 1️⃣ Check for locked Sensory Overrides (AI captioning, voice detection, motion triggers)
     if state.get('emotion_expire_at'):
         from datetime import datetime
-        expire_time = datetime.fromisoformat(state['emotion_expire_at']) if isinstance(state['emotion_expire_at'], str) else state['emotion_expire_at']
+        expire_value = state['emotion_expire_at']
+        if isinstance(expire_value, str):
+            try:
+                expire_time = datetime.fromisoformat(expire_value)
+            except ValueError:
+                expire_time = None
+        else:
+            expire_time = expire_value
+            
         if expire_time and expire_time > datetime.now():
-            return state['current_emotion']  # Keep locked emotion
+            return state['current_emotion']  # Keep locked sensory emotion (e.g., HAPPY after food detected)
     
-    # Priority-based emotion selection
-    if state.get('is_sick'):
+    # 2️⃣ Major Status Events (Server still manages these via DB/Web flow)
+    if state.get('is_sick') or state.get('sick_pending'):
         return 'SICK'
     
-    if state.get('has_poop'):
+    if state.get('has_poop') or state.get('poop_present'):
         return 'POOP'
     
-    if state['hunger'] > 70:
-        if state['stage'] == 'INFANT':
-            return 'CRY'
-        return 'HUNGER'
-    
-    if state['energy'] < 30:
-        return 'SLEEP'
-    
-    # Default states
-    if state['happiness'] > 80:
-        return 'HAPPY'
-    elif state['happiness'] < 40:
-        return 'SAD'
-    
-    return 'IDLE'
+    # 3️⃣ NO OVERRIDE: Return LOCAL to signal ESP32 to follow local hardware logic
+    return 'LOCAL'
 
 # ==================== PET ENGINE BACKGROUND THREAD ====================
 
@@ -1261,6 +1314,25 @@ def receive_sensor_data():
         data['calibrated_ay'] = accel_y
         data['calibrated_az'] = accel_z
         data['step_count'] = total_steps_batch
+        
+        # 🧠 SENSORY INTELLIGENCE: Motion & Audio triggers
+        device_id = data.get('device_id', 'ESP32_001')
+        
+        # Audio Trigger (Loud sudden noise detected on server)
+        mic_level = data.get('mic_level', 0)
+        if mic_level > 75:  # High volume threshold
+            print(f"🔊 Sensory Event: LOUD SOUND ({mic_level} dB) -> SURPRISE")
+            trigger_pet_emotion(device_id, "SURPRISE", duration_secs=5)
+            
+        # Physical Orientation Trigger (Hate being upside down)
+        if direction == "INVERTED":
+            print(f"🙃 Sensory Event: INVERTED -> CRY")
+            trigger_pet_emotion(device_id, "CRY", duration_secs=8)
+            
+        # Activity Level Boost
+        if total_steps_batch > 15:
+            print(f"👟 Sensory Event: ACTIVE PLAY -> HAPPY")
+            trigger_pet_emotion(device_id, "HAPPY", duration_secs=30)
         
         # Reduced logging - only show if steps detected or errors
         if total_steps_batch > 0:
@@ -2309,6 +2381,7 @@ def get_oled_display():
             'age': pet['age'],
             'mode': 'HARDWARE (Authoritative)',
             'current_menu': pet.get('current_menu', 'MAIN'),
+            'ota_update': ota_enabled_devices.get(device_id, False),
             'timestamp': datetime.now().isoformat()
         }
         

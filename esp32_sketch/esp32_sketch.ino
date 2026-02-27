@@ -349,6 +349,7 @@ String currentScreenType = "MAIN";  // Current menu — controlled locally via r
 String currentEmotion = "IDLE";    // Current emotion from server (IDLE, CRY, SAD, HAPPY, EATING, SURPRISE)
 bool justFinishedEating = false;    // Show GOOD! text after eating animation
 unsigned long eatingFinishTime = 0; // When eating finished (for GOOD! text timer)
+bool isServerEmotionOverride = false; // True if server has a sensory event override active
 
 // Pet state tracking — updated from LOCAL g_petState
 String currentMode = "HARDWARE";   // Now controlled locally
@@ -367,6 +368,19 @@ void syncLocalStateToUI() {
     petIsSick = g_petState.isSick;
     showPoopIcon = g_petState.hasPoop;
     showFoodIcon = petIsHungry;
+    
+    // 🧠 LOCAL EMOTION CALCULATION (Authoritative unless server overrides with sensory event)
+    if (!isServerEmotionOverride) {
+        if (petIsSick) currentEmotion = "SICK";
+        else if (showPoopIcon) currentEmotion = "POOP";
+        else if (petIsHungry) {
+            if (petAge == INFANT) currentEmotion = "CRY";
+            else currentEmotion = "HUNGER";
+        }
+        else if (petHappiness > 80) currentEmotion = "HAPPY";
+        else if (petHappiness < 40) currentEmotion = "SAD";
+        else currentEmotion = "IDLE";
+    }
     
     // Map integer age to PetAge enum for animations
     if (petAgeInt <= 5) petAge = INFANT;
@@ -3815,10 +3829,16 @@ void getOLEDDisplayFromServer() {
             
             if (g_oledDoc.containsKey("current_emotion")) {
                 String emotion = g_oledDoc["current_emotion"].as<String>();
-                if (currentEmotion != emotion) {
-                    currentEmotion = emotion;
-                    Serial.printf("😊 Emotion: %s\n", currentEmotion.c_str());
+                if (emotion == "LOCAL") {
+                    isServerEmotionOverride = false;
+                } else {
+                    isServerEmotionOverride = true;
+                    if (currentEmotion != emotion) {
+                        currentEmotion = emotion;
+                        Serial.printf("😊 Server Sensory Override: %s\n", currentEmotion.c_str());
+                    }
                 }
+                
                 if (emotion == "EATING" && currentScreenType == "FOOD_MENU") {
                     Serial.println("😋 Emotion: EATING - triggering animation on FOOD MENU!");
                     playEatingAnimation();
