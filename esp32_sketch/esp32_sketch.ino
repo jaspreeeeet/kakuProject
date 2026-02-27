@@ -730,6 +730,8 @@ void displayStatsMenu();        // Display stats menu (happiness + discipline ba
 void checkMenuTiltGesture();    // Right tilt 2s hold → cycle menu
 bool isDeviceNeutral();          // True when device lies flat (no significant X/Y tilt)
 void detectHardwareStep();       // Count steps via MPU6050 stoss method
+const char* detectDirection(SensorData data);  // Orientation from accel data
+bool isDeviceInverted();         // True when device is face-down
 void displaySleepingAnimation(); // 2-frame sleeping animation
 void displayWalkingAnimation();  // 6-frame walking animation (skips frame 2)
 void cycleMenu();               // Cycle menus: MAIN → FOOD → TOILET → PLAY → HEALTH → STATUS → STATS → MAIN
@@ -4096,45 +4098,44 @@ void checkAndPerformOTA() {
     int lastPct = -1;
     unsigned long lastDataTime = millis();
     
-    while (written < (size_t)contentLength) {
+    uint8_t buf[1024];
+    while (httpOTA.connected() && (written < (size_t)contentLength)) {
         // Watchdog — abort if no data for 60s
         if (millis() - lastDataTime > 60000) {
             Serial.println("❌ OTA: Download stalled (60s no data)");
             break;
         }
         
-        // Use read() directly — available() misses pending TLS records
-        int bytesRead = stream->read(otaBuf, sizeof(otaBuf));
-        if (bytesRead > 0) {
-            Update.write(otaBuf, bytesRead);
-            written += bytesRead;
-            lastDataTime = millis();
-            
-            int pct = (written * 100) / contentLength;
-            // Update OLED and server every 5% (instead of every 1) to reduce I2C/network overhead
-            if (pct >= lastPct + 5 || pct == 100) {
-                lastPct = pct;
-                Serial.printf("   OTA: %d%% (%d/%d)\n", pct, written, contentLength);
-                // Report "flashing" progress to the server
-                postOTAProgress("flashing", pct, newVersion, (String("Writing Flash (") + pct + "%)").c_str());
+        size_t available = stream->available();
+        if (available) {
+            int bytesRead = stream->readBytes(buf, min((size_t)sizeof(buf), available));
+            if (bytesRead > 0) {
+                Update.write(buf, bytesRead);
+                written += bytesRead;
+                lastDataTime = millis();
                 
-                // Update OLED progress
-                display.clearDisplay();
-                display.setCursor(2, 4);
-                display.println("FLASHING");
-                display.setCursor(2, 16);
-                display.printf("%d%%", pct);
-                // Draw progress bar
-                display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
-                display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
-                display.display();
+                int pct = (written * 100) / contentLength;
+                // Update OLED every 10% — lightweight I2C only, NO network calls during flash
+                if (pct != lastPct && pct % 10 == 0) {
+                    lastPct = pct;
+                    Serial.printf("   OTA: %d%%\n", pct);
+                    
+                    // OLED progress bar only (no postOTAProgress — SSL blocks download stream)
+                    display.clearDisplay();
+                    display.setCursor(2, 4);
+                    display.println("FLASHING");
+                    display.setCursor(2, 16);
+                    display.printf("%d%%", pct);
+                    // Draw progress bar
+                    display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
+                    display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
+                    display.display();
+                }
             }
-        } else {
-            vTaskDelay(1);  // Yield to RTOS, retry quickly
         }
         
-        // Check if connection dropped
-        if (!httpOTA.connected() && stream->available() == 0) break;
+        // Yield to RTOS, retry quickly
+        vTaskDelay(1);
     }
     
     httpOTA.end();

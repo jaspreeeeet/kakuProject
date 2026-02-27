@@ -2393,12 +2393,15 @@ def get_oled_display():
         except Exception as e:
             print(f"⚠️ Warning: Failed to bundle events: {e}")
 
+        # 🧠 Compute emotion with priority logic: SENSORY_OVERRIDE > LOCAL (hardware handles SICK>POOP>HUNGER)
+        resolved_emotion = get_emotion_priority(pet)
+        
         response_data = {
             'status': 'success',
             'animation_id': stage_to_id.get(pet.get('stage', 'INFANT'), 0),
             'stage': pet.get('stage', 'INFANT'),
-            'emotion': pet.get('current_emotion', 'IDLE'),
-            'current_emotion': pet.get('current_emotion', 'IDLE'),
+            'emotion': resolved_emotion,
+            'current_emotion': resolved_emotion,
             'health': pet['health'],
             'hunger': pet['hunger'],
             'thirst': pet.get('thirst', 0),
