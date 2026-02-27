@@ -52,11 +52,11 @@ Required Libraries:
 #define WIFI_PASSWORD    "kya karoge ."
 
 // ================= API =================
-const char* serverUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/sensor-data";  // Google Cloud Run Production
-const char* eventsUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/events?device_id=ESP32_001";  // Events endpoint
-const char* eventReceivedUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/device/event/received";  // Event acknowledgment
-const char* oledDisplayUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/oled-display/get";  // OLED display animation endpoint
-const char* firmwareCheckUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/firmware/latest?device_id=ESP32_001&current_version=" FIRMWARE_VERSION;
+const char* serverUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/sensor-data";  // Google Cloud Run Production
+const char* eventsUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/events?device_id=ESP32_001";  // Events endpoint
+const char* eventReceivedUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/event/received";  // Event acknowledgment
+const char* oledDisplayUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/oled-display/get";  // OLED display animation endpoint
+const char* firmwareCheckUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/firmware/latest?device_id=ESP32_001&current_version=" FIRMWARE_VERSION;
 const char* OTA_AUTH_TOKEN = "kaku-ota-2025";  // Must match server token
 // NOTE: Orientation endpoint removed - server computes direction from sensor data
 
@@ -1791,7 +1791,7 @@ void sendKakuCoinReward(int score, float kakucoin) {
     http.setConnectTimeout(2000);
     http.setTimeout(5000);
     
-    const char* rewardUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/game/reward";
+    const char* rewardUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/game/reward";
     
     if (!http.begin(sslNet, String(rewardUrl))) {
         Serial.println("❌ Failed to begin reward HTTP");
@@ -3212,7 +3212,7 @@ bool isServerAlive() {
     http.setConnectTimeout(2000);
     http.setTimeout(3000);
 
-    if (!http.begin(sslNet, "https://kakuproject-98943358924.asia-south1.run.app/api/health")) {
+    if (!http.begin(sslNet, "https://kakuproject-90943350924.asia-south1.run.app/api/health")) {
         return false;
     }
 
@@ -3399,7 +3399,7 @@ void postOTAProgress(const char* otaStatus, int progress, const String& targetVe
     http.setConnectTimeout(5000);
     http.setTimeout(5000);
     
-    if (!http.begin(sslNet, "https://kakuproject-98943358924.asia-south1.run.app/api/ota/progress")) {
+    if (!http.begin(sslNet, "https://kakuproject-90943350924.asia-south1.run.app/api/ota/progress")) {
         Serial.printf("⚠️ OTA progress report: connect failed (%s %d%%)\n", otaStatus, progress);
         return;
     }
@@ -3689,7 +3689,7 @@ void notifyServerStartupComplete() {
     http.setConnectTimeout(2000);  // Reduced from 5s
     http.setTimeout(2000);  // Reduced from 5s
     
-    const char* startupUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/device/startup-complete";
+    const char* startupUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/device/startup-complete";
     
     if (!http.begin(sslNet, String(startupUrl))) {
         Serial.println("❌ Failed to connect for startup notification");
@@ -3917,7 +3917,7 @@ void sendImageData(String imageBase64) {
     http.setTimeout(10000);  // Reduced from 30s
     http.setConnectTimeout(5000);  // Reduced from 10s
 
-    if (!http.begin(client, "https://kakuproject-98943358924.asia-south1.run.app/upload")) {
+    if (!http.begin(client, "https://kakuproject-90943350924.asia-south1.run.app/upload")) {
         Serial.println("❌ HTTP begin failed");
         free(binary_data);
         isUploadingImage = false;
@@ -3979,7 +3979,7 @@ void sendAudioData(String audioBase64) {
     http.setConnectTimeout(5000);
     http.setTimeout(15000);  // Shorter timeout for smaller audio
     
-    if (!http.begin("https://kakuproject-98943358924.asia-south1.run.app/upload-audio")) {
+    if (!http.begin("https://kakuproject-90943350924.asia-south1.run.app/upload-audio")) {
         Serial.println("❌ Failed to connect to audio server");
         return;
     }
@@ -4214,7 +4214,7 @@ void sendCleanRequest() {
     http.setReuse(true);
     http.setTimeout(5000);
     
-    String cleanUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/pet/clean";
+    String cleanUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/clean";
     Serial.println("🧹 Sending cleaning request to server...");
     
     if (!http.begin(sslNet, cleanUrl)) {
@@ -4260,7 +4260,7 @@ void sendCoverHappyRequest() {
     http.setReuse(true);
     http.setTimeout(5000);
     
-    String url = "https://kakuproject-98943358924.asia-south1.run.app/api/pet/cover-happy";
+    String url = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/cover-happy";
     if (!http.begin(sslNet, url)) return;
     
     http.addHeader("Content-Type", "application/json");
@@ -4285,7 +4285,7 @@ void sendInjectRequest() {
     http.setReuse(true);
     http.setTimeout(5000);
     
-    String injectUrl = "https://kakuproject-98943358924.asia-south1.run.app/api/pet/inject";
+    String injectUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/pet/inject";
     Serial.println("💉 Sending injection request to server...");
     
     if (!http.begin(sslNet, injectUrl)) {

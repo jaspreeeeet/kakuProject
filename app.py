@@ -17,15 +17,15 @@ from threading import Thread, Lock
 import base64
 import hashlib
 
-# AI Vision imports - Salesforce BLIP Model (Better Captions)
+# AI Vision imports - Google ViT Model (Vision Transformer)
+# All imports are optional — server works without them
 try:
     from PIL import Image
     import numpy as np
-    from transformers import BlipProcessor, BlipForConditionalGeneration
-    import torch
+    from transformers import ViTForImageClassification, ViTFeatureExtractor
     AI_AVAILABLE = True
     AI_MODE = "FULL"
-    print("✅ Salesforce BLIP AI Vision model enabled (FULL mode)")
+    print("✅ Google ViT AI Vision model enabled (FULL mode)")
 except ImportError as e:
     print(f"⚠️ Full AI modules not available: {e}")
     try:
@@ -173,24 +173,12 @@ ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif'}
 
 # AI Configuration
 if AI_AVAILABLE:
-    # Use relative path for cache to avoid local Windows paths failing on Cloud Run
-    CACHE_DIR = os.path.join(os.getcwd(), ".cache", "huggingface")
+    CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "huggingface")
     os.environ['HUGGINGFACE_HUB_CACHE'] = CACHE_DIR
     os.makedirs(CACHE_DIR, exist_ok=True)
-    
-    # Determine device: GPU if available, otherwise CPU
-    try:
-        AI_DEVICE = 0 if torch.cuda.is_available() else -1
-        if torch.cuda.is_available():
-            print(f"✅ GPU available: {torch.cuda.get_device_name(0)}")
-        else:
-            print("⚠️ GPU not available, using CPU for AI analysis")
-    except:
-        AI_DEVICE = -1
-        print("⚠️ Using CPU for AI analysis")
-    
-    # Initialize AI model (lazy loading)
-    ai_classifier = None
+    AI_DEVICE = -1  # CPU only on Cloud Run
+    print("⚠️ Using CPU for AI analysis")
+    ai_classifier = None  # Lazy loaded on first use
 
 # ================= ORIENTATION DETECTION (Server-side) =================
 def detect_device_orientation(ax, ay, az):
@@ -244,24 +232,24 @@ def detect_device_orientation(ax, ay, az):
         print(f"❌ Error in orientation detection: {e}")
         return "UNKNOWN", 0.0
 
-# BLIP AI Model components
-blip_processor = None
-blip_model = None
+# ViT AI Model components (lazy loaded)
+vit_extractor = None
+vit_model = None
 
 def analyze_image_with_ai(image_data, is_path=False):
-    """Analyze image using BLIP model or basic fallback"""
-    global blip_processor, blip_model
+    """Analyze image using Google ViT model or basic fallback"""
+    global vit_extractor, vit_model
     
     if not AI_AVAILABLE:
         return "AI analysis not available"
     
     try:
         if AI_MODE == "FULL":
-            if blip_model is None:
-                print("Loading Salesforce BLIP model...")
-                blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-                blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-                print("Salesforce BLIP model loaded successfully")
+            if vit_model is None:
+                print("Loading Google ViT model...")
+                vit_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224")
+                vit_model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
+                print("✅ Google ViT model loaded successfully")
             
             # Load image from path or binary data
             if is_path:
@@ -270,29 +258,31 @@ def analyze_image_with_ai(image_data, is_path=False):
                 import io
                 image = Image.open(io.BytesIO(image_data)).convert('RGB')
             
-            # Generate caption
-            inputs = blip_processor(image, return_tensors="pt")
-            out = blip_model.generate(**inputs)
-            caption = blip_processor.decode(out[0], skip_special_tokens=True)
+            # Classify image
+            inputs = vit_extractor(images=image, return_tensors="pt")
+            outputs = vit_model(**inputs)
+            logits = outputs.logits
+            predicted_class_idx = logits.argmax(-1).item()
+            label = vit_model.config.id2label[predicted_class_idx]
             
-            print(f"🤖 BLIP Caption: {caption}")
-            return caption.capitalize()
+            print(f"🤖 ViT Classification: {label}")
+            return label.replace('_', ' ').capitalize()
             
         else:
-            # Basic fallback logic (existing PIL logic could be here)
-            return "Basic analysis: Image received"
+            # Basic fallback — just acknowledge the image
+            return "Image received"
             
     except Exception as e:
         print(f"AI Analysis error: {e}")
         import traceback
         traceback.print_exc()
-        return f"Image analysis failed: {str(e)[:100]}..."
+        return f"Analysis failed: {str(e)[:80]}"
 
 # ================= BACKGROUND AI ANALYSIS (ENABLED) =================
 def analyze_and_store_image_blob(reading_id, image_blob):
-    """Background task: Run BLIP analysis and store result"""
+    """Background task: Run ViT analysis and store result"""
     try:
-        print(f"🤖 [BACKGROUND] Starting BLIP analysis for reading #{reading_id}...")
+        print(f"🤖 [BACKGROUND] Starting ViT analysis for reading #{reading_id}...")
         ai_caption = analyze_image_with_ai(image_blob, is_path=False)
         
         # Store in database
@@ -3442,8 +3432,7 @@ def default_error_handler(e):
 # Initialize database at module level so it works under both:
 # 1. Direct execution (python app.py)
 # 2. Gunicorn import (gunicorn app:app)
-if not init_database():
-    print('❌ Database initialization failed!')
+init_database()
 
 if __name__ == '__main__':
     print('🚀 Starting ESP32 Dashboard Server...')
@@ -3458,6 +3447,11 @@ if __name__ == '__main__':
     print('   • POST /api/pet/play-result')
     print('   • POST /api/pet/menu')
     print('')
+    
+    # Initialize database
+    if not init_database():
+        print('❌ Database initialization failed. Exiting.')
+        exit(1)
     
     try:
         # Run the app with stability-focused configuration
