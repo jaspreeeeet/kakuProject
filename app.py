@@ -183,10 +183,15 @@ def detect_device_orientation(ax, ay, az):
         
         # Z-axis dominant (device flat or inverted)
         if abs_az > abs_ax and abs_az > abs_ay:
-            if az > 7.0:
+            if az > 6.0:
                 return "NEUTRAL", confidence      # Device flat, Z pointing up
-            if az < -7.0:
+            if az < -6.0:
+                print(f"🔄 Server Detected: INVERTED (az={az:.2f})")
                 return "INVERTED", confidence     # Device flipped, Z pointing down
+        
+        # Diagnostic log for "near" misses (if it didn't trigger NEUTRAL or INVERTED)
+        if abs_az > 5.0:
+             print(f"📐 Near Vertical/Invert: ax={ax:.1f}, ay={ay:.1f}, az={az:.1f}")
         
         # X-axis dominant (device tilted left/right)
         if abs_ax > abs_ay and abs_ax > abs_az:
@@ -1037,7 +1042,7 @@ def get_emotion_priority(state):
     Return highest priority emotion based on server-side sensory analysis.
     Basic physiology (Hunger, Sleep) is now handled LOCALLY on the ESP32 hardware.
     
-    Priority: SENSORY_OVERRIDE (AI) > SICK > POOP > IDLE (Local Control)
+    Priority: SENSORY_OVERRIDE (AI) > LOCAL (Hardware SICK/POOP/HUNGER priority)
     """
     # 1️⃣ Check for locked Sensory Overrides (AI captioning, voice detection, motion triggers)
     if state.get('emotion_expire_at'):
@@ -1054,14 +1059,8 @@ def get_emotion_priority(state):
         if expire_time and expire_time > datetime.now():
             return state['current_emotion']  # Keep locked sensory emotion (e.g., HAPPY after food detected)
     
-    # 2️⃣ Major Status Events (Server still manages these via DB/Web flow)
-    if state.get('is_sick') or state.get('sick_pending'):
-        return 'SICK'
-    
-    if state.get('has_poop') or state.get('poop_present'):
-        return 'POOP'
-    
-    # 3️⃣ NO OVERRIDE: Return LOCAL to signal ESP32 to follow local hardware logic
+    # 2️⃣ Yield to Hardware: Return LOCAL to signal ESP32 to follow its own local prioritized rules
+    # (Hardware handles SICK > POOP > HUNGER locally)
     return 'LOCAL'
 
 # ==================== PET ENGINE BACKGROUND THREAD ====================

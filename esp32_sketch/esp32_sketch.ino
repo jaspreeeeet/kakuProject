@@ -2640,21 +2640,39 @@ void detectHardwareStep() {
 }
 
 // Returns true when device lies flat (no significant X/Y tilt)
-// Check if the device is inverted (face-down) to trigger sleep
-bool isDeviceNeutral() {
-    if (!mpuAvailable) return false;
-    int16_t ax, ay, az;
-    mpu.getAcceleration(&ax, &ay, &az);
-    float gx = ax / 16384.0f;
-    float gy = ay / 16384.0f;
-    float gz = az / 16384.0f;
+const char* detectDirection(SensorData data) {
+    // Use calibrated accelerometer values in m/s²
+    float ax = data.accel_x;
+    float ay = data.accel_y;
+    float az = data.accel_z;
     
-    // Inverted (face-down) means Z is around -1.0g
-    // Check if flat-ish (abs X/Y < 0.3) and facing down (Z < -0.7)
-    if (abs(gx) < 0.3f && abs(gy) < 0.3f && gz < -0.7f) {
-        return true;
+    // 🧠 LOCAL ORIENTATION ENGINE (Restored from legacy patterns)
+    float abs_ax = abs(ax);
+    float abs_ay = abs(ay);
+    float abs_az = abs(az);
+    
+    if (abs_az > abs_ax && abs_az > abs_ay) {
+        if (az < -7.0f) return "INVERTED";
+        if (az > 7.0f) return "NEUTRAL";
     }
-    return false;
+    
+    if (abs_ax > abs_ay && abs_ax > abs_az) {
+        if (ax > 5.0f) return "RIGHT";
+        if (ax < -5.0f) return "LEFT";
+    }
+    
+    if (abs_ay > abs_ax && abs_ay > abs_az) {
+        if (ay > 5.0f) return "BACK";
+        if (ay < -5.0f) return "FORWARD";
+    }
+    
+    return "NEUTRAL";
+}
+
+// Check if device is in inverted state (face-down)
+bool isDeviceInverted() {
+    SensorData data = readAllSensors();
+    return (strcmp(detectDirection(data), "INVERTED") == 0);
 }
 
 // 2-frame sleeping animation (frame-timed)
@@ -3003,20 +3021,16 @@ void displayPetAnimation() {
             drawHomeIcon();
         }
         
-        // Draw food icon at bottom-right corner (shows when pet is hungry)
-        // Priority: SICK > POOP > HUNGER — food hidden if poop or sick active (same as sick/poop mutual exclusion)
-        if (iconsAllowed && showFoodIcon && !showPoopIcon && !showSickIcon && currentScreenType == "MAIN") {
-            drawFoodIcon();
-        }
-        
-        // Draw poop icon at bottom-right corner (shows when poop present)
-        if (iconsAllowed && showPoopIcon && currentScreenType == "MAIN") {
-            drawPoopIcon();
-        }
-        
-        // Draw sick/heart icon at bottom-right (only when poop cleared but was ignored >15 min)
-        if (iconsAllowed && showSickIcon && !showPoopIcon && currentScreenType == "MAIN") {
-            drawSickIcon();
+        // Draw status icons at bottom-right corner
+        // STRICT MUTUAL EXCLUSION (Priority: SICK > POOP > HUNGER)
+        if (iconsAllowed && currentScreenType == "MAIN") {
+            if (showSickIcon) {
+                drawSickIcon();
+            } else if (showPoopIcon) {
+                drawPoopIcon();
+            } else if (showFoodIcon) {
+                drawFoodIcon();
+            }
         }
         
         // Only animation - no text
@@ -3266,7 +3280,7 @@ void loop() {
     //   • network paused, WiFi modem sleeps, display shows sleeping animation
     //   • sleep seconds accumulated and sent with the next sensor upload on wake
     if (!isDeviceSleeping) {
-        if (isDeviceNeutral()) {
+        if (isDeviceInverted()) {
             if (neutralStartTime == 0) neutralStartTime = millis();
             if (millis() - neutralStartTime >= NEUTRAL_SLEEP_TIMEOUT) {
                 isDeviceSleeping = true;
@@ -3277,8 +3291,8 @@ void loop() {
             neutralStartTime = 0;  // reset if device is moved
         }
     } else {
-        // Already sleeping — wake on any meaningful movement
-        if (!isDeviceNeutral()) {
+        // Already sleeping — wake on any meaningful movement (non-inverted state)
+        if (!isDeviceInverted()) {
             uint32_t sleptSec = (millis() - sleepStartTime) / 1000;
             accumulatedSleepSec += sleptSec;
             Serial.printf("⏰ Woke up — slept %us (banked: %us)\n", sleptSec, accumulatedSleepSec);
@@ -3669,6 +3683,12 @@ SensorData readAllSensors() {
     
     // Add local pet state for server mirroring
     // Note: SensorData struct needs these fields or we send via JSON in sendSensorDataOnly
+    // Log orientation for debugging (if not neutral/face-up)
+    if (abs(data.accel_x) > 3.0 || abs(data.accel_y) > 3.0 || data.accel_z < 5.0) {
+        Serial.printf("📐 Orientation Check: AX=%.1f, AY=%.1f, AZ=%.1f\n", 
+                      data.accel_x, data.accel_y, data.accel_z);
+    }
+    
     return data;
 }
 
