@@ -17,17 +17,17 @@ from threading import Thread, Lock
 import base64
 import hashlib
 
-# AI Vision imports - Google ViT Model
+# AI Vision imports - Salesforce BLIP Model (Better Captions)
 try:
     from PIL import Image
     import numpy as np
-    from transformers import pipeline
+    from transformers import BlipProcessor, BlipForConditionalGeneration
     import torch
     AI_AVAILABLE = True
     AI_MODE = "FULL"
-    print("✅ Google ViT AI Vision model enabled (FULL mode with transformers)")
+    print("✅ Salesforce BLIP AI Vision model enabled (FULL mode)")
 except ImportError as e:
-    print(f"⚠️ FullAI modules not available: {e}")
+    print(f"⚠️ Full AI modules not available: {e}")
     try:
         from PIL import Image
         import numpy as np
@@ -209,155 +209,125 @@ def detect_device_orientation(ax, ay, az):
         print(f"❌ Error in orientation detection: {e}")
         return "UNKNOWN", 0.0
 
-# AI Analysis Function with fallback
-def analyze_image_with_ai(image_path):
-    """Analyze image using AI models or basic image analysis as fallback"""
-    global ai_classifier
+# BLIP AI Model components
+blip_processor = None
+blip_model = None
+
+def analyze_image_with_ai(image_data, is_path=False):
+    """Analyze image using BLIP model or basic fallback"""
+    global blip_processor, blip_model
     
     if not AI_AVAILABLE:
-        return "AI analysis not available - missing dependencies"
+        return "AI analysis not available"
     
     try:
         if AI_MODE == "FULL":
-            # Full AI Model Analysis (Google ViT)
-            if ai_classifier is None:
-                print("Loading Google ViT vision model...")
-                ai_classifier = pipeline(
-                    "image-classification",
-                    model="google/vit-base-patch16-224",
-                    device=AI_DEVICE
-                )
-                print("Google ViT model loaded successfully")
+            if blip_model is None:
+                print("Loading Salesforce BLIP model...")
+                blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+                blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+                print("Salesforce BLIP model loaded successfully")
             
-            # Load and analyze image
-            image = Image.open(image_path)
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Get AI predictions
-            results = ai_classifier(image, top_k=5)
-            
-            # Generate natural caption 
-            top_result = results[0]
-            confidence = top_result['score'] * 100
-            main_label = top_result['label']
-            
-            # Check for people-related content
-            people_keywords = ['people', 'person', 'group', 'crowd', 'team', 'family', 'human', 'face', 'portrait']
-            people_detected = any(keyword in result['label'].lower() for result in results for keyword in people_keywords)
-            
-            # Generate natural, descriptive caption
-            if people_detected:
-                caption = f"This image shows a group of people (detected with {confidence:.1f}% confidence)"
+            # Load image from path or binary data
+            if is_path:
+                image = Image.open(image_data).convert('RGB')
             else:
-                main_label_clean = main_label.replace('_', ' ').replace('-', ' ')
-                caption = f"This image shows {main_label_clean} (detected with {confidence:.1f}% confidence)"
+                import io
+                image = Image.open(io.BytesIO(image_data)).convert('RGB')
             
-            return caption
+            # Generate caption
+            inputs = blip_processor(image, return_tensors="pt")
+            out = blip_model.generate(**inputs)
+            caption = blip_processor.decode(out[0], skip_special_tokens=True)
             
-        elif AI_MODE == "BASIC":
-            # Basic Image Analysis (PIL + Visual Features)
-            image = Image.open(image_path)
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
+            print(f"🤖 BLIP Caption: {caption}")
+            return caption.capitalize()
             
-            # Get image properties
-            width, height = image.size
-            img_array = np.array(image)
+        else:
+            # Basic fallback logic (existing PIL logic could be here)
+            return "Basic analysis: Image received"
             
-            # Basic color analysis
-            mean_colors = np.mean(img_array, axis=(0, 1))
-            color_variance = np.var(img_array.reshape(-1, 3), axis=0)
-            total_variance = np.sum(color_variance)
-            brightness = np.mean(img_array)
-            
-            # Basic feature detection
-            aspect_ratio = width / height
-            
-            # Generate descriptive caption based on visual features
-            caption_parts = []
-            
-            # Resolution description
-            if width * height > 100000:
-                caption_parts.append("high-resolution")
-            else:
-                caption_parts.append("compact")
-            
-            # Color description
-            if brightness > 200:
-                caption_parts.append("bright")
-            elif brightness < 80:
-                caption_parts.append("dark")
-            else:
-                caption_parts.append("well-lit")
-            
-            # Orientation
-            if aspect_ratio > 1.5:
-                caption_parts.append("landscape-oriented")
-            elif aspect_ratio < 0.7:
-                caption_parts.append("portrait-oriented")
-            else:
-                caption_parts.append("square-oriented")
-            
-            # Color richness
-            if total_variance > 8000:
-                caption_parts.append("colorful scene")
-            elif total_variance > 3000:
-                caption_parts.append("moderately colorful image")
-            else:
-                caption_parts.append("simple colored image")
-            
-            # Dominant color
-            r, g, b = mean_colors
-            if r > g and r > b:
-                caption_parts.append("with reddish tones")
-            elif g > r and g > b:
-                caption_parts.append("with greenish tones")
-            elif b > r and b > g:
-                caption_parts.append("with bluish tones")
-            
-            caption = f"This is a {' '.join(caption_parts[:4])} captured from ESP32 camera"
-            
-            # Add technical details
-            caption += f" (Resolution: {width}×{height}, Brightness: {brightness:.0f}/255)"
-            
-            return caption
-    
     except Exception as e:
         print(f"AI Analysis error: {e}")
         import traceback
         traceback.print_exc()
         return f"Image analysis failed: {str(e)[:100]}..."
 
-# ❌ DISABLED: Background AI analysis (file-based, not compatible with database-only storage)
-# ================= BACKGROUND AI ANALYSIS (NON-BLOCKING) =================
-# def analyze_and_store_image(filepath, filename):
-#     """Background task: Run AI analysis and store result without blocking server"""
-#     try:
-#         print(f"🤖 [BACKGROUND] Starting AI analysis for {filename}...")
-#         ai_caption = analyze_image_with_ai(filepath)
-#         
-#         # Store in database
-#         with db_lock:
-#             conn = get_db_connection()
-#             if conn:
-#                 try:
-#                     cursor = conn.cursor()
-#                     cursor.execute('''
-#                         UPDATE sensor_readings 
-#                         SET image_filename = ?, ai_caption = ?
-#                         WHERE id = (SELECT MAX(id) FROM sensor_readings WHERE accel_x IS NOT NULL)
-#                     ''', (filename, ai_caption))
-#                     
-#                     if cursor.rowcount == 0:
-#                         cursor.execute('''
-#                             INSERT INTO sensor_readings (device_id, image_filename, ai_caption, timestamp)
-#                             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-#                         ''', ('ESP32_CAM', filename, ai_caption))
-#                     
-#                     conn.commit()
-#                     print(f"✅ [BG] Stored AI caption in database")
-#                 except sqlite3.Error as e:
+# ================= BACKGROUND AI ANALYSIS (ENABLED) =================
+def analyze_and_store_image_blob(reading_id, image_blob):
+    """Background task: Run BLIP analysis and store result"""
+    try:
+        print(f"🤖 [BACKGROUND] Starting BLIP analysis for reading #{reading_id}...")
+        ai_caption = analyze_image_with_ai(image_blob, is_path=False)
+        
+        # Store in database
+        with db_lock:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE sensor_readings 
+                        SET ai_caption = ?
+                        WHERE id = ?
+                    ''', (ai_caption, reading_id))
+                    conn.commit()
+                    print(f"✅ [BG] Stored BLIP caption for reading #{reading_id}")
+                except sqlite3.Error as e:
+                    print(f"❌ [BG] DB Error: {e}")
+                finally:
+                    conn.close()
+    except Exception as e:
+        print(f"❌ [BG] Analysis failed: {e}")
+
+def sync_pet_state_to_db(device_id, pet_state):
+    """Update mirrored pet state in database using hardware-authoritative values"""
+    with db_lock:
+        conn = get_db_connection()
+        if not conn: return
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO pet_state (
+                    device_id, age, level, xp, uptime, 
+                    health, hunger, thirst, happiness, energy, discipline,
+                    is_sick, has_poop, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    age=excluded.age, level=excluded.level, xp=excluded.xp, uptime=excluded.uptime,
+                    health=excluded.health, hunger=excluded.hunger, thirst=excluded.thirst,
+                    happiness=excluded.happiness, energy=excluded.energy, discipline=excluded.discipline,
+                    is_sick=excluded.is_sick, has_poop=excluded.has_poop, updated_at=CURRENT_TIMESTAMP
+                WHERE device_id = ?
+            ''', (
+                device_id, pet_state.get('age', 0), pet_state.get('level', 1), 
+                pet_state.get('xp', 0), pet_state.get('uptime', 0),
+                pet_state.get('health', 100), pet_state.get('hunger', 0), 
+                pet_state.get('thirst', 0), pet_state.get('happiness', 100), 
+                pet_state.get('energy', 100), pet_state.get('discipline', 100),
+                pet_state.get('is_sick', 0), pet_state.get('has_poop', 0), device_id
+            ))
+            
+            # Legacy simple update for single-row setup
+            cursor.execute('''
+                UPDATE pet_state SET 
+                    age=?, level=?, xp=?, uptime=?, 
+                    health=?, hunger=?, thirst=?, happiness=?, energy=?, discipline=?,
+                    is_sick=?, has_poop=?, updated_at=CURRENT_TIMESTAMP
+                WHERE device_id = ? OR id = (SELECT MIN(id) FROM pet_state)
+            ''', (
+                pet_state.get('age', 0), pet_state.get('level', 1), 
+                pet_state.get('xp', 0), pet_state.get('uptime', 0),
+                pet_state.get('health', 100), pet_state.get('hunger', 0), 
+                pet_state.get('thirst', 0), pet_state.get('happiness', 100), 
+                pet_state.get('energy', 100), pet_state.get('discipline', 100),
+                pet_state.get('is_sick', 0), pet_state.get('has_poop', 0), device_id
+            ))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"❌ Pet Sync Error: {e}")
+        finally:
+            conn.close()
 #                     print(f"❌ [BG] Database error: {e}")
 #                 finally:
 #                     conn.close()
@@ -649,46 +619,47 @@ def init_database():
                 ''', ('ESP32_001', 'pet', 1, 'CHILD', 'system_init'))
                 print("✅ Initialized default OLED display state in database")
             
-            # 🐾 Create pet_state table for Tamagotchi AI cloud brain
+            # 🐾 Create pet_state table (Authoritative Mirror for ESP32)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS pet_state (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     device_id TEXT DEFAULT 'ESP32_001',
                     
                     age INTEGER DEFAULT 0,
-                    stage TEXT DEFAULT 'INFANT',
+                    level INTEGER DEFAULT 1,
+                    xp INTEGER DEFAULT 0,
+                    uptime INTEGER DEFAULT 0,
                     
                     health INTEGER DEFAULT 100,
                     hunger INTEGER DEFAULT 0,
-                    cleanliness INTEGER DEFAULT 100,
+                    thirst INTEGER DEFAULT 0,
                     happiness INTEGER DEFAULT 100,
                     energy INTEGER DEFAULT 100,
+                    discipline INTEGER DEFAULT 100,
                     
-                    poop_present BOOLEAN DEFAULT 0,
-                    poop_timestamp DATETIME,
-                    digestion_due_time DATETIME,
+                    is_sick BOOLEAN DEFAULT 0,
+                    has_poop BOOLEAN DEFAULT 0,
                     
                     current_menu TEXT DEFAULT 'MAIN',
                     current_emotion TEXT DEFAULT 'IDLE',
-                    emotion_expire_at DATETIME,
                     
-                    action_lock BOOLEAN DEFAULT 0,
                     version INTEGER DEFAULT 0,
-                    
-                    last_feed_time DATETIME,
-                    last_play_time DATETIME,
-                    last_sleep_time DATETIME,
-                    last_clean_time DATETIME,
-                    last_age_increment DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_hunger_update DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    sick_pending BOOLEAN DEFAULT 0,
-                    discipline INTEGER DEFAULT 100,
-                    
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            print("✅ Created pet_state table")
+            
+            # Ensure new columns exist for existing databases
+            try:
+                cursor.execute('ALTER TABLE pet_state ADD COLUMN level INTEGER DEFAULT 1')
+                cursor.execute('ALTER TABLE pet_state ADD COLUMN xp INTEGER DEFAULT 0')
+                cursor.execute('ALTER TABLE pet_state ADD COLUMN thirst INTEGER DEFAULT 0')
+                cursor.execute('ALTER TABLE pet_state ADD COLUMN uptime INTEGER DEFAULT 0')
+                cursor.execute('ALTER TABLE pet_state ADD COLUMN is_sick BOOLEAN DEFAULT 0')
+                cursor.execute('ALTER TABLE pet_state ADD COLUMN has_poop BOOLEAN DEFAULT 0')
+            except sqlite3.OperationalError:
+                pass # Columns already exist
+                
+            print("✅ Created/Updated pet_state table")
             
             # Game rewards table for catch-food game
             cursor.execute('''
@@ -945,30 +916,32 @@ def get_pet_state(device_id='ESP32_001'):
             col_names = [desc[0] for desc in cursor.description]
             row = dict(zip(col_names, result))
             
-            return {
+            state = {
                 'age': row.get('age', 0),
-                'stage': row.get('stage', 'INFANT'),
+                'level': row.get('level', 1),
+                'xp': row.get('xp', 0),
                 'health': row.get('health', 100),
                 'hunger': row.get('hunger', 0),
-                'cleanliness': row.get('cleanliness', 100),
+                'thirst': row.get('thirst', 0),
                 'happiness': row.get('happiness', 100),
                 'energy': row.get('energy', 100),
-                'poop_present': bool(row.get('poop_present', 0)),
-                'poop_timestamp': row.get('poop_timestamp'),
+                'discipline': row.get('discipline', 100),
+                'is_sick': bool(row.get('is_sick', 0)),
+                'has_poop': bool(row.get('has_poop', 0)),
+                'uptime': row.get('uptime', 0),
                 'current_menu': row.get('current_menu', 'MAIN'),
                 'current_emotion': row.get('current_emotion', 'IDLE'),
                 'emotion_expire_at': row.get('emotion_expire_at'),
-                'action_lock': bool(row.get('action_lock', 0)),
-                'version': row.get('version', 0),
-                'digestion_due_time': row.get('digestion_due_time'),
-                'last_feed_time': row.get('last_feed_time'),
-                'last_play_time': row.get('last_play_time'),
-                'last_sleep_time': row.get('last_sleep_time'),
-                'last_clean_time': row.get('last_clean_time'),
-                'last_age_increment': row.get('last_age_increment'),
-                'sick_pending': bool(row['sick_pending']) if row.get('sick_pending') is not None else False,
-                'discipline': row.get('discipline', 100),
             }
+            
+            # Derive stage from age (matching hardware logic)
+            age = state['age']
+            if age < 3: state['stage'] = 'INFANT'
+            elif age < 10: state['stage'] = 'CHILD'
+            elif age < 25: state['stage'] = 'ADULT'
+            else: state['stage'] = 'OLD'
+            
+            return state
         finally:
             conn.close()
 
@@ -985,16 +958,10 @@ def get_emotion_priority(state):
             return state['current_emotion']  # Keep locked emotion
     
     # Priority-based emotion selection
-    if state['health'] < 40:
+    if state.get('is_sick'):
         return 'SICK'
     
-    if state['poop_present']:
-        # Check poop age
-        if state.get('poop_timestamp'):
-            from datetime import datetime, timedelta
-            poop_time = datetime.fromisoformat(state['poop_timestamp']) if isinstance(state['poop_timestamp'], str) else state['poop_timestamp']
-            if poop_time and (datetime.now() - poop_time) > timedelta(minutes=15):
-                return 'SICK'  # Ignored poop → sick
+    if state.get('has_poop'):
         return 'POOP'
     
     if state['hunger'] > 70:
@@ -1017,189 +984,16 @@ def get_emotion_priority(state):
 
 def pet_engine_cycle():
     """
-    Background thread that runs every 60 seconds
-    Handles hunger, digestion, poop, sickness, age progression, and emotion updates
+    ⚠️ LEGACY - Server-side pet logic is now DISABLED.
+    The ESP32 Hardware is now the source of truth for all physiological state.
     """
-    while True:
-        try:
-            time.sleep(60)  # Run every 60 seconds
-            
-            device_id = 'ESP32_001'
-            state = get_pet_state(device_id)
-            
-            if not state:
-                print("⚠️ Pet engine: No pet state found")
-                continue
-            
-            # Skip if action is locked
-            if state['action_lock']:
-                print("🔒 Pet engine: Skipping update (action locked)")
-                continue
-            
-            print(f"\n🐾 Pet Engine Cycle - Age: {state['age']} | Stage: {state['stage']} | Health: {state['health']}")
-            
-            updates = {}
-            
-            # 1️⃣ AGE PROGRESSION (every 24 hours with catch-up for offline periods)
-            if state.get('last_age_increment'):
-                from datetime import datetime, timedelta
-                last_age_time = datetime.fromisoformat(state['last_age_increment']) if isinstance(state['last_age_increment'], str) else state['last_age_increment']
-                
-                if last_age_time:
-                    # Calculate how many 24-hour periods have passed (handles offline server)
-                    hours_passed = (datetime.now() - last_age_time).total_seconds() / 3600
-                    age_increments = int(hours_passed / 24)
-                    
-                    if age_increments > 0:
-                        updates['age'] = state['age'] + age_increments
-                        updates['last_age_increment'] = datetime.now().isoformat()
-                        
-                        if age_increments > 1:
-                            print(f"🎂 Age catch-up! Server was offline for {age_increments} days")
-                        print(f"🎂 Age increased by {age_increments}: {state['age']} → {updates['age']}")
-                        
-                        # Update stage based on age
-                        new_age = updates['age']
-                        if new_age <= 5:
-                            updates['stage'] = 'INFANT'
-                        elif new_age <= 10:
-                            updates['stage'] = 'CHILD'
-                        elif new_age <= 17:
-                            updates['stage'] = 'ADULT'
-                        elif new_age <= 21:
-                            updates['stage'] = 'OLD'
-                        else:
-                            updates['stage'] = 'END'
-                        
-                        print(f"📊 Stage updated: {state['stage']} → {updates['stage']}")
-            
-            # 2️⃣ HUNGER ENGINE (every 360 seconds = 6 minutes)
-            from datetime import datetime, timedelta
-            
-            last_hunger = state.get('last_hunger_update')
-            if last_hunger:
-                if isinstance(last_hunger, str):
-                    last_hunger = datetime.fromisoformat(last_hunger)
-                time_since_hunger = (datetime.now() - last_hunger).total_seconds()
-            else:
-                time_since_hunger = 361  # Force first update
-            
-            if time_since_hunger >= 360:  # 6 minutes passed
-                # ⏸️ PAUSE hunger when poop is present OR sick_pending (sick not treated yet)
-                poop_active = updates.get('poop_present', state.get('poop_present', 0))
-                sick_active = updates.get('sick_pending', state.get('sick_pending', 0))
-                
-                if poop_active or sick_active:
-                    updates['last_hunger_update'] = datetime.now().isoformat()  # Reset timer but don't increase
-                    print(f"⏸️  Hunger PAUSED (poop={bool(poop_active)}, sick_pending={bool(sick_active)})")
-                else:
-                    hunger_increase = 0
-                    current_stage = updates.get('stage', state['stage'])
-                    
-                    if current_stage == 'INFANT':
-                        hunger_increase = 15
-                    elif current_stage == 'CHILD':
-                        hunger_increase = 10
-                    elif current_stage == 'ADULT':
-                        hunger_increase = 8
-                    elif current_stage == 'OLD':
-                        hunger_increase = 12
-                    
-                    # Apply hunger increase (scaled for 360-second / 6-minute intervals)
-                    updates['hunger'] = min(100, state['hunger'] + (hunger_increase / 5))  # 30min / 6min = 5 cycles
-                    updates['last_hunger_update'] = datetime.now().isoformat()
-                    print(f"🍽️  Hunger increased by {hunger_increase / 5:.1f}: {state['hunger']} → {updates['hunger']}")
-            else:
-                print(f"⏳ Hunger update in {360 - time_since_hunger:.0f} seconds")
-            
-            # 3️⃣ DIGESTION & POOP ENGINE
-            if state.get('digestion_due_time'):
-                from datetime import datetime
-                due_time = datetime.fromisoformat(state['digestion_due_time']) if isinstance(state['digestion_due_time'], str) else state['digestion_due_time']
-                if due_time and datetime.now() > due_time and not state['poop_present']:
-                    updates['poop_present'] = 1
-                    updates['poop_timestamp'] = datetime.now().isoformat()
-                    updates['digestion_due_time'] = None
-                    print("💩 Poop appeared (digestion complete)")
-            
-            # Check poop age for health penalty + sick_pending flag
-            if state['poop_present'] and state.get('poop_timestamp'):
-                from datetime import datetime, timedelta
-                poop_time = datetime.fromisoformat(state['poop_timestamp']) if isinstance(state['poop_timestamp'], str) else state['poop_timestamp']
-                if poop_time and (datetime.now() - poop_time) > timedelta(minutes=15):
-                    updates['health'] = max(0, state['health'] - 10)
-                    updates['sick_pending'] = 1  # Mark sick — icon shows after poop is cleared
-                    print(f"🤢 Poop ignored >15min → Health penalty + sick_pending set: health {state['health']} → {updates['health']}")
-            
-            # 4️⃣ ENERGY DECAY
-            updates['energy'] = max(0, state['energy'] - 2)
-            
-            # 7️⃣ HEALTH DRAIN — not fed for 30 min (not sick, just gradual health drop)
-            # Also updates discipline based on rule compliance
-            from datetime import datetime, timedelta
-            discipline_delta = 0
-            all_rules_ok = True
-            
-            last_feed = state.get('last_feed_time')
-            if last_feed:
-                if isinstance(last_feed, str):
-                    last_feed = datetime.fromisoformat(last_feed)
-                mins_since_feed = (datetime.now() - last_feed).total_seconds() / 60
-                if mins_since_feed > 30:
-                    # Health drain (not sick — just -2 per cycle)
-                    updates['health'] = max(0, updates.get('health', state['health']) - 2)
-                    discipline_delta -= 2
-                    all_rules_ok = False
-                    print(f"🍝 Not fed for {mins_since_feed:.0f} min → health -2, discipline -2")
-            
-            # Discipline: poop not cleaned >15 min
-            if state['poop_present'] and state.get('poop_timestamp'):
-                poop_t = datetime.fromisoformat(state['poop_timestamp']) if isinstance(state['poop_timestamp'], str) else state['poop_timestamp']
-                if poop_t and (datetime.now() - poop_t) > timedelta(minutes=15):
-                    discipline_delta -= 3
-                    all_rules_ok = False
-                    print(f"💩 Poop not cleaned >15 min → discipline -3")
-            
-            # Discipline: not played with for >2 hours
-            last_play = state.get('last_play_time')
-            if last_play:
-                if isinstance(last_play, str):
-                    last_play = datetime.fromisoformat(last_play)
-                if (datetime.now() - last_play).total_seconds() / 3600 > 2:
-                    discipline_delta -= 1
-                    all_rules_ok = False
-                    print(f"🎮 Not played >2 hrs → discipline -1")
-            
-            # Positive discipline: all rules followed this cycle
-            if all_rules_ok:
-                discipline_delta += 1
-            
-            if discipline_delta != 0:
-                updates['discipline'] = max(0, min(100, state.get('discipline', 100) + discipline_delta))
-                print(f"📊 Discipline: {state.get('discipline', 100)} → {updates['discipline']} (delta {discipline_delta:+})") 
-            
-            # 5️⃣ SICKNESS (OLD age random sickness)
-            if current_stage == 'OLD':
-                import random
-                if random.random() < 0.01:  # 1% chance per cycle
-                    updates['health'] = max(0, state['health'] - 5)
-                    print(f"🤒 Random sickness (OLD age): Health {state['health']} → {updates['health']}")
-            
-            # 8️⃣ SICK_PENDING — set if health drops below 40 (any cause: hunger drain, poop, OLD)
-            # This triggers ❤️ sick icon on ESP32 and hides food icon until injection given
-            current_health = updates.get('health', state['health'])
-            if current_health < 40 and not state.get('sick_pending', 0):
-                updates['sick_pending'] = 1
-                print(f"🤒 Health < 40 → sick_pending set (health={current_health})")
-            
-            # 6️⃣ EMOTION PRIORITY UPDATE
-            merged_state = {**state, **updates}
-            new_emotion = get_emotion_priority(merged_state)
-            
-            # Only update emotion if not locked
-            if not state.get('emotion_expire_at') or datetime.fromisoformat(state['emotion_expire_at']) <= datetime.now():
-                updates['current_emotion'] = new_emotion
-                print(f"😊 Emotion updated: {state['current_emotion']} → {new_emotion}")
+    return
+    # [LEGACY CODE COMMENTED OUT TO PREVENT LINTS]
+    # while True:
+    #     try:
+    #         time.sleep(60)
+    #         device_id = 'ESP32_001'
+    #         ...
             
             # Apply updates atomically
             if updates:
@@ -1406,7 +1200,15 @@ def receive_sensor_data():
         accel_y = data.get('accel_y', 0)
         accel_z = data.get('accel_z', 0)
         
-        # 👣 STEP COUNT from ESP32 hardware (ESP32 runs stoss/barrier detection)
+        total_steps_batch = int(data.get('step_count', 0))
+        
+        # 🐾 AUTHORITATIVE PET STATE from Hardware
+        pet_state_data = data.get('pet_state')
+        if pet_state_data:
+            print(f"🛰️ Syncing pet state from hardware: {pet_state_data}")
+            sync_pet_state_to_db(data.get('device_id', 'ESP32_001'), pet_state_data)
+
+        # 👣 STEP COUNT from ESP32 hardware
         import time
         current_time = time.time()
 
@@ -1635,26 +1437,12 @@ def upload_binary_image():
                 conn.close()
         print(f"✅ Image saved to DATABASE ONLY (id={image_id}, {len(image_data)} bytes)")
         
-        # NEW: FEED THE PET - The captured frame IS the food!
-        # Reduce hunger immediately when image is received
-        state = get_pet_state(device_id)
-        if state:
-            from datetime import datetime, timedelta
-            
-            # Feed logic (same as /api/pet/feed)
-            updates = {
-                'hunger': max(0, state['hunger'] - 40),
-                'last_feed_time': datetime.now().isoformat(),
-                'last_hunger_update': datetime.now().isoformat(),  # CRITICAL: Reset hunger timer to prevent immediate re-increase
-                'digestion_due_time': (datetime.now() + timedelta(minutes=30)).isoformat(),
-                'current_emotion': 'EATING',
-                'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat()
-            }
-            
-            result = update_pet_state_atomic(device_id, updates)
-            
-            if result:
-                print(f"🍔 Pet auto-fed via image upload: hunger {state['hunger']} → {result['hunger']}")
+        # TRIGGER BACKGROUND AI ANALYSIS (BLIP MODEL)
+        socketio.start_background_task(analyze_and_store_image_blob, image_id, image_data)
+        print(f"🤖 [UPLOAD] Triggered background AI analysis for image #{image_id}")
+        
+        # NOTE: PET FEEDING logic moved to LOCAL HARDWARE for instant response.
+        # Server mirroring happens via /api/sensor-data sync.
         
         # Return database-based URL for frontend
         db_url = f'/api/image/{image_id}'
@@ -2453,121 +2241,56 @@ def get_oled_display():
                 'current_menu': 'MAIN',
                 'health': 100,
                 'hunger': 0,
-                'cleanliness': 100,
+                'thirst': 0,
+                'level': 1,
+                'xp': 0,
                 'happiness': 100,
                 'energy': 100,
-                'poop_present': False,
+                'has_poop': False,
+                'is_sick': False,
                 'age': 0,
-                'show_home_icon': True,  # Show home icon on main screen
-                'show_food_icon': False,
-                'show_poop_icon': False,
+                'mode': 'INITIALIZING',
                 'screen_type': 'MAIN',
                 'is_walking': False,
-                'mode': 'AUTOMATIC',
-                'message': 'Default INFANT state'
+                'message': 'No pet state found, using default'
             }), 200
         
-        # Map stage to animation_id for backward compatibility
+        # Backward compatibility for dashboard and legacy ESP32 code
         stage_to_id = {
-            'INFANT': 0,
-            'CHILD': 1,
-            'ADULT': 2,
-            'OLD': 3,
-            'END': 3
+            'INFANT': 0, 'CHILD': 1, 'ADULT': 2, 'OLD': 3, 'END': 3
         }
         
-        animation_id = stage_to_id.get(pet['stage'], 0)
-        current_menu = pet['current_menu']
-        play_eating = False
-        play_cleaning = False
-        
-        # Handle menu state transitions based on pet state
-        if pet['hunger'] <= 50 and current_menu == 'FOOD_MENU':
-            # Pet just ate - trigger eating animation
-            play_eating = True
-            with db_lock:
-                conn = get_db_connection()
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute('UPDATE pet_state SET current_emotion = ? WHERE device_id = ?', ('EATING', device_id))
-                        conn.commit()
-                        pet = get_pet_state(device_id)
-                    except Exception as e:
-                        print(f'Error updating emotion: {e}')
-                    finally:
-                        conn.close()
-        
-        elif pet['current_emotion'] == 'EATING' and current_menu == 'FOOD_MENU':
-            # Eating animation finished, return to MAIN
-            current_menu = 'MAIN'
-            with db_lock:
-                conn = get_db_connection()
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute('UPDATE pet_state SET current_menu = ?, current_emotion = ? WHERE device_id = ?', 
-                                     ('MAIN', 'IDLE', device_id))
-                        conn.commit()
-                        pet = get_pet_state(device_id)
-                    except Exception as e:
-                        print(f'Error updating menu: {e}')
-                    finally:
-                        conn.close()
-        
-        elif not pet['poop_present'] and current_menu == 'TOILET_MENU':
-            # Pet is clean, return to MAIN
-            current_menu = 'MAIN'
-            with db_lock:
-                conn = get_db_connection()
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute('UPDATE pet_state SET current_menu = ?, current_emotion = ? WHERE device_id = ?', 
-                                     ('MAIN', 'IDLE', device_id))
-                        conn.commit()
-                        pet = get_pet_state(device_id)
-                    except Exception as e:
-                        print(f'Error updating menu: {e}')
-                    finally:
-                        conn.close()
-        
-        print(f'🤖 OLED AUTOMATIC: {pet["stage"]} | Emotion:{pet["current_emotion"]} | Menu:{current_menu} | Health:{pet["health"]} Hunger:{pet["hunger"]}')
-        
-        return jsonify({
+        response_data = {
             'status': 'success',
-            'animation_id': animation_id,
-            'animation_name': pet['stage'],
-            'stage': pet['stage'],
-            'emotion': pet['current_emotion'],
-            'current_emotion': pet['current_emotion'],
-            'current_menu': current_menu,
+            'animation_id': stage_to_id.get(pet.get('stage', 'INFANT'), 0),
+            'stage': pet.get('stage', 'INFANT'),
+            'emotion': pet.get('current_emotion', 'IDLE'),
+            'current_emotion': pet.get('current_emotion', 'IDLE'),
             'health': pet['health'],
             'hunger': pet['hunger'],
-            'cleanliness': pet['cleanliness'],
+            'thirst': pet.get('thirst', 0),
+            'level': pet.get('level', 1),
+            'xp': pet.get('xp', 0),
             'happiness': pet['happiness'],
             'energy': pet['energy'],
-            'poop_present': pet['poop_present'],
+            'has_poop': pet.get('has_poop', False),
+            'is_sick': pet.get('is_sick', False),
             'age': pet['age'],
-            'discipline': pet.get('discipline', 100),
-            'mode': 'AUTOMATIC',
-            'is_hungry': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
-            'show_home_icon': current_menu == 'MAIN',
-            'show_food_icon': pet['hunger'] > 70 and not pet['poop_present'] and not pet.get('sick_pending', False),
-            'show_poop_icon': pet['poop_present'],
-            'show_sick_icon': bool(pet.get('sick_pending', False)) and not pet['poop_present'],
-            'show_play_icon': _should_show_play_icon(pet),
-            'screen_type': current_menu,
-            'play_eating_animation': play_eating,
-            'play_cleaning_animation': play_cleaning,
-            'is_walking': (time.time() - last_walking_time) < WALKING_ACTIVE_WINDOW,
-            'ota_update': ota_enabled_devices.get(device_id, False),
-            'message': f'Auto: {pet["stage"]} | Emotion: {pet["current_emotion"]}'
-        }), 200
-    
+            'mode': 'HARDWARE (Authoritative)',
+            'current_menu': pet.get('current_menu', 'MAIN'),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Determine specific animation overrides (if any)
+        animation_id = response_data['animation_id']
+        current_menu = response_data['current_menu']
+        
+        return jsonify(response_data), 200
+        
     except Exception as e:
         print(f'❌ Error getting OLED display: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 
 @app.route('/api/oled-display/set', methods=['POST'])

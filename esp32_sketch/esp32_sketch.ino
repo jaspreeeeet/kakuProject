@@ -62,6 +62,7 @@ bool phoneConnectedToAP = false;
 #define WIFI_CONNECT_RETRIES 3       // Retries per credential set
 const char* AP_SSID = "KAKU_SETUP";
 const char* AP_PASS = "12345678";
+Preferences petPrefs;
 
 // ================= API =================
 const char* serverUrl = "https://kakuproject-90943350924.asia-south1.run.app/api/sensor-data";  // Google Cloud Run Production
@@ -269,6 +270,66 @@ PROGMEM const uint8_t walking_animation[WALKING_FRAME_COUNT][256] = {
   }
 };
 
+// ================= PET CORE ENGINE (LOCAL) =================
+struct PetLocalState {
+    int hunger = 0;       // 0-100 (100 = starving)
+    int thirst = 0;       // 0-100 (100 = parched)
+    int health = 100;     // 0-100
+    int energy = 100;     // 0-100
+    int happiness = 100;  // 0-100
+    int discipline = 100; // 0-100
+    int xp = 0;           // Cumulative experience
+    int level = 1;        // Pet level
+    int ageInt = 0;       // Integer age in days
+    uint32_t totalUptimeSecs = 0; // Cumulative active life time
+    bool isSick = false;
+    bool hasPoop = false;
+    uint32_t version = 0; // State version for conflict resolution
+};
+
+PetLocalState g_petState;
+unsigned long lastPhysioTick = 0;
+#define PHYSIO_TICK_MS 60000 // Run physiology logic every 60 seconds
+
+void savePetState() {
+    petPrefs.begin("pet_state", false);
+    petPrefs.putInt("hunger", g_petState.hunger);
+    petPrefs.putInt("thirst", g_petState.thirst);
+    petPrefs.putInt("health", g_petState.health);
+    petPrefs.putInt("energy", g_petState.energy);
+    petPrefs.putInt("happiness", g_petState.happiness);
+    petPrefs.putInt("discipline", g_petState.discipline);
+    petPrefs.putInt("xp", g_petState.xp);
+    petPrefs.putInt("level", g_petState.level);
+    petPrefs.putInt("ageInt", g_petState.ageInt);
+    petPrefs.putUInt("uptime", g_petState.totalUptimeSecs);
+    petPrefs.putBool("isSick", g_petState.isSick);
+    petPrefs.putBool("hasPoop", g_petState.hasPoop);
+    petPrefs.putInt("version", g_petState.version);
+    petPrefs.end();
+    Serial.println("💾 Pet state saved to NVS");
+}
+
+void loadPetState() {
+    petPrefs.begin("pet_state", true); // Read-only
+    g_petState.hunger = petPrefs.getInt("hunger", 0);
+    g_petState.thirst = petPrefs.getInt("thirst", 0);
+    g_petState.health = petPrefs.getInt("health", 100);
+    g_petState.energy = petPrefs.getInt("energy", 100);
+    g_petState.happiness = petPrefs.getInt("happiness", 100);
+    g_petState.discipline = petPrefs.getInt("discipline", 100);
+    g_petState.xp = petPrefs.getInt("xp", 0);
+    g_petState.level = petPrefs.getInt("level", 1);
+    g_petState.ageInt = petPrefs.getInt("ageInt", 0);
+    g_petState.totalUptimeSecs = petPrefs.getUInt("uptime", 0);
+    g_petState.isSick = petPrefs.getBool("isSick", false);
+    g_petState.hasPoop = petPrefs.getBool("hasPoop", false);
+    g_petState.version = petPrefs.getInt("version", 0);
+    petPrefs.end();
+    Serial.printf("📂 Pet state loaded: Age %d, Lvl %d, XP %d\n", 
+                  g_petState.ageInt, g_petState.level, g_petState.xp);
+}
+
 // ================= OLED ANIMATION DISPLAY =================
 enum PetAge { INFANT = 0, CHILD = 1, ADULT = 2, OLD = 3 };
 PetAge petAge = INFANT;             // Default to INFANT - server manages aging
@@ -289,12 +350,29 @@ String currentEmotion = "IDLE";    // Current emotion from server (IDLE, CRY, SA
 bool justFinishedEating = false;    // Show GOOD! text after eating animation
 unsigned long eatingFinishTime = 0; // When eating finished (for GOOD! text timer)
 
-// Pet state tracking — updated every 5s from server via NET_OLED
-String currentMode = "AUTOMATIC";  // Mode from server (informational only — menu controlled locally)
-bool petIsHungry = false;          // Hunger status from server (hunger > 70)
-int  petAgeInt   = 0;              // Actual integer age from server (increments every 24 h)
-int  petHappiness = 100;           // Happiness (0-100) from server, shown as bar
-int  petDiscipline = 100;          // Discipline (0-100) from server, shown as bar
+// Pet state tracking — updated from LOCAL g_petState
+String currentMode = "HARDWARE";   // Now controlled locally
+bool petIsHungry = false;          // Local hunger > 70
+int  petAgeInt   = 0;              // Day count
+int  petHappiness = 100;           // 0-100 bar
+int  petDiscipline = 100;          // 0-100 bar
+
+// Helper to sync struct to legacy globals used by UI
+void syncLocalStateToUI() {
+    petAgeInt = g_petState.ageInt;
+    petHappiness = g_petState.happiness;
+    petDiscipline = g_petState.discipline;
+    petIsHungry = (g_petState.hunger > 70);
+    petIsSick = g_petState.isSick;
+    showPoopIcon = g_petState.hasPoop;
+    showFoodIcon = petIsHungry;
+    
+    // Map integer age to PetAge enum for animations
+    if (petAgeInt <= 5) petAge = INFANT;
+    else if (petAgeInt <= 10) petAge = CHILD;
+    else if (petAgeInt <= 17) petAge = ADULT;
+    else petAge = OLD;
+}
 
 // Right-tilt hold for menu switching
 bool holdingRightForMenu = false;            // Track right-tilt hold for menu cycling
@@ -1224,6 +1302,9 @@ void setup() {
     sslNet.setTimeout(10);
 
     // Start dedicated network task on Core 1 (HTTP only, queue-driven)
+    loadPetState();
+    syncLocalStateToUI();
+    
     xTaskCreatePinnedToCore(
         networkTask,         // Task function
         "Network",           // Task name
@@ -2345,6 +2426,13 @@ void checkFeedingGesture() {
             Serial.println("📸 Triggering food image capture!");
             Serial.println("🍴 Starting eating animation!");
             
+            // Local state update: Feeding reduces hunger and gives XP
+            g_petState.hunger = max(0, g_petState.hunger - 40);
+            g_petState.xp += 20;
+            g_petState.energy = min(100, g_petState.energy + 5);
+            savePetState();
+            syncLocalStateToUI();
+            
             // Queue image send
             uint8_t req = NET_IMAGE;
             xQueueSend(networkQueue, &req, 0);
@@ -2386,6 +2474,13 @@ void checkCleaningGesture() {
             holdingLeftForCleaning = false;
             
             Serial.println("🧹 Starting cleaning animation!");
+
+            // Local state update: Cleaning clears poop and gives happiness
+            g_petState.hasPoop = false;
+            g_petState.happiness = min(100, g_petState.happiness + 20);
+            g_petState.xp += 10;
+            savePetState();
+            syncLocalStateToUI();
             
             // Send cleaning request to server
             uint8_t req = NET_CLEAN;
@@ -2434,6 +2529,12 @@ void playInjectionAnimation() {
                 medicineAnimLoopCount = 0;
                 currentInjectionFrame = 0;
                 Serial.println("✅ Medicine given! Pet is now healthy!");
+                
+                // Local state update: Medicine cures sickness and restores health
+                g_petState.isSick = false;
+                g_petState.health = min(100, g_petState.health + 30);
+                savePetState();
+                syncLocalStateToUI();
                 
                 // Notify server: sick_pending cleared, hunger resumes
                 uint8_t req = NET_INJECT;
@@ -2521,13 +2622,15 @@ void detectHardwareStep() {
 }
 
 // Returns true when device lies flat (no significant X/Y tilt)
+// Check if the device is inverted (face-down) to trigger sleep
 bool isDeviceNeutral() {
-    if (!mpuAvailable) return false;
-    int16_t ax, ay, az;
-    mpu.getAcceleration(&ax, &ay, &az);
-    float x = ax / 16384.0f;
-    float y = ay / 16384.0f;
-    return (abs(x) < 0.3f && abs(y) < 0.3f);
+    // We check the calibrated Z-axis. 
+    // If Z is around -9.8 (or -1.0g), it's face down.
+    // Normalized accel_z in sketch is m/s², so -9.81 * 0.7 approx -7
+    if (abs(calibrated_ax) < 3.0f && abs(calibrated_ay) < 3.0f && calibrated_az < -7.0f) {
+        return true;
+    }
+    return false;
 }
 
 // 2-frame sleeping animation (frame-timed)
@@ -2963,6 +3066,76 @@ void networkTask(void *parameter) {
     }
 }
 
+// ================= PHYSIOLOGY ENGINE (LOCAL) =================
+void handlePhysiology() {
+    if (millis() - lastPhysioTick < PHYSIO_TICK_MS) return;
+    lastPhysioTick = millis();
+    
+    Serial.println("💓 Physiology Tick (60s)");
+    
+    // 1️⃣ Uptime & Aging
+    g_petState.totalUptimeSecs += 60;
+    int newAgeDays = g_petState.totalUptimeSecs / 86400; // 24 hours
+    if (newAgeDays > g_petState.ageInt) {
+        g_petState.ageInt = newAgeDays;
+        Serial.printf("🎂 Pet aged! Now %d days old\n", g_petState.ageInt);
+        // Level up on birthday
+        g_petState.level++;
+        g_petState.xp += 100;
+    }
+    
+    // 2️⃣ Hunger & Thirst Engine (Stage dependent)
+    int hungerDecay = 8;
+    int thirstDecay = 5;
+    if (petAge == INFANT) { hungerDecay = 15; thirstDecay = 10; }
+    else if (petAge == CHILD) { hungerDecay = 10; thirstDecay = 7; }
+    else if (petAge == OLD) { hungerDecay = 12; thirstDecay = 8; }
+    
+    // Increment stats
+    g_petState.hunger = min(100, g_petState.hunger + hungerDecay);
+    g_petState.thirst = min(100, g_petState.thirst + thirstDecay);
+    g_petState.energy = max(0, g_petState.energy - 2);
+    
+    // 3️⃣ Health Engine
+    int healthPenalty = 0;
+    if (g_petState.hunger > 80) healthPenalty += 5;
+    if (g_petState.thirst > 80) healthPenalty += 5;
+    if (g_petState.energy < 20) healthPenalty += 2;
+    if (g_petState.hasPoop) healthPenalty += 10;
+    
+    // Random sickness for OLD
+    if (petAge == OLD && random(0, 100) < 1) { // 1% chance
+        g_petState.isSick = true;
+        Serial.println("🤒 Old pet became sick");
+    }
+    
+    if (g_petState.isSick) healthPenalty += 15;
+    
+    g_petState.health = max(0, g_petState.health - healthPenalty);
+    
+    // Poop generation (30 min after feed)
+    // Simplified: 5% chance per tick if hunger < 50 and no poop
+    if (!g_petState.hasPoop && g_petState.hunger < 50 && random(0, 100) < 5) {
+        g_petState.hasPoop = true;
+        Serial.println("💩 Pet pooped!");
+    }
+    
+    // Discipline penalty for neglect
+    if (g_petState.hunger > 90 || g_petState.hasPoop) {
+        g_petState.discipline = max(0, g_petState.discipline - 2);
+    } else {
+        g_petState.discipline = min(100, g_petState.discipline + 1);
+    }
+    
+    // XP Growth
+    if (g_petState.health > 80) g_petState.xp += 2;
+    else g_petState.xp += 1;
+    
+    // Sync and Persist
+    syncLocalStateToUI();
+    savePetState();
+}
+
 void loop() {
     // ── PROVISIONING MODE GUARD ────────────────────────────────────────────
     // If in AP provisioning mode, only serve web config page — skip everything else
@@ -2971,6 +3144,9 @@ void loop() {
         delay(10);
         return;
     }
+    
+    // Handle core pet physiology autonomously
+    handlePhysiology();
     
     // This loop runs on Core 1 - handles sensors + queue dispatching ONLY
     // HTTP calls moved to networkTask on Core 1 — no blocking here
@@ -3072,7 +3248,7 @@ void loop() {
             if (millis() - neutralStartTime >= NEUTRAL_SLEEP_TIMEOUT) {
                 isDeviceSleeping = true;
                 sleepStartTime   = millis();
-                Serial.println("😴 Neutral 30s → SLEEP MODE (network paused)");
+                Serial.println("😴 Inverted 30s → SLEEP MODE (network paused)");
             }
         } else {
             neutralStartTime = 0;  // reset if device is moved
@@ -3467,6 +3643,8 @@ SensorData readAllSensors() {
     data.has_new_image = false;
     data.has_new_audio = false;
     
+    // Add local pet state for server mirroring
+    // Note: SensorData struct needs these fields or we send via JSON in sendSensorDataOnly
     return data;
 }
 
@@ -3516,19 +3694,18 @@ void getOLEDDisplayFromServer() {
                 String animationName = g_oledDoc["animation_name"] | "UNKNOWN";
                 
                 if (newAnimationId >= 0 && newAnimationId <= 3) {
-                    if ((int)petAge != newAnimationId) {
-                        petAge = (PetAge)newAnimationId;
-                        Serial.printf("🎬 Animation: %s (id: %d)\n", animationName.c_str(), newAnimationId);
-                    }
+                    // SERVER OVERRIDE DISABLED: We trust local age calculation
+                    // petAge = (PetAge)newAnimationId; 
                 }
             }
             
-            // Parse actual integer age from server
+            // Parse actual integer age from server (Now mirrored back from server)
             if (g_oledDoc.containsKey("age")) {
                 int newAge = g_oledDoc["age"].as<int>();
-                if (petAgeInt != newAge) {
-                    petAgeInt = newAge;
-                    Serial.printf("🗓️  Pet age updated: %d yrs\n", petAgeInt);
+                // Only sync if local age is behind server (e.g., first sync or remote reset)
+                if (g_petState.ageInt < newAge) {
+                    g_petState.ageInt = newAge;
+                    syncLocalStateToUI();
                 }
             }
             
@@ -4340,6 +4517,21 @@ void sendAllDataToServer(SensorData data) {
         jsonDoc["audio_data"] = data.audio_data_b64;
         Serial.println("🎵 Including audio data in payload");
     }
+
+    // Add local pet state (Primary Authority)
+    JsonObject pet = jsonDoc.createNestedObject("pet_state");
+    pet["hunger"] = g_petState.hunger;
+    pet["thirst"] = g_petState.thirst;
+    pet["health"] = g_petState.health;
+    pet["energy"] = g_petState.energy;
+    pet["happiness"] = g_petState.happiness;
+    pet["discipline"] = g_petState.discipline;
+    pet["xp"] = g_petState.xp;
+    pet["level"] = g_petState.level;
+    pet["age"] = g_petState.ageInt;
+    pet["is_sick"] = g_petState.isSick;
+    pet["has_poop"] = g_petState.hasPoop;
+    pet["uptime"] = g_petState.totalUptimeSecs;
     
     String payload;
     serializeJson(jsonDoc, payload);

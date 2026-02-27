@@ -404,6 +404,69 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* Debug Panel Styles */
+        .debug-card {
+            background: #2d3436;
+            color: #dfe6e9;
+            border-left: 5px solid #fdcb6e;
+        }
+
+        .debug-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 15px;
+        }
+
+        .debug-item {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .debug-label {
+            font-size: 0.75em;
+            color: #b2bec3;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .debug-value {
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: bold;
+            font-size: 1.1em;
+            color: #fdcb6e;
+        }
+
+        .checklist-card {
+            background: #fdfdfd;
+            border: 2px dashed #667eea;
+        }
+
+        .checklist-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .checklist-item:last-child {
+            border-bottom: none;
+        }
+
+        .checklist-item input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checklist-text {
+            font-size: 0.95em;
+            color: #2d3436;
+        }
     </style>
 </head>
 
@@ -591,6 +654,91 @@
                     </div>
                     <div style="font-size: 0.9em; margin-top: 5px; opacity: 0.9;">
                         Confidence: <span id="orientationConfidence">0</span>%
+                    </div>
+                </div>
+            </div>
+            <!-- Hardware Testing & Debug Card -->
+            <div class="card debug-card" style="grid-column: 1 / -1;">
+                <h2><span class="card-icon">🛠️</span> Hardware Engine Debug</h2>
+                <div class="sensor-label">Internal physiological state and motion detection diagnostics</div>
+                <div class="debug-grid">
+                    <div class="debug-item">
+                        <div class="debug-label">Hunger</div>
+                        <div class="debug-value" id="debugHunger">0%</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Health</div>
+                        <div class="debug-value" id="debugHealth">0%</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Happiness</div>
+                        <div class="debug-value" id="debugHappy">0%</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Discipline</div>
+                        <div class="debug-value" id="debugDisc">0%</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Energy</div>
+                        <div class="debug-value" id="debugEnergy">0%</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Stage</div>
+                        <div class="debug-value" id="debugStage">INFANT</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Poop Present</div>
+                        <div class="debug-value" id="debugPoop">NO</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Is Sick</div>
+                        <div class="debug-value" id="debugSick">NO</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Walking Stoss</div>
+                        <div class="debug-value" id="debugStoss">0.0000</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Age (Days)</div>
+                        <div class="debug-value" id="debugAge">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Testing Checklist Card -->
+            <div class="card checklist-card" style="grid-column: 1 / -1;">
+                <h2><span class="card-icon">📋</span> Hardware Readiness Checklist</h2>
+                <div class="sensor-label">Check these off as you verify your hardware's behavior</div>
+                <div id="testingChecklist">
+                    <div class="checklist-item">
+                        <input type="checkbox" id="check-sleep" onchange="saveChecklist()">
+                        <label for="check-sleep" class="checklist-text"><b>Sleep Trigger</b>: Does flipping the device
+                            face-down trigger "Sleeping"?</label>
+                    </div>
+                    <div class="checklist-item">
+                        <input type="checkbox" id="check-walking" onchange="saveChecklist()">
+                        <label for="check-walking" class="checklist-text"><b>Motion Detect</b>: Does shaking the device
+                            increment the step counter and show "Walking"?</label>
+                    </div>
+                    <div class="checklist-item">
+                        <input type="checkbox" id="check-feed" onchange="saveChecklist()">
+                        <label for="check-feed" class="checklist-text"><b>Feeding</b>: Does Left Tilt in Food menu
+                            capture and send an image (Eating animation)?</label>
+                    </div>
+                    <div class="checklist-item">
+                        <input type="checkbox" id="check-poop" onchange="saveChecklist()">
+                        <label for="check-poop" class="checklist-text"><b>Cleaning</b>: Does Left Tilt in Toilet menu
+                            clear the poop icon?</label>
+                    </div>
+                    <div class="checklist-item">
+                        <input type="checkbox" id="check-age" onchange="saveChecklist()">
+                        <label for="check-age" class="checklist-text"><b>Aging</b>: Does Uptime increase correctly in
+                            the debug panel?</label>
+                    </div>
+                    <div class="checklist-item">
+                        <input type="checkbox" id="check-sync" onchange="saveChecklist()">
+                        <label for="check-sync" class="checklist-text"><b>Emotion Sync</b>: Does the server emotion
+                            (SICK/POOP/HAPPY) match the dashboard label?</label>
                     </div>
                 </div>
             </div>
@@ -787,7 +935,26 @@
                                 'OLD': '👴'
                             }[data.stage] || '🐣';
 
-                            petStatusDiv.textContent = `${stageEmoji} ${data.stage} | Health: ${data.health}% | Hunger: ${data.hunger}% | Happiness: ${data.happiness}%`;
+                            const sickIcon = data.is_sick ? ' 🤒' : '';
+                            const poopIcon = data.has_poop ? ' 💩' : '';
+
+                            petStatusDiv.innerHTML = `
+                                <div style="font-size: 1.2em; margin-bottom: 5px;">
+                                    ${stageEmoji} <b>Level ${data.level}</b> (${data.stage}) ${sickIcon}${poopIcon}
+                                </div>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 0.9em;">
+                                    <div>❤️ Health: ${data.health}%</div>
+                                    <div>🍔 Hunger: ${data.hunger}%</div>
+                                    <div>💧 Thirst: ${data.thirst}%</div>
+                                    <div>💩 Clean: ${data.cleanliness}%</div>
+                                    <div style="grid-column: span 2; border-top: 1px solid rgba(0,0,0,0.05); padding-top: 5px; margin-top: 5px; color: #666;">
+                                        🕒 Age: <b>${data.age || 0}</b> Days
+                                    </div>
+                                </div>
+                            `;
+
+                            // Trigger debug panel updates here too
+                            updateDebugDashboard(data);
                         }
                     } else {
                         // Server returned error
@@ -1081,6 +1248,11 @@
             if (data.calibrated_ay !== undefined) document.getElementById('calAY').textContent = data.calibrated_ay.toFixed(3);
             if (data.calibrated_az !== undefined) document.getElementById('calAZ').textContent = data.calibrated_az.toFixed(3);
 
+            // Update Walking Stoss in Debug panel
+            if (data.stoss !== undefined) {
+                document.getElementById('debugStoss').textContent = data.stoss.toFixed(5);
+            }
+
             // Update confidence bar and text
             const confidence = data.confidence || 0;
             const confidenceEl = document.getElementById('orientationConfidence');
@@ -1114,6 +1286,27 @@
                         orientationCard.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
                         break;
                 }
+            }
+        }
+
+        // Save and Load Checklist State
+        function saveChecklist() {
+            const checks = ['check-sleep', 'check-walking', 'check-feed', 'check-poop', 'check-age', 'check-sync'];
+            const state = {};
+            checks.forEach(id => {
+                state[id] = document.getElementById(id).checked;
+            });
+            localStorage.setItem('kaku_checklist', JSON.stringify(state));
+        }
+
+        function loadChecklist() {
+            const saved = localStorage.getItem('kaku_checklist');
+            if (saved) {
+                const state = JSON.parse(saved);
+                Object.keys(state).forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.checked = state[id];
+                });
             }
         }
 
@@ -1394,7 +1587,21 @@
                     loadLatestAIImage();
                 }
             }, 3000);
+
+            loadChecklist();
         });
+
+        function updateDebugDashboard(data) {
+            document.getElementById('debugHunger').textContent = (data.hunger || 0) + '%';
+            document.getElementById('debugHealth').textContent = (data.health || 0) + '%';
+            document.getElementById('debugHappy').textContent = (data.happiness || 0) + '%';
+            document.getElementById('debugDisc').textContent = (data.discipline || 0) + '%';
+            document.getElementById('debugEnergy').textContent = (data.energy || 0) + '%';
+            document.getElementById('debugStage').textContent = data.stage || 'INFANT';
+            document.getElementById('debugPoop').textContent = data.has_poop ? '💩 YES' : 'NO';
+            document.getElementById('debugSick').textContent = data.is_sick ? '🤒 YES' : 'NO';
+            document.getElementById('debugAge').textContent = data.age || 0;
+        }
 
         // Function to load the latest image
 
