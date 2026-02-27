@@ -906,7 +906,7 @@
 
     <script src="https://cdn.socket.io/4.5.4/socket.io.js"></script>
     <script>
-        const API_BASE = "https://kakuproject-90943350924.asia-south1.run.app";  // Google Cloud Run Production
+        const API_BASE = "https://kakuproject-98943358924.asia-south1.run.app";  // Google Cloud Run Production
         // const API_BASE = "http://localhost:5000";  // Local server (for testing)
 
         let startTime = Date.now();
@@ -1096,7 +1096,7 @@
 
         function initWebSocket() {
             connectionAttempts++;
-            
+
             socket = io(API_BASE, {
                 transports: ["polling", "websocket"],  // Try polling first (more reliable on Cloud Run)
                 withCredentials: true,
@@ -1205,7 +1205,7 @@
                 console.log('⚠️ Socket.IO disconnected');
                 useWebSocket = false;
                 updateConnectionStatus(false);
-                
+
                 // Start polling as fallback
                 if (!pollingInterval) {
                     console.log('🔄 Starting HTTP polling fallback...');
@@ -1217,7 +1217,7 @@
                 console.error('❌ Socket.IO connection error:', error.message);
                 useWebSocket = false;
                 updateConnectionStatus(false);
-                
+
                 // After max attempts, switch to polling permanently
                 if (connectionAttempts >= MAX_CONNECTION_ATTEMPTS) {
                     console.log('⚠️ Max WebSocket attempts reached, switching to HTTP polling mode');
@@ -1233,21 +1233,21 @@
         // HTTP Polling fallback for when WebSocket fails
         function startPolling() {
             if (pollingInterval) return;  // Already polling
-            
+
             console.log('📡 Starting HTTP polling mode (updates every 3 seconds)');
             updateConnectionStatus(true, 'polling');
-            
+
             // Initial fetch
             getOLEDDisplay();
             getStepCounter();
             loadLatestAIImage();
-            
+
             // Poll every 3 seconds
             pollingInterval = setInterval(() => {
                 getOLEDDisplay();
                 getStepCounter();
                 loadLatestAIImage();
-                
+
                 // Also fetch latest sensor data
                 fetch(API_BASE + '/api/latest?limit=1')
                     .then(r => r.json())
@@ -1265,7 +1265,7 @@
                                 sound_data: latest.sound_data,
                                 chip_temperature: latest.chip_temperature
                             });
-                            
+
                             // Update orientation if available
                             if (latest.device_orientation) {
                                 updateOrientationUI({

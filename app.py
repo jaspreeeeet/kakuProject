@@ -128,9 +128,33 @@ def add_performance_headers(response):
     # Enable HTTP keep-alive to reuse connections
     response.headers['Connection'] = 'keep-alive'
     response.headers['Keep-Alive'] = 'timeout=30, max=100'
+    # Ensure CORS for all responses including errors
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
+    
     # Reduce overhead
     if 'Content-Type' not in response.headers:
         response.headers['Content-Type'] = 'application/json'
+    return response
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Global error handler for all unhandled exceptions"""
+    # Log the full traceback
+    import traceback
+    error_details = traceback.format_exc()
+    print(f"🔥 CRITICAL ERROR: {str(e)}")
+    print(error_details)
+    
+    # Create JSON response
+    response = jsonify({
+        "status": "error",
+        "message": str(e),
+        "type": e.__class__.__name__,
+        "traceback": error_details if app.debug else "Enable debug mode for full traceback"
+    })
+    response.status_code = 500
     return response
 
 # Database configuration
@@ -444,16 +468,21 @@ def get_image(image_id):
 db_lock = Lock()
 
 def get_db_connection():
-    """Get thread-safe database connection with error handling"""
+    """Create a thread-safe database connection"""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+        # Check if DB_PATH exists, if not, it will be created by sqlite3.connect
+        if not os.path.exists(DB_PATH):
+            print(f"⚠️ Database not found at {DB_PATH}, will be created.")
+            
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA cache_size=10000;")
         conn.execute("PRAGMA temp_store=memory;")
         return conn
-    except sqlite3.Error as e:
-        print(f"Database connection error: {e}")
+    except Exception as e:
+        print(f"❌ DATABASE CONNECTION ERROR: {e}")
         return None
 
 # Initialize database
@@ -1013,41 +1042,41 @@ def pet_engine_cycle():
     ⚠️ LEGACY - Server-side pet logic is now DISABLED.
     The ESP32 Hardware is now the source of truth for all physiological state.
     """
-    return
+    pass
     # [LEGACY CODE COMMENTED OUT TO PREVENT LINTS]
     # while True:
     #     try:
     #         time.sleep(60)
     #         device_id = 'ESP32_001'
     #         ...
-            
-            # Apply updates atomically
-            if updates:
-                result = update_pet_state_atomic(device_id, updates)
-                if result:
-                    print(f"✅ Pet engine cycle complete")
-                    
-                    # Broadcast update to frontend
-                    socketio.start_background_task(lambda: socketio.emit('pet_state_update', {
-                        'stage': result['stage'],
-                        'emotion': result['current_emotion'],
-                        'health': result['health'],
-                        'hunger': result['hunger'],
-                        'cleanliness': result['cleanliness'],
-                        'happiness': result['happiness'],
-                        'energy': result['energy'],
-                        'poop_present': result['poop_present'],
-                        'age': result['age']
-                    }))
-                else:
-                    print("❌ Pet engine update failed")
-            else:
-                print("No updates needed")
-                    
-        except Exception as e:
-            print(f"❌ Pet engine error: {e}")
-            import traceback
-            traceback.print_exc()
+    #         
+    #         # Apply updates atomically
+    #         if updates:
+    #             result = update_pet_state_atomic(device_id, updates)
+    #             if result:
+    #                 print(f"✅ Pet engine cycle complete")
+    #                 
+    #                 # Broadcast update to frontend
+    #                 socketio.start_background_task(lambda: socketio.emit('pet_state_update', {
+    #                     'stage': result['stage'],
+    #                     'emotion': result['current_emotion'],
+    #                     'health': result['health'],
+    #                     'hunger': result['hunger'],
+    #                     'cleanliness': result['cleanliness'],
+    #                     'happiness': result['happiness'],
+    #                     'energy': result['energy'],
+    #                     'poop_present': result['poop_present'],
+    #                     'age': result['age']
+    #                 }))
+    #             else:
+    #                 print("❌ Pet engine update failed")
+    #         else:
+    #             print("No updates needed")
+    #                 
+    #     except Exception as e:
+    #         print(f"❌ Pet engine error: {e}")
+    #         import traceback
+    #         traceback.print_exc()
 
 # Start pet engine thread
 pet_engine_thread = Thread(target=pet_engine_cycle, daemon=True)
