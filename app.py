@@ -14,30 +14,10 @@ import os
 import time
 from datetime import datetime
 from threading import Thread, Lock
-import base64
-import hashlib
-
-# AI Vision imports - Google ViT Model (Vision Transformer)
-# All imports are optional — server works without them
-try:
-    from PIL import Image
-    import numpy as np
-    from transformers import ViTForImageClassification, ViTFeatureExtractor
-    AI_AVAILABLE = True
-    AI_MODE = "FULL"
-    print("✅ Google ViT AI Vision model enabled (FULL mode)")
-except ImportError as e:
-    print(f"⚠️ Full AI modules not available: {e}")
-    try:
-        from PIL import Image
-        import numpy as np
-        AI_AVAILABLE = True
-        AI_MODE = "BASIC"
-        print("⚠️ Fallback to Basic AI Vision mode (PIL + image analysis)")
-    except ImportError as e2:
-        print(f"❌ No AI modules available: {e2}")
-        AI_AVAILABLE = False
-        AI_MODE = "NONE"
+# AI Vision disabled via user request
+AI_AVAILABLE = False
+AI_MODE = "NONE"
+print("❌ AI Vision models are explicitly disabled")
 
 # ================= STEP COUNTER STATE =================
 from collections import deque
@@ -157,15 +137,7 @@ def handle_exception(e):
     response.status_code = 500
     return response
 
-@app.route('/api/health')
-def health_check():
-    """Health check endpoint for diagnostics"""
-    return jsonify({
-        "status": "online",
-        "timestamp": datetime.now().isoformat(),
-        "project": "kakuProject",
-        "endpoints": ["/api/latest-image", "/api/step-counter/get", "/api/sensor-data"]
-    }), 200
+
 
 # Database configuration
 DB_PATH = 'sensor_data.db'
