@@ -1,0 +1,116 @@
+# System Verification Guide: ESP32 AI Pet
+
+This guide provides a structured approach to verify the hardware, firmware, and server integration of the Kaku Pet device.
+
+## 1. System Architecture Flowchart
+
+```mermaid
+graph TD
+    Start((Power ON)) --> HW_Init[<b>Hardware Initialization</b><br/>Serial, I2C, Camera, OLED]
+    HW_Init --> Load_State[<b>Load State</b><br/>Restore Pet Stats from NVS]
+    Load_State --> WiFi_Check{WiFi Credentials<br/>Found?}
+    
+    WiFi_Check -- No --> WiFi_Prov[<b>WiFi Provisioning</b><br/>Show QR Code on OLED]
+    WiFi_Prov --> WiFi_Wait[Wait for Web Config]
+    WiFi_Wait --> WiFi_Success[Save & Reboot]
+    WiFi_Success --> Start
+    
+    WiFi_Check -- Yes --> WiFi_Connect[<b>WiFi Connection</b><br/>Connecting to Router]
+    WiFi_Connect --> Net_Check{Connected?}
+    
+    Net_Check -- No --> Net_Retry[Retry Loop<br/>Backoff Delay]
+    Net_Retry --> WiFi_Connect
+    
+    Net_Check -- Yes --> Init_Sync[<b>Initial Sync</b><br/>Poll Server for Events]
+    Init_Sync --> Main_Loop[<b>Main Execution Loop</b>]
+    
+    subgraph Logic_Network [Core 1: Pet Brain & Comms]
+        Main_Loop --> Phys_Tick{60s Tick?}
+        Phys_Tick -- Yes --> Phys_Update[<b>Physiology Update</b><br/>Hunger++, Thirst++, Poop?]
+        Phys_Tick -- No --> Net_Handler[<b>Network Task</b><br/>Process Queue / Poll Events]
+        Net_Handler --> OTA_Proc{OTA Logic?}
+        OTA_Proc -- Update Found --> OTA_Download[Download & Flash]
+        OTA_Download --> Reboot[Reboot]
+    end
+    
+    subgraph UI_Interaction [Core 0: UI & Sensors]
+        Main_Loop --> Sensor_Poll[<b>Read Sensors</b><br/>MPU6050, Mic VAD]
+        Sensor_Poll --> Orient_Logic{Orientation?}
+        
+        Orient_Logic -- Neutral --> Mood_IDLE[<b>Idle State</b><br/>Play State Animations]
+        Orient_Logic -- Flat 2min --> Sleep_Mode[<b>Deep Sleep</b>]
+        Orient_Logic -- Tilted --> Menu_Syst[<b>Interaction Menu</b>]
+        
+        Menu_Syst --> Nav{Menu Action?}
+        Nav -- Right Hold --> Menu_Enter[Enter Menu]
+        Nav -- Right Flick --> Menu_Next[Cycle Menus]
+        Nav -- Left Hold --> Exec_Action[<b>Execute Action</b><br/>Feed, Clean, Play]
+        
+        Exec_Action --> Action_Effect[<b>Visual Feedback</b><br/>Action Animation]
+        Action_Effect --> Notify_Server[<b>Sync Event</b><br/>Queue Server Update]
+    end
+```
+
+---
+
+## 2. Expected Behavior at Each Step
+
+| Step | Expected Result |
+| :--- | :--- |
+| **Power ON** | Device boots; serial logs appear; OLED shows startup animation. |
+| **WiFi Init** | If configured: Connects within 10s. If new: Shows QR code for provisioning. |
+| **Idle State** | Pet animation (Infant/Child/etc.) plays. Happiness/Idle frames cycle every few seconds. |
+| **Physiology Update** | Every 60s, internal stats (Hunger, Thirst) change. Uptime counter increments. |
+| **Menu Cycle** | Right tilt flick cycles between Food, Toilet, Play, Health menus flawlessly. |
+| **Action Execution** | Left tilt hold triggers specific animation (e.g., eating frames) and vibrates/sounds if enabled. |
+| **Server Sync** | Data packets sent regularly. Server-side dashboard updates reflect local device stats. |
+| **OTA Trigger** | Device suspends tasks, shows update progress on OLED, and reboots into new firmware. |
+
+---
+
+## 3. Full Testing Checklist
+
+### Section A: Boot & Network
+- [ ] **Startup**: Power on via USB/Battery. Verify OLED turns on and pet appears.
+- [ ] **Provisioning**: (If fresh) Verify AP "Kaku-Pet-Setup" exists. Connect and save credentials.
+- [ ] **Reconnection**: Turn off WiFi router. Verify device handles disconnect and reconnects once router is back.
+
+### Section B: Interface & Animations
+- [ ] **Menu Entry**: Hold device tilted RIGHT for 2 seconds. Verify Menu Icons appear.
+- [ ] **Menu Navigation**: Flick device RIGHT while in menu. Verify icons cycle (Food -> Toilet -> Play -> Health -> Info).
+- [ ] **Animation Continuity**: Observe Child and Adult animations. Verify no "flicker" or "blank frames".
+
+### Section C: Sensors & Input
+- [ ] **Orientation Sleep**: Place device neutral for 2 minutes. Verify it enters low-power/sleep mode.
+- [ ] **Motion Wake**: Shake the device while sleeping. Verify it wakes up and returns to idle.
+- [ ] **Feeding Gesture**: Select Food Menu -> Tilt Left Hold. Verify "Eating" animation plays.
+- [ ] **Cleaning Gesture**: Select Toilet Menu -> Tilt Left Hold. Verify "Cleaning" animation plays (Brushing).
+- [ ] **Step Counter**: Walk with the device or shake it. Verify step count increments on the Info page.
+
+### Section D: Server & Data
+- [ ] **Data Upload**: Check [Web Dashboard](file:///f:/kakuProject-main/index.html). Verify Hunger/Health stats match device levels.
+- [ ] **Image Capture**: Perform Feeding action. Verify an image appears in the "Latest Camera" section of the dashboard.
+- [ ] **AI Captioning**: Verify the BLIP model generates a valid caption (e.g., "A tray of sushi") after feeding.
+- [ ] **Event Polling**: Change pet emotion from the dashboard. Verify the device switches animation accordingly.
+
+---
+
+## 4. Bug Detection Hints
+
+| Failure Symptom | Possible Cause |
+| :--- | :--- |
+| **OLED stuck on "Connecting..."** | Incorrect WiFi credentials or server address in firmware. |
+| **Pet doesn't age or get hungry** | `PHYSIO_TICK_MS` logic failing or timer not running on Core 1. |
+| **Menu won't open on tilt** | MPU6050 I2C communication error or calibration drift. |
+| **Animations playing too fast** | Frame delay constants in [oledTask](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#1091-1104) set too low. |
+| **Server shows "No Data"** | API key mismatch or firewall blocking HTTPS requests. |
+| **Camera image is green/corrupt** | Flash size / PSRAM settings in Arduino IDE (should be 8MB OPI). |
+| **UI freezes during action** | Network task (Core 1) blocking Core 0, or I2C bus collision. |
+
+---
+
+## 5. Success Criteria
+*   [ ] Device survives 24h without crash.
+*   [ ] Stats correctly reflect the care provided (Hunger 0 when fed, Health 100 when clean).
+*   [ ] All 4 life stages (Infant, Child, Adult, Old) cycle correctly based on Uptime.
+*   [ ] AI Vision generates accurate captions for food items.

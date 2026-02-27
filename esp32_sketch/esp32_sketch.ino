@@ -356,6 +356,7 @@ bool petIsHungry = false;          // Local hunger > 70
 int  petAgeInt   = 0;              // Day count
 int  petHappiness = 100;           // 0-100 bar
 int  petDiscipline = 100;          // 0-100 bar
+bool petIsSick = false;            // Track if pet is sick
 
 // Helper to sync struct to legacy globals used by UI
 void syncLocalStateToUI() {
@@ -500,7 +501,6 @@ unsigned long lastWalkFrameTime = 0;
 bool dodgeGameOverAnimDone = false;
 
 // Health Menu Medicine Variables
-bool petIsSick = false;  // Track if pet is sick (to be managed by backend in future)
 bool givingMedicine = false;  // Track if medicine animation is playing
 int medicineAnimLoopCount = 0;  // Count how many times animation has looped
 unsigned long medicineHoldStartTime = 0;  // Track when tilt started for medicine

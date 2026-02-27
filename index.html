@@ -699,8 +699,24 @@
                         <div class="debug-value" id="debugStoss">0.0000</div>
                     </div>
                     <div class="debug-item">
+                        <div class="debug-label">Level</div>
+                        <div class="debug-value" id="debugLevel">1</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">XP</div>
+                        <div class="debug-value" id="debugXP">0</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Thirst</div>
+                        <div class="debug-value" id="debugThirst">0%</div>
+                    </div>
+                    <div class="debug-item">
                         <div class="debug-label">Age (Days)</div>
                         <div class="debug-value" id="debugAge">0</div>
+                    </div>
+                    <div class="debug-item">
+                        <div class="debug-label">Device Uptime</div>
+                        <div class="debug-value" id="debugUptime">0s</div>
                     </div>
                 </div>
             </div>
@@ -891,7 +907,7 @@
     <script src="https://cdn.socket.io/4.5.4/socket.io.js"></script>
     <script>
         const API_BASE = "https://kakuproject-90943350924.asia-south1.run.app";  // Google Cloud Run Production
-        // const API_BASE = "http://192.168.43.67:5000";  // Local server (for testing)
+        // const API_BASE = "http://localhost:5000";  // Local server (for testing)
 
         let startTime = Date.now();
         let recordingActive = false;
@@ -1072,22 +1088,40 @@
                 });
         }
 
-        // Initialize Socket.IO connection
+        // Initialize Socket.IO connection with fallback to HTTP polling
+        let useWebSocket = false;
+        let pollingInterval = null;
+        let connectionAttempts = 0;
+        const MAX_CONNECTION_ATTEMPTS = 3;
+
         function initWebSocket() {
+            connectionAttempts++;
+            
             socket = io(API_BASE, {
-                transports: ["websocket", "polling"],
-                withCredentials: true
+                transports: ["polling", "websocket"],  // Try polling first (more reliable on Cloud Run)
+                withCredentials: true,
+                reconnectionAttempts: 3,
+                reconnectionDelay: 2000,
+                timeout: 10000
             });
 
-
             socket.on('connect', function () {
-                console.log('Socket.IO connected');
+                console.log('✅ Socket.IO connected');
+                useWebSocket = true;
+                connectionAttempts = 0;
                 updateConnectionStatus(true);
+
+                // Stop polling if it was running
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                    pollingInterval = null;
+                    console.log('� Switched from polling to WebSocket');
+                }
 
                 // Get current OLED display animation on connection
                 getOLEDDisplay();
 
-                // 👟 Get current step counter on connection
+                // � Get current step counter on connection
                 getStepCounter();
 
                 // Load latest AI-analyzed image on connection
@@ -1168,14 +1202,103 @@
             });
 
             socket.on('disconnect', function () {
-                console.log('Socket.IO disconnected');
+                console.log('⚠️ Socket.IO disconnected');
+                useWebSocket = false;
                 updateConnectionStatus(false);
+                
+                // Start polling as fallback
+                if (!pollingInterval) {
+                    console.log('🔄 Starting HTTP polling fallback...');
+                    startPolling();
+                }
             });
 
             socket.on('connect_error', function (error) {
-                console.error('Socket.IO error:', error);
+                console.error('❌ Socket.IO connection error:', error.message);
+                useWebSocket = false;
                 updateConnectionStatus(false);
+                
+                // After max attempts, switch to polling permanently
+                if (connectionAttempts >= MAX_CONNECTION_ATTEMPTS) {
+                    console.log('⚠️ Max WebSocket attempts reached, switching to HTTP polling mode');
+                    if (socket) {
+                        socket.disconnect();
+                        socket = null;
+                    }
+                    startPolling();
+                }
             });
+        }
+
+        // HTTP Polling fallback for when WebSocket fails
+        function startPolling() {
+            if (pollingInterval) return;  // Already polling
+            
+            console.log('📡 Starting HTTP polling mode (updates every 3 seconds)');
+            updateConnectionStatus(true, 'polling');
+            
+            // Initial fetch
+            getOLEDDisplay();
+            getStepCounter();
+            loadLatestAIImage();
+            
+            // Poll every 3 seconds
+            pollingInterval = setInterval(() => {
+                getOLEDDisplay();
+                getStepCounter();
+                loadLatestAIImage();
+                
+                // Also fetch latest sensor data
+                fetch(API_BASE + '/api/latest?limit=1')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.success && data.records && data.records.length > 0) {
+                            const latest = data.records[0];
+                            updateDashboard({
+                                accel_x: latest.accel_x,
+                                accel_y: latest.accel_y,
+                                accel_z: latest.accel_z,
+                                gyro_x: latest.gyro_x,
+                                gyro_y: latest.gyro_y,
+                                gyro_z: latest.gyro_z,
+                                mic_level: latest.mic_level,
+                                sound_data: latest.sound_data,
+                                chip_temperature: latest.chip_temperature
+                            });
+                            
+                            // Update orientation if available
+                            if (latest.device_orientation) {
+                                updateOrientationUI({
+                                    direction: latest.device_orientation,
+                                    confidence: latest.orientation_confidence || 0,
+                                    calibrated_ax: latest.calibrated_ax,
+                                    calibrated_ay: latest.calibrated_ay,
+                                    calibrated_az: latest.calibrated_az
+                                });
+                            }
+                        }
+                    })
+                    .catch(err => console.error('Polling error:', err));
+            }, 3000);
+        }
+
+        function updateConnectionStatus(connected, mode = 'websocket') {
+            const status = document.getElementById('connectionStatus');
+            if (connected) {
+                if (mode === 'polling') {
+                    status.textContent = 'Connected (HTTP Polling)';
+                    status.className = 'status connected';
+                    status.style.background = 'rgba(255, 193, 7, 0.4)';  // Yellow for polling
+                } else {
+                    status.textContent = 'Connected';
+                    status.className = 'status connected';
+                    status.style.background = 'rgba(76, 175, 80, 0.4)';  // Green for WebSocket
+                }
+            } else {
+                status.textContent = 'Disconnected';
+                status.className = 'status';
+                status.style.background = 'rgba(255, 255, 255, 0.2)';
+            }
         }
 
         // Update dashboard with sensor data
@@ -1235,16 +1358,7 @@
             });
         }
 
-        function updateConnectionStatus(connected) {
-            const status = document.getElementById('connectionStatus');
-            if (connected) {
-                status.textContent = 'Connected';
-                status.className = 'status connected';
-            } else {
-                status.textContent = 'Disconnected';
-                status.className = 'status';
-            }
-        }
+
 
         function updateOrientationUI(data) {
             if (!data) return;
@@ -1607,10 +1721,16 @@
             document.getElementById('debugHappy').textContent = (data.happiness || 0) + '%';
             document.getElementById('debugDisc').textContent = (data.discipline || 0) + '%';
             document.getElementById('debugEnergy').textContent = (data.energy || 0) + '%';
+            document.getElementById('debugThirst').textContent = (data.thirst || 0) + '%';
+            document.getElementById('debugLevel').textContent = data.level || 1;
+            document.getElementById('debugXP').textContent = data.xp || 0;
             document.getElementById('debugStage').textContent = data.stage || 'INFANT';
             document.getElementById('debugPoop').textContent = data.has_poop ? '💩 YES' : 'NO';
             document.getElementById('debugSick').textContent = data.is_sick ? '🤒 YES' : 'NO';
             document.getElementById('debugAge').textContent = data.age || 0;
+            if (data.uptime !== undefined) {
+                document.getElementById('debugUptime').textContent = formatUptime(data.uptime * 1000);
+            }
         }
 
         // Function to load the latest image
