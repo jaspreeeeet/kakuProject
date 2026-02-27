@@ -2399,6 +2399,10 @@ void checkFeedingGesture() {
     // Block feeding during walking (MPU data unreliable) or sleeping
     if (petIsWalking || isDeviceSleeping) return;
     if (!mpuAvailable) return;
+    if (currentScreenType != "FOOD_MENU") {
+        holdingLeftForFeeding = false;
+        return;
+    }
     
     int16_t ax, ay, az;
     mpu.getAcceleration(&ax, &ay, &az);
@@ -3238,7 +3242,7 @@ void loop() {
     
     // ── FEEDING GESTURE TIMEOUT CHECK ─────────────────────────────────────────
     // Reset feeding flag if stuck for more than 30 seconds
-    if (capturingForFeeding && (millis() - feedingGestureStartTime > FEEDING_TIMEOUT)) {
+    if ((capturingForFeeding || isUploadingImage) && (millis() - feedingGestureStartTime > FEEDING_TIMEOUT)) {
         Serial.println("⚠️ Feeding gesture timeout - resetting flags");
         capturingForFeeding = false;
         isUploadingImage = false;  // Also reset eating animation
@@ -3421,8 +3425,8 @@ void cameraMonitorTask(void *parameter) {
             continue;
         }
         
-        // Only capture when feeding gesture is triggered
-        if (capturingForFeeding && !isUploadingImage) {
+        // Only capture when feeding gesture is triggered 
+        if (capturingForFeeding && !cameraImageReady) {
             // Boost CPU for capture
             safeCpuFreq(240);  // FIX: Mutex-guarded — prevents race with networkTask
             Serial.println("⚡ CPU: 240MHz (capturing)");
@@ -3454,6 +3458,7 @@ void cameraMonitorTask(void *parameter) {
                 Serial.println("❌ Core 0: Camera capture failed");
             }
             cameraCapturing = false;
+            capturingForFeeding = false;  // Ensure it only captures once per gesture!
             
             // Drop back to low frequency after capture
             safeCpuFreq(80);  // FIX: Mutex-guarded
