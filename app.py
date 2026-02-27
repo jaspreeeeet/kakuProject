@@ -3439,6 +3439,12 @@ def default_error_handler(e):
 
 # ==================== Main ====================
 
+# Initialize database at module level so it works under both:
+# 1. Direct execution (python app.py)
+# 2. Gunicorn import (gunicorn app:app)
+if not init_database():
+    print('❌ Database initialization failed!')
+
 if __name__ == '__main__':
     print('🚀 Starting ESP32 Dashboard Server...')
     print('📊 Dashboard: http://192.168.1.6:5000')  # Local PC IP
@@ -3452,11 +3458,6 @@ if __name__ == '__main__':
     print('   • POST /api/pet/play-result')
     print('   • POST /api/pet/menu')
     print('')
-    
-    # Initialize database before starting server
-    if not init_database():
-        print('❌ Database initialization failed. Exiting.')
-        exit(1)
     
     try:
         # Run the app with stability-focused configuration
@@ -3473,3 +3474,4 @@ if __name__ == '__main__':
     except Exception as e:
         print(f'❌ Server error: {e}')
         print('💡 Check if port 5000 is available and try restarting')
+
