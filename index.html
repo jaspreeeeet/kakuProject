@@ -1153,6 +1153,12 @@
             socket.on('sensor_update', function (data) {
                 console.log('Received sensor update:', data);
                 updateDashboard(data);
+
+                // Update debug dashboard if pet state is included in sensor telemetry
+                if (data.pet_state) {
+                    updateDebugDashboard(data.pet_state);
+                }
+
                 if (recordingActive) {
                     dataBuffer.push({ ...data, timestamp: new Date().toISOString() });
                 }

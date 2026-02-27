@@ -1357,7 +1357,8 @@ def receive_sensor_data():
                         'gyro_z': data.get('gyro_z', 0),
                         'mic_level': data.get('mic_level', 0),
                         'sound_data': data.get('sound_data', 0),
-                        'chip_temperature': data.get('chip_temperature', 0)
+                        'chip_temperature': data.get('chip_temperature', 0),
+                        'pet_state': data.get('pet_state')  # Forward pet state to dashboard
                     })
             
             def emit_orientation():

@@ -414,8 +414,8 @@ const unsigned long WALKING_WINDOW_MS = 3000;  // animate walking for 3s after l
 // ── HARDWARE STEP COUNTER ──────────────────────────────────────────────
 uint32_t hwStepCount   = 0;       // Steps accumulated since last sensor send
 unsigned long lastHwStepTime = 0; // millis() of last detected step (debounce)
-const float   STEP_BARRIER_G2 = 0.10f;   // calibrated: 1400x above rest noise (0.00007g²), 3x below weakest step (0.296g²)
-const unsigned long STEP_MIN_MS = 400;  // steps ~1000ms apart; 400ms debounce is safe
+const float   STEP_BARRIER_G2 = 0.25f;   // Increased to 0.25f to filter out touches/taps
+const unsigned long STEP_MIN_MS = 600;   // Increased to 600ms to prevent double-bouncing from touches
 const float   LP_ALPHA_STEP = 0.85f;    // low-pass filter weight for gravity estimate
 
 // ── OTA UPDATE STATE ───────────────────────────────────────────────────
@@ -1215,6 +1215,23 @@ void setup() {
         // Mark startup as complete
         startupComplete = true;
         showHomeIcon = true;  // ESP32 controls: Show home icon on MAIN screen by default
+        
+        // Reset local pet state to match server's startup-complete INFANT reset
+        g_petState.hunger = 0;
+        g_petState.thirst = 0;
+        g_petState.health = 100;
+        g_petState.energy = 100;
+        g_petState.happiness = 100;
+        g_petState.discipline = 100;
+        g_petState.xp = 0;
+        g_petState.level = 1;
+        g_petState.ageInt = 0;
+        g_petState.totalUptimeSecs = 0;
+        g_petState.isSick = false;
+        g_petState.hasPoop = false;
+        savePetState();  // Overwrite NVS with fresh stats
+        syncLocalStateToUI();
+        
         Serial.println("✅ Startup complete! Main screen ready.");
     }
     
@@ -4334,6 +4351,21 @@ bool sendSensorDataOnly(SensorData data) {
     accumulatedSleepSec = 0;  // Reset counter after reporting
     g_sensorDoc["step_count"] = hwStepCount;  // Steps counted on hardware since last send
     hwStepCount = 0;  // Reset after reporting
+    
+    // Add pet local physiology state so the server dashboard updates
+    JsonObject petObj = g_sensorDoc.createNestedObject("pet_state");
+    petObj["hunger"] = g_petState.hunger;
+    petObj["health"] = g_petState.health;
+    petObj["happiness"] = g_petState.happiness;
+    petObj["discipline"] = g_petState.discipline;
+    petObj["energy"] = g_petState.energy;
+    petObj["thirst"] = g_petState.thirst;
+    petObj["level"] = g_petState.level;
+    petObj["xp"] = g_petState.xp;
+    petObj["is_sick"] = g_petState.isSick;
+    petObj["has_poop"] = g_petState.hasPoop;
+    petObj["age"] = g_petState.ageInt;
+    petObj["uptime"] = g_petState.totalUptimeSecs;
     
     // Add sensor batch with all buffered readings
     JsonObject batchObj = g_sensorDoc.createNestedObject("sensor_batch");
