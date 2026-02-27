@@ -157,13 +157,24 @@ def handle_exception(e):
     response.status_code = 500
     return response
 
+@app.route('/api/health')
+def health_check():
+    """Health check endpoint for diagnostics"""
+    return jsonify({
+        "status": "online",
+        "timestamp": datetime.now().isoformat(),
+        "project": "kakuProject",
+        "endpoints": ["/api/latest-image", "/api/step-counter/get", "/api/sensor-data"]
+    }), 200
+
 # Database configuration
 DB_PATH = 'sensor_data.db'
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif'}
 
 # AI Configuration
 if AI_AVAILABLE:
-    CACHE_DIR = r"E:\Rajeev\esp 32\esp 32\.cache\huggingface"
+    # Use relative path for cache to avoid local Windows paths failing on Cloud Run
+    CACHE_DIR = os.path.join(os.getcwd(), ".cache", "huggingface")
     os.environ['HUGGINGFACE_HUB_CACHE'] = CACHE_DIR
     os.makedirs(CACHE_DIR, exist_ok=True)
     
