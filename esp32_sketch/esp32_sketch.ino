@@ -340,7 +340,7 @@ struct PetLocalState {
 
 PetLocalState g_petState;
 unsigned long lastPhysioTick = 0;
-#define PHYSIO_TICK_MS 120000 // Run physiology logic every 120 seconds
+#define PHYSIO_TICK_MS 360000 // Run physiology logic every 120 seconds
 
 void savePetState() {
   petPrefs.begin("pet_state", false);
@@ -2635,8 +2635,15 @@ void displayStatsMenu() {
 
 // Check for medicine gesture (hold left tilt for 3 seconds)
 void checkMedicineGesture() {
+  // Block medicine during walking (MPU data unreliable) or sleeping
+  if (petIsWalking || isDeviceSleeping)
+    return;
   if (!mpuAvailable || !petIsSick)
     return;
+  if (currentScreenType != "HEALTH_MENU") {
+    holdingLeftForMedicine = false;
+    return;
+  }
 
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
@@ -2821,7 +2828,7 @@ void playInjectionAnimation() {
         savePetState();
         syncLocalStateToUI();
 
-        // Notify server: sick_pending cleared, hunger resumes
+        // Send medicine request to server: sick_pending cleared, hunger resumes
         uint8_t req = NET_INJECT;
         xQueueSend(networkQueue, &req, 0);
 
@@ -3456,10 +3463,22 @@ void handlePhysiology() {
   if (g_petState.hasPoop)
     healthPenalty += 10;
 
-  // Random sickness for OLD
-  if (petAge == OLD && random(0, 100) < 1) { // 1% chance
-    g_petState.isSick = true;
-    Serial.println("🤒 Old pet became sick");
+  // Sickness Engine (Hardware Authoritative)
+  // Pet gets sick if neglected: Health drops too low, or generic random chance
+  if (!g_petState.isSick) {
+    if (g_petState.health <= 50 && random(0, 100) < 30) {
+      // 30% chance to get sick each tick if health is critical (<=50)
+      g_petState.isSick = true;
+      Serial.println("🤒 Pet became sick due to poor health/neglect!");
+    } else if (g_petState.hasPoop && random(0, 100) < 15) {
+      // 15% chance to get sick each tick if poop is left uncleared
+      g_petState.isSick = true;
+      Serial.println("🤒 Pet became sick from living with poop!");
+    } else if (petAge == OLD && random(0, 100) < 5) {
+      // 5% chance for old pets naturally
+      g_petState.isSick = true;
+      Serial.println("🤒 Old pet became sick naturally");
+    }
   }
 
   if (g_petState.isSick)
@@ -4155,15 +4174,8 @@ void getOLEDDisplayFromServer() {
         Serial.printf("💩 Poop Icon: %s\n", showPoopIcon ? "SHOW" : "HIDE");
       }
 
-      // Sick icon — shown after poop ignored >15 min AND poop has been cleared
-      if (g_oledDoc.containsKey("is_sick")) {
-        bool newSick = g_oledDoc["is_sick"].as<bool>();
-        if (showSickIcon != newSick) {
-          showSickIcon = newSick;
-          petIsSick = newSick; // Sync health menu "Give Med" / "All Good"
-          Serial.printf("❤️  Sick Icon: %s\n", showSickIcon ? "SHOW" : "HIDE");
-        }
-      }
+      // is_sick is now controlled entirely locally by the ESP32 physiology
+      // engine. Server is_sick field is ignored — hardware is authoritative.
 
       // Play icon — now controlled locally (15 min after poop cleared)
       // Server show_play_icon ignored — hardware is authoritative
