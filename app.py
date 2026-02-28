@@ -351,12 +351,12 @@ def sync_pet_state_to_db(device_id, pet_state):
             cursor.execute('''
                 INSERT INTO pet_state (
                     device_id, age, level, xp, uptime, 
-                    health, hunger, thirst, happiness, energy, discipline,
+                    health, hunger, happiness, energy, discipline,
                     is_sick, has_poop, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     age=excluded.age, level=excluded.level, xp=excluded.xp, uptime=excluded.uptime,
-                    health=excluded.health, hunger=excluded.hunger, thirst=excluded.thirst,
+                    health=excluded.health, hunger=excluded.hunger,
                     happiness=excluded.happiness, energy=excluded.energy, discipline=excluded.discipline,
                     is_sick=excluded.is_sick, has_poop=excluded.has_poop, updated_at=CURRENT_TIMESTAMP
                 WHERE device_id = ?
@@ -364,7 +364,7 @@ def sync_pet_state_to_db(device_id, pet_state):
                 device_id, pet_state.get('age', 0), pet_state.get('level', 1), 
                 pet_state.get('xp', 0), pet_state.get('uptime', 0),
                 pet_state.get('health', 100), pet_state.get('hunger', 0), 
-                pet_state.get('thirst', 0), pet_state.get('happiness', 100), 
+                pet_state.get('happiness', 100), 
                 pet_state.get('energy', 100), pet_state.get('discipline', 100),
                 pet_state.get('is_sick', 0), pet_state.get('has_poop', 0), device_id
             ))
@@ -373,14 +373,14 @@ def sync_pet_state_to_db(device_id, pet_state):
             cursor.execute('''
                 UPDATE pet_state SET 
                     age=?, level=?, xp=?, uptime=?, 
-                    health=?, hunger=?, thirst=?, happiness=?, energy=?, discipline=?,
+                    health=?, hunger=?, happiness=?, energy=?, discipline=?,
                     is_sick=?, has_poop=?, updated_at=CURRENT_TIMESTAMP
                 WHERE device_id = ? OR id = (SELECT MIN(id) FROM pet_state)
             ''', (
                 pet_state.get('age', 0), pet_state.get('level', 1), 
                 pet_state.get('xp', 0), pet_state.get('uptime', 0),
                 pet_state.get('health', 100), pet_state.get('hunger', 0), 
-                pet_state.get('thirst', 0), pet_state.get('happiness', 100), 
+                pet_state.get('happiness', 100), 
                 pet_state.get('energy', 100), pet_state.get('discipline', 100),
                 pet_state.get('is_sick', 0), pet_state.get('has_poop', 0), device_id
             ))
@@ -724,7 +724,6 @@ def init_database():
                     
                     health INTEGER DEFAULT 100,
                     hunger INTEGER DEFAULT 0,
-                    thirst INTEGER DEFAULT 0,
                     happiness INTEGER DEFAULT 100,
                     energy INTEGER DEFAULT 100,
                     discipline INTEGER DEFAULT 100,
@@ -744,7 +743,6 @@ def init_database():
             try:
                 cursor.execute('ALTER TABLE pet_state ADD COLUMN level INTEGER DEFAULT 1')
                 cursor.execute('ALTER TABLE pet_state ADD COLUMN xp INTEGER DEFAULT 0')
-                cursor.execute('ALTER TABLE pet_state ADD COLUMN thirst INTEGER DEFAULT 0')
                 cursor.execute('ALTER TABLE pet_state ADD COLUMN uptime INTEGER DEFAULT 0')
                 cursor.execute('ALTER TABLE pet_state ADD COLUMN is_sick BOOLEAN DEFAULT 0')
                 cursor.execute('ALTER TABLE pet_state ADD COLUMN has_poop BOOLEAN DEFAULT 0')
@@ -1014,7 +1012,6 @@ def get_pet_state(device_id='ESP32_001'):
                 'xp': row.get('xp', 0),
                 'health': row.get('health', 100),
                 'hunger': row.get('hunger', 0),
-                'thirst': row.get('thirst', 0),
                 'happiness': row.get('happiness', 100),
                 'energy': row.get('energy', 100),
                 'discipline': row.get('discipline', 100),
@@ -1910,7 +1907,7 @@ def pet_inject():
         # Injection logic — also clears sick_pending and resumes hunger
         updates = {
             'health': min(100, state['health'] + 20),
-            'sick_pending': 0,  # Cure sickness — sick icon disappears, hunger resumes
+            'is_sick': 0,  # Cure sickness — sick icon disappears, hunger resumes
             'current_emotion': 'RECOVER',
             'emotion_expire_at': (datetime.now() + timedelta(seconds=3)).isoformat(),
             'action_lock': 0
@@ -1946,17 +1943,17 @@ def pet_clean():
         
         from datetime import datetime
         
-        if not state['poop_present']:
+        if not state['has_poop']:
             return jsonify({
                 'status': 'success',
                 'message': 'No poop to clean',
-                'poop_present': False,
+                'has_poop': False,
                 'cleanliness': state['cleanliness']
             }), 200
         
         # Cleaning logic
         updates = {
-            'poop_present': 0,
+            'has_poop': 0,
             'poop_timestamp': None,
             'cleanliness': 100,
             'last_clean_time': datetime.now().isoformat(),
@@ -1971,7 +1968,7 @@ def pet_clean():
             return jsonify({
                 'status': 'success',
                 'message': 'Pet cleaned successfully',
-                'poop_present': False,
+                'has_poop': False,
                 'cleanliness': 100
             }), 200
         else:
@@ -2344,7 +2341,6 @@ def get_oled_display():
                 'current_menu': 'MAIN',
                 'health': 100,
                 'hunger': 0,
-                'thirst': 0,
                 'level': 1,
                 'xp': 0,
                 'happiness': 100,
@@ -2405,11 +2401,11 @@ def get_oled_display():
             'current_emotion': resolved_emotion,
             'health': pet['health'],
             'hunger': pet['hunger'],
-            'thirst': pet.get('thirst', 0),
             'level': pet.get('level', 1),
             'xp': pet.get('xp', 0),
             'happiness': pet['happiness'],
             'energy': pet['energy'],
+            'discipline': pet.get('discipline', 100),
             'has_poop': pet.get('has_poop', False),
             'is_sick': pet.get('is_sick', False),
             'age': pet['age'],

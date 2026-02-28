@@ -707,10 +707,6 @@
                         <div class="debug-value" id="debugXP">0</div>
                     </div>
                     <div class="debug-item">
-                        <div class="debug-label">Thirst</div>
-                        <div class="debug-value" id="debugThirst">0%</div>
-                    </div>
-                    <div class="debug-item">
                         <div class="debug-label">Age (Days)</div>
                         <div class="debug-value" id="debugAge">0</div>
                     </div>
@@ -1727,7 +1723,6 @@
             document.getElementById('debugHappy').textContent = (data.happiness || 0) + '%';
             document.getElementById('debugDisc').textContent = (data.discipline || 0) + '%';
             document.getElementById('debugEnergy').textContent = (data.energy || 0) + '%';
-            document.getElementById('debugThirst').textContent = (data.thirst || 0) + '%';
             document.getElementById('debugLevel').textContent = data.level || 1;
             document.getElementById('debugXP').textContent = data.xp || 0;
             document.getElementById('debugStage').textContent = data.stage || 'INFANT';
