@@ -615,6 +615,11 @@ int walkFrame = 0;
 unsigned long lastWalkFrameTime = 0;
 bool dodgeGameOverAnimDone = false;
 
+// Age Transition Animation
+volatile bool pendingAgeTransition = false; // Set by physioTick (Core 1), consumed by OLED (Core 0)
+int ageTransitionXP = 0;   // XP to show in counter
+int ageTransitionAge = 0;  // New age to show in counter
+
 // Health Menu Medicine Variables
 bool givingMedicine = false;   // Track if medicine animation is playing
 int medicineAnimLoopCount = 0; // Count how many times animation has looped
@@ -836,6 +841,7 @@ void drawCleanSpriteFrame(int frame, int xOffset); // Clean slide sprite frame
 void drawStaticPlayIcon();     // Static play icon at top-left (play menu)
 void drawStaticHealthIcon();   // Static heart icon at top-left (health menu)
 void playInjectionAnimation(); // Play injection/medicine animation
+void playAgeTransitionAnimation(); // Age-up celebration animation
 void sendInjectRequest();      // Notify server that injection was given
 void displayFoodMenu();        // Display food menu screen
 void displayToiletMenu();      // Display toilet menu screen
@@ -3126,10 +3132,143 @@ void checkCameraCover() {
 }
 */
 
+// ================= AGE TRANSITION ANIMATION =================
+void ageSparkle() {
+  for (int i = 0; i < 6; i++) {
+    display.drawPixel(random(0, 64), random(0, 32), SSD1306_WHITE);
+  }
+}
+
+void ageShockwave() {
+  for (int r = 2; r < 20; r += 3) {
+    display.clearDisplay();
+    display.drawCircle(32, 16, r, SSD1306_WHITE);
+    display.display();
+    vTaskDelay(pdMS_TO_TICKS(60));
+  }
+}
+
+void ageSmashEffect() {
+  // Text fall (gravity)
+  int y = -12;
+  while (y < 12) {
+    display.clearDisplay();
+    display.setCursor(9, y);
+    display.print("LEVEL UP");
+    display.display();
+    y += 3;
+    vTaskDelay(pdMS_TO_TICKS(30));
+  }
+  // Impact shake
+  for (int i = 0; i < 8; i++) {
+    display.clearDisplay();
+    display.setCursor(9, 12 + random(-2, 3));
+    display.print("LEVEL UP");
+    display.display();
+    vTaskDelay(pdMS_TO_TICKS(35));
+  }
+  // Impact debris
+  for (int frame = 0; frame < 8; frame++) {
+    display.clearDisplay();
+    display.setCursor(9, 12);
+    display.print("LEVEL UP");
+    for (int i = 0; i < 12; i++) {
+      int px = 32 + random(-frame * 3, frame * 3);
+      int py = 16 + random(-frame * 2, frame * 2);
+      display.drawPixel(px, py, SSD1306_WHITE);
+    }
+    display.display();
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+void playAgeTransitionAnimation() {
+  Serial.println("🎂 Playing age transition animation!");
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // 1. "AGE UP!" text
+  display.clearDisplay();
+  display.setCursor(14, 8);
+  display.print("AGE UP!");
+  display.display();
+  vTaskDelay(pdMS_TO_TICKS(1200));
+
+  // 2. Star burst
+  for (int frame = 0; frame < 12; frame++) {
+    display.clearDisplay();
+    for (int i = 0; i < 10; i++) {
+      int px = 32 + random(-frame * 2, frame * 2);
+      int py = 16 + random(-frame * 2, frame * 2);
+      display.drawPixel(px, py, SSD1306_WHITE);
+    }
+    display.display();
+    vTaskDelay(pdMS_TO_TICKS(70));
+  }
+
+  // 3. Confetti
+  for (int frame = 0; frame < 18; frame++) {
+    display.clearDisplay();
+    for (int i = 0; i < 12; i++) {
+      int px = random(0, 64);
+      int py = (frame * 2 + i * 3) % 32;
+      display.drawPixel(px, py, SSD1306_WHITE);
+    }
+    display.display();
+    vTaskDelay(pdMS_TO_TICKS(60));
+  }
+
+  // 4. "HAPPY BDAY" with sparkle
+  for (int i = 0; i < 20; i++) {
+    display.clearDisplay();
+    ageSparkle();
+    display.setCursor(10, 6);
+    display.print("HAPPY");
+    display.setCursor(10, 18);
+    display.print("BDAY");
+    display.display();
+    vTaskDelay(pdMS_TO_TICKS(90));
+  }
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  // 5. LEVEL UP smash
+  ageSmashEffect();
+
+  // 6. Shockwave
+  ageShockwave();
+
+  // 7. XP counter
+  int currentXP = 0;
+  while (currentXP <= ageTransitionXP) {
+    display.clearDisplay();
+    ageSparkle();
+    display.setCursor(4, 8);
+    display.print("XP:");
+    display.print(currentXP);
+    display.setCursor(4, 20);
+    display.print("AGE:");
+    display.print(ageTransitionAge);
+    display.display();
+    currentXP += 5;
+    vTaskDelay(pdMS_TO_TICKS(40));
+  }
+  // Hold final XP screen
+  vTaskDelay(pdMS_TO_TICKS(1000));
+
+  Serial.println("🎂 Age transition animation complete!");
+}
+
 // ================= PET ANIMATION FUNCTION =================
 void displayPetAnimation() {
   if (!displayReady)
     return;
+
+  // Age transition animation — plays immediately, blocks OLED task until done
+  if (pendingAgeTransition) {
+    pendingAgeTransition = false;
+    playAgeTransitionAnimation();
+    return;
+  }
 
   // Display animation every 150ms
   if (millis() - lastAnimationTime >= ANIMATION_DISPLAY_INTERVAL) {
@@ -3543,6 +3682,10 @@ void handlePhysiology() {
     // Level up on birthday
     g_petState.level++;
     g_petState.xp += 100;
+    // Trigger age transition animation on OLED (Core 0)
+    ageTransitionAge = g_petState.ageInt;
+    ageTransitionXP = g_petState.xp;
+    pendingAgeTransition = true;
   }
 
   // 2️⃣ Hunger Engine (Stage dependent)
