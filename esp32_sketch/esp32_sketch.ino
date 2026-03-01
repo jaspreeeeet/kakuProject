@@ -618,6 +618,7 @@ bool dodgeGameOverAnimDone = false;
 // Age Transition Animation
 volatile bool pendingAgeTransition = false; // Set by physioTick (Core 1), consumed by OLED (Core 0)
 int ageTransitionXP = 0;   // XP to show in counter
+int ageTransitionPrevXP = 0; // XP before birthday bonus (counter start)
 int ageTransitionAge = 0;  // New age to show in counter
 
 // Health Menu Medicine Variables
@@ -3271,8 +3272,8 @@ void playAgeTransitionAnimation() {
   // 6. Shockwave
   ageShockwave();
 
-  // 7. XP counter
-  int currentXP = 0;
+  // 7. XP counter (animate from previous XP to new XP)
+  int currentXP = ageTransitionPrevXP;
   while (currentXP <= ageTransitionXP) {
     display.clearDisplay();
     ageSparkle();
@@ -3714,6 +3715,7 @@ void handlePhysiology() {
     g_petState.ageInt = newAgeDays;
     Serial.printf("🎂 Pet aged! Now %d days old\n", g_petState.ageInt);
     // Level up on birthday
+    ageTransitionPrevXP = g_petState.xp; // Capture XP BEFORE bonus
     g_petState.level++;
     g_petState.xp += 100;
     // Trigger age transition animation on OLED (Core 0)
@@ -3738,7 +3740,7 @@ void handlePhysiology() {
 
   // 3️⃣ Health Engine
   int healthPenalty = 0;
-  if (g_petState.hunger > 80)
+  if (g_petState.hunger > 90)
     healthPenalty += 5;
   // (thirst removed)
   if (g_petState.energy < 20)
@@ -3747,25 +3749,20 @@ void handlePhysiology() {
     healthPenalty += 10;
 
   // Sickness Engine (Hardware Authoritative)
-  // Pet gets sick if neglected: Health drops too low, or generic random chance
   if (!g_petState.isSick) {
-    if (g_petState.health <= 50 && random(0, 100) < 30) {
-      // 30% chance to get sick each tick if health is critical (<=50)
+    if (g_petState.health <= 25 && random(0, 100) < 30) {
+      // 30% chance if health <= 25
       g_petState.isSick = true;
       Serial.println("🤒 Pet became sick due to poor health/neglect!");
     } else if (g_petState.hasPoop && random(0, 100) < 15) {
-      // 15% chance to get sick each tick if poop is left uncleared
+      // 15% chance with poop present
       g_petState.isSick = true;
       Serial.println("🤒 Pet became sick from living with poop!");
-    } else if (petAge == OLD && random(0, 100) < 5) {
-      // 5% chance for old pets naturally
-      g_petState.isSick = true;
-      Serial.println("🤒 Old pet became sick naturally");
     }
   }
 
   if (g_petState.isSick)
-    healthPenalty += 15;
+    healthPenalty += 5;
 
   g_petState.health = max(0, g_petState.health - healthPenalty);
 
