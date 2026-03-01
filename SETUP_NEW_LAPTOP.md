@@ -1,6 +1,41 @@
-# 🖥️ KakuProject — New Laptop Setup Guide
+# 🖥️ KakuProject — New Laptop Setup Guide (From USB Pendrive)
 
-Complete guide to clone, set up, and deploy this project on a fresh laptop.
+**📌 PRIMARY USE CASE:** You have this entire folder on a USB pendrive and want to:
+- Run it on a new laptop
+- Push changes to GitHub (even if new laptop has different GitHub account)
+- Deploy to Cloud Run / Vercel
+
+**💾 This folder includes everything:**
+- All code (app.py, test.ino, esp32_sketch, etc.)
+- Database (sensor_data.db) with all your data
+- Git history (.git folder)
+- No need to clone from GitHub!
+
+---
+
+## ⚡ TL;DR - Just Want to Push to GitHub?
+
+**On the new laptop (one-time setup):**
+
+1. **Get a Personal Access Token:**
+   - Go to https://github.com/settings/tokens
+   - Click "Generate new token (classic)"
+   - Check `repo`, generate, copy the token (starts with `ghp_...`)
+
+2. **Navigate to your USB folder and run:**
+   ```bash
+   cd F:\kakuProject-main    # Or E:, G:, etc. depending on your USB drive
+   git remote set-url origin https://jaspreeeeet:YOUR_TOKEN@github.com/jaspreeeeet/kakuProject.git
+   ```
+
+3. **Done! Now you can push anytime:**
+   ```bash
+   git add .
+   git commit -m "your changes"
+   git push origin main
+   ```
+
+**Continue reading for:** Python setup, Arduino IDE, deployment, etc.
 
 ---
 
@@ -55,9 +90,104 @@ setuptools==79.0.1
 
 ---
 
-## 🔧 Arduino IDE Setup (for ESP32 sketches)
+## � Quick Start (From USB Pendrive)
 
-### Board Manager
+### Step 1: Plug in USB and Navigate to Folder
+```bash
+# Check which drive letter your USB is (look in File Explorer)
+# For example, if it's F drive:
+cd F:\kakuProject-main
+
+# Or E drive:
+cd E:\kakuProject-main
+```
+
+### Step 2: Install Python Dependencies (first time only)
+```bash
+pip install -r requirements.txt
+```
+
+### Step 3: Configure Git to Push (first time only)
+
+The folder already has Git set up, but the new laptop needs authentication.
+
+**IMPORTANT:** Don't worry if the new laptop has a different GitHub account logged in. You have 3 simple options:
+
+#### Option A: Use Personal Access Token (Easiest, Recommended)
+1. On any device, go to: https://github.com/settings/tokens
+2. Click **"Generate new token (classic)"**
+3. Give it a name: `my-laptop` or `pendrive-setup`
+4. Check the box for `repo` (full repository access)
+5. Click **"Generate token"** at bottom
+6. Copy the token (starts with `ghp_...`) — **Save it somewhere safe!**
+7. On the new laptop, run this command (replace `YOUR_TOKEN` with the actual token):
+   ```bash
+   git remote set-url origin https://jaspreeeeet:YOUR_TOKEN@github.com/jaspreeeeet/kakuProject.git
+   ```
+8. Test it:
+   ```bash
+   git push origin main
+   ```
+   Should work without asking for password!
+
+#### Option B: Clear Old Credentials (If laptop has wrong account)
+```bash
+# Windows: Remove old GitHub credentials
+cmdkey /delete:git:https://github.com
+
+# OR use GUI:
+# Control Panel → Credential Manager → Windows Credentials
+# Find "git:https://github.com" entries → Remove All
+
+# Next git push will ask for username/password
+git push origin main
+# Username: jaspreeeeet
+# Password: ghp_YOUR_TOKEN (from Option A)
+```
+
+#### Option C: SSH Key (Most Secure, Takes 2 Minutes)
+```bash
+# 1. Generate SSH key on new laptop
+ssh-keygen -t ed25519 -C "your-email@example.com"
+# Press Enter 3 times (default location, no passphrase)
+
+# 2. Copy the public key
+cat ~/.ssh/id_ed25519.pub
+# Or on Windows: type C:\Users\YourName\.ssh\id_ed25519.pub
+
+# 3. Add to GitHub
+# Go to: https://github.com/settings/ssh/new
+# Paste the key, give it a name like "my-laptop"
+
+# 4. Change Git remote to use SSH
+git remote set-url origin git@github.com:jaspreeeeet/kakuProject.git
+
+# 5. Test
+git push origin main
+```
+
+### Step 4: Now You Can Push Changes Anytime!
+```bash
+# Make changes to any file...
+git add .
+git commit -m "your message here"
+git push origin main
+```
+
+### Step 5: Deploy (Optional, only when you want to update live site)
+```bash
+# Backend to Cloud Run
+gcloud auth login
+gcloud run deploy kakuproject --source . --region asia-south1 --allow-unauthenticated --memory 512Mi --timeout 300
+
+# Frontend to Vercel
+vercel login
+vercel --prod
+```
+
+---
+
+## 🔧 Arduino IDE Setup (for ESP32 sketches)
 1. Open Arduino IDE → **File → Preferences**
 2. In **"Additional Board Manager URLs"**, add:
    ```
@@ -85,113 +215,31 @@ setuptools==79.0.1
 
 ---
 
-## 🚀 Step-by-Step: Clone & Run
+##  Important Notes When Running from USB Pendrive
 
-### Step 1: Clone the Repo
-```bash
-git clone https://github.com/jaspreeeeet/kakuProject.git
-cd kakuProject
-```
+### File Paths
+- The pendrive drive letter may change on different laptops (E:, F:, G:, etc.)
+- Always `cd` into the project folder before running commands
+- For Arduino: Upload the `.ino` file from wherever the pendrive is mounted
 
-### Step 2: Install Python deps
-```bash
-pip install -r requirements.txt
-```
+### Database
+- The SQLite database (`sensor_data.db`) travels with the folder
+- All your sensor data, images, and AI captions are preserved
+- First time on new laptop: database already exists, no setup needed
 
-### Step 3: Run backend locally (optional test)
-```bash
-python app.py
-```
-Opens on http://localhost:8080
+### Git
+- The `.git` folder is included, so Git history is preserved
+- You just need to authenticate (see GitHub section above)
+- After first push, subsequent pushes work normally
 
-### Step 4: Deploy Backend to Cloud Run
-```bash
-gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
-
-gcloud run deploy kakuproject \
-  --source . \
-  --region asia-south1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --memory 512Mi \
-  --timeout 300
-```
-
-### Step 5: Deploy Frontend to Vercel
-```bash
-vercel login
-vercel --prod
-```
-
----
-
-## 🔑 GitHub — Push from Another Account
-
-If the new laptop has a **different GitHub account** logged in, here's how to push to this repo:
-
-### Option A: Add as Collaborator (Recommended)
-1. Go to https://github.com/jaspreeeeet/kakuProject/settings/access
-2. Click **"Add people"**
-3. Add the other GitHub username
-4. The other account accepts the invite from their email/GitHub notifications
-5. Now they can push directly:
-   ```bash
-   git clone https://github.com/jaspreeeeet/kakuProject.git
-   cd kakuProject
-   git push origin main
-   ```
-
-### Option B: Use a Personal Access Token (PAT)
-If you want to push from the **same account** (jaspreeeeet) on the new laptop:
-
-1. Go to https://github.com/settings/tokens → **"Generate new token (classic)"**
-2. Give it a name like `new-laptop`
-3. Select scopes: `repo` (full control)
-4. Copy the token (starts with `ghp_...`)
-5. On the new laptop, clone using the token:
-   ```bash
-   git clone https://jaspreeeeet:ghp_YOUR_TOKEN@github.com/jaspreeeeet/kakuProject.git
-   ```
-   Or update an existing clone:
-   ```bash
-   git remote set-url origin https://jaspreeeeet:ghp_YOUR_TOKEN@github.com/jaspreeeeet/kakuProject.git
-   ```
-6. Now `git push` works without login prompts.
-
-### Option C: Switch Git Credentials on the Laptop
-If the laptop has another account cached:
-```bash
-# Clear stored credentials (Windows)
-# Open: Control Panel → Credential Manager → Windows Credentials
-# Find "git:https://github.com" entries → Remove them
-
-# Or from command line:
-cmdkey /delete:git:https://github.com
-
-# Next time you push, it will ask for username/password
-# Enter: jaspreeeeet as username, and your PAT as password
-git push origin main
-```
-
-### Option D: Use SSH Key (Most Secure)
-1. Generate SSH key on the new laptop:
-   ```bash
-   ssh-keygen -t ed25519 -C "your-email@example.com"
-   ```
-2. Copy the public key:
-   ```bash
-   cat ~/.ssh/id_ed25519.pub
-   ```
-3. Add it to GitHub: https://github.com/settings/ssh/new
-4. Switch remote to SSH:
-   ```bash
-   git remote set-url origin git@github.com:jaspreeeeet/kakuProject.git
-   ```
-5. Push:
-   ```bash
-   git push origin main
-   ```
+### Potential Issues
+| Issue | Solution |
+|-------|----------|
+| `pip install` fails | Use `python -m pip install -r requirements.txt` |
+| Drive letter changed | Update `cd` command to new drive (check in File Explorer) |
+| "Permission denied" on push | Clear Windows credentials or use PAT (see GitHub section) |
+| Database locked | Close any running `python app.py` instances |
+| Arduino sketch paths | Open `.ino` directly from pendrive location |
 
 ---
 
