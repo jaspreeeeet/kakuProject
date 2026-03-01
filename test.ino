@@ -1,192 +1,392 @@
 // =====================================================================
-//  test_walking.ino  —  CALIBRATION + DETECTION TEST
-//  Hardware: XIAO ESP32S3 + MPU6050 (SDA=5, SCL=6)
+//  test.ino  —  BLIP IMAGE CAPTIONING TEST
+//  Hardware: XIAO ESP32S3 Sense (OV2640 camera built-in)
 //  Baud: 115200
 //
-//  HOW TO USE:
-//    1. Flash to device, open Serial Monitor
-//    2. Type a letter + Enter to label each scenario:
-//         A  →  Still flat (on table)
-//         B  →  Still tilted (hold at angle, don't move)
-//         C  →  Walking (hold in hand)
-//         D  →  Pocket walking
-//    3. Copy ALL Serial output, share with Copilot for tuning
+//  PURPOSE:
+//    Tests the full image captioning pipeline:
+//      ESP32 camera → GCP server /upload → HuggingFace BLIP API
+//    Then fetches back the AI caption from /api/latest-image
 //
-//  OUTPUT FORMAT:
-//    SCENARIO,<label>              ← when you change scenario
-//    RAW,scenario,gx,gy,gz,stoss   ← every 50ms reading
-//    STEP,#N,stoss,interval_ms     ← when step detected
-//    STATS,scenario,steps_5s,total ← every 5s summary
+//  HOW TO USE:
+//    1. Flash to device, open Serial Monitor @ 115200
+//    2. Device auto-connects WiFi, inits camera
+//    3. Type 'C' + Enter  →  Capture & upload image
+//    4. Type 'R' + Enter  →  Check latest AI caption result
+//    5. Type 'A' + Enter  →  Auto test (capture + wait 10s + fetch caption)
+//    6. Watch serial output for full flow status
+//
+//  EXPECTED OUTPUT:
+//    ✅ WiFi connected
+//    ✅ Camera initialized
+//    📸 Captured image: XXXXX bytes
+//    📤 Uploading to server...
+//    ✅ Upload OK (200): {"status":"success","image_id":XX,...}
+//    🤖 Fetching AI caption...
+//    🧠 AI Caption: "a person sitting at a desk with a laptop"
+//    💖 Emotion: HAPPY (matched: person)
 // =====================================================================
 
-#include <Wire.h>
-#include <MPU6050.h>
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
 
-// ── PIN CONFIG ────────────────────────────────────────────────
-#define SDA_PIN 5
-#define SCL_PIN 6
+// ================= WiFi CONFIG =================
+#define WIFI_SSID     "Airtel_BumbleBee-777"
+#define WIFI_PASSWORD "kya karoge ."
 
-// ── TUNABLE PARAMETERS ────────────────────────────────────────
-// Calibrated from real sensor data:
-//   Rest noise max  : 0.00007 g²
-//   Weakest step    : 0.29633 g²
-//   Typical steps   : 0.50–0.90 g²
-//   Step interval   : ~1000ms
-const float        STEP_BARRIER_G2    = 0.10f;  // 1400x above noise, 3x below weakest step
-const unsigned long STEP_MIN_MS       = 400;    // steps ~1000ms apart, 400ms debounce is safe
-const unsigned long WALKING_WINDOW_MS = 3000;   // flag walking for 3s after last step
-const float        LP_ALPHA           = 0.85f;  // low-pass gravity filter weight
+// ================= SERVER CONFIG =================
+const char* SERVER_BASE = "https://kakuproject-90943350924.asia-south1.run.app";
 
-// ── HARDWARE ──────────────────────────────────────────────────
-MPU6050 mpu;
-bool mpuAvailable = false;
+// ================= CAMERA PINS (XIAO ESP32 S3 Sense) =================
+#define PWDN_GPIO_NUM  -1
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM  10
+#define SIOD_GPIO_NUM  40
+#define SIOC_GPIO_NUM  39
+#define Y9_GPIO_NUM    48
+#define Y8_GPIO_NUM    11
+#define Y7_GPIO_NUM    12
+#define Y6_GPIO_NUM    14
+#define Y5_GPIO_NUM    16
+#define Y4_GPIO_NUM    18
+#define Y3_GPIO_NUM    17
+#define Y2_GPIO_NUM    15
+#define VSYNC_GPIO_NUM 38
+#define HREF_GPIO_NUM  47
+#define PCLK_GPIO_NUM  13
 
-// ── GRAVITY FILTER STATE ──────────────────────────────────────
-float gravX = 0.0f, gravY = 0.0f, gravZ = 1.0f;
+// ── GLOBALS ──────────────────────────────────────────────────
+WiFiClientSecure sslClient;
+bool cameraReady = false;
+int lastImageId = -1;
 
-// ── STEP COUNTER ──────────────────────────────────────────────
-uint32_t      hwStepCount        = 0;
-uint32_t      intervalStepCount  = 0;
-unsigned long lastHwStepTime     = 0;
-unsigned long lastWalkingStepTime = 0;
-
-// ── WALKING FLAG ──────────────────────────────────────────────
-bool petIsWalking     = false;
-bool lastWalkingState = false;
-
-// ── SCENARIO LABEL (set via Serial: A/B/C/D) ─────────────────
-char currentScenario = '?';
-
-// ── TIMERS ────────────────────────────────────────────────────
-unsigned long lastStatsPrint = 0;
-unsigned long lastReadTime   = 0;
-
-// ─────────────────────────────────────────────────────────────
-void detectHardwareStep();
+// ── FUNCTION DECLARATIONS ────────────────────────────────────
+bool initCamera();
+bool captureAndUpload();
+bool fetchLatestCaption();
+void runAutoTest();
+void connectWiFi();
 
 // ─────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    delay(600);
+    delay(1000);
 
-    Serial.println("\n====================================");
-    Serial.println("  test_walking.ino  CALIBRATION MODE");
-    Serial.println("====================================");
-    Serial.printf("  STEP_BARRIER_G2   : %.4f g2\n", STEP_BARRIER_G2);
-    Serial.printf("  STEP_MIN_MS       : %lu ms\n",   STEP_MIN_MS);
-    Serial.printf("  LP_ALPHA          : %.2f\n",     LP_ALPHA);
+    Serial.println("\n╔══════════════════════════════════════╗");
+    Serial.println("║  BLIP IMAGE CAPTIONING TEST          ║");
+    Serial.println("║  XIAO ESP32S3 Sense → GCP → BLIP    ║");
+    Serial.println("╚══════════════════════════════════════╝");
     Serial.println();
-    Serial.println("Send a letter + Enter to label scenario:");
-    Serial.println("  A = Still flat   B = Still tilted");
-    Serial.println("  C = Walking hand D = Pocket walk");
-    Serial.println("------------------------------------\n");
+    Serial.println("Commands:");
+    Serial.println("  C = Capture & Upload image");
+    Serial.println("  R = Read latest AI caption");
+    Serial.println("  A = Auto test (capture + wait + read)");
+    Serial.println("──────────────────────────────────────\n");
 
-    Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(400000);
+    // Connect WiFi
+    connectWiFi();
 
-    mpu.initialize();
-    if (mpu.testConnection()) {
-        mpuAvailable = true;
-        mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2); // +-2g, 16384 LSB/g
-        Serial.println("OK,MPU6050 connected");
+    // Init camera
+    if (initCamera()) {
+        Serial.println("✅ Camera initialized (QQVGA 160x120 JPEG)");
     } else {
-        Serial.println("ERR,MPU6050 not found,check SDA=5 SCL=6");
+        Serial.println("❌ Camera init FAILED — cannot test");
     }
 
-    lastStatsPrint = millis();
-    lastReadTime   = millis();
+    // Skip SSL certificate verification (for testing)
+    sslClient.setInsecure();
 
-    // Warm up the LP gravity filter for 1 second before enabling step detection
-    // Prevents cold-start false positives during initial filter settling
-    if (mpuAvailable) {
-        Serial.println("Warming up gravity filter...");
-        for (int i = 0; i < 40; i++) {   // 40 × 25ms = 1 second
-            int16_t ax, ay, az;
-            mpu.getAcceleration(&ax, &ay, &az);
-            float gx = ax / 16384.0f;
-            float gy = ay / 16384.0f;
-            float gz = az / 16384.0f;
-            gravX = LP_ALPHA * gravX + (1.0f - LP_ALPHA) * gx;
-            gravY = LP_ALPHA * gravY + (1.0f - LP_ALPHA) * gy;
-            gravZ = LP_ALPHA * gravZ + (1.0f - LP_ALPHA) * gz;
-            delay(25);
-        }
-        Serial.println("OK,gravity filter ready");
-    }
+    Serial.println("\n🟢 Ready! Send C/R/A via Serial Monitor.\n");
 }
 
 // ─────────────────────────────────────────────────────────────
 void loop() {
-    // Handle scenario label input from Serial
     if (Serial.available()) {
         char c = toupper((char)Serial.read());
-        if (c == 'A' || c == 'B' || c == 'C' || c == 'D') {
-            currentScenario   = c;
-            intervalStepCount = 0;
-            Serial.printf("\nSCENARIO,%c\n", currentScenario);
+        // Flush remaining chars (newline etc)
+        while (Serial.available()) Serial.read();
+
+        switch (c) {
+            case 'C':
+                Serial.println("\n═══ CAPTURE & UPLOAD ═══");
+                captureAndUpload();
+                break;
+            case 'R':
+                Serial.println("\n═══ READ CAPTION ═══");
+                fetchLatestCaption();
+                break;
+            case 'A':
+                Serial.println("\n═══ AUTO TEST (capture → wait 10s → read) ═══");
+                runAutoTest();
+                break;
+            default:
+                if (c >= 32) { // printable char
+                    Serial.printf("Unknown command: '%c'. Use C/R/A\n", c);
+                }
+                break;
         }
     }
+    delay(50);
+}
 
-    // Read + detect at 20Hz (every 50ms)
-    if (millis() - lastReadTime >= 50) {
-        lastReadTime = millis();
-        detectHardwareStep();
+// ═════════════════════════════════════════════════════════════
+//  WiFi CONNECTION
+// ═════════════════════════════════════════════════════════════
+void connectWiFi() {
+    Serial.printf("📶 Connecting to WiFi: %s ", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
     }
-
-    // Update walking flag
-    petIsWalking = (millis() - lastWalkingStepTime) < WALKING_WINDOW_MS;
-
-    // Log state changes
-    if (petIsWalking != lastWalkingState) {
-        lastWalkingState = petIsWalking;
-        Serial.printf("STATE,%s\n", petIsWalking ? "WALKING" : "IDLE");
-    }
-
-    // Every 5s: print summary
-    if (millis() - lastStatsPrint >= 5000) {
-        lastStatsPrint = millis();
-        Serial.printf("STATS,scenario=%c,steps_5s=%u,total=%u,walking=%s\n",
-                      currentScenario, intervalStepCount, hwStepCount,
-                      petIsWalking ? "YES" : "NO");
-        intervalStepCount = 0;
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("\n✅ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+        Serial.println("\n❌ WiFi connection FAILED!");
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-void detectHardwareStep() {
-    if (!mpuAvailable) return;
+// ═════════════════════════════════════════════════════════════
+//  CAMERA INIT
+// ═════════════════════════════════════════════════════════════
+bool initCamera() {
+    camera_config_t config;
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer   = LEDC_TIMER_0;
+    config.pin_d0       = Y2_GPIO_NUM;
+    config.pin_d1       = Y3_GPIO_NUM;
+    config.pin_d2       = Y4_GPIO_NUM;
+    config.pin_d3       = Y5_GPIO_NUM;
+    config.pin_d4       = Y6_GPIO_NUM;
+    config.pin_d5       = Y7_GPIO_NUM;
+    config.pin_d6       = Y8_GPIO_NUM;
+    config.pin_d7       = Y9_GPIO_NUM;
+    config.pin_xclk     = XCLK_GPIO_NUM;
+    config.pin_pclk     = PCLK_GPIO_NUM;
+    config.pin_vsync    = VSYNC_GPIO_NUM;
+    config.pin_href     = HREF_GPIO_NUM;
+    config.pin_sscb_sda = SIOD_GPIO_NUM;
+    config.pin_sscb_scl = SIOC_GPIO_NUM;
+    config.pin_pwdn     = PWDN_GPIO_NUM;
+    config.pin_reset    = RESET_GPIO_NUM;
 
-    int16_t ax, ay, az;
-    mpu.getAcceleration(&ax, &ay, &az);
+    config.xclk_freq_hz = 10000000;        // 10 MHz
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size   = FRAMESIZE_QQVGA;  // 160x120
+    config.jpeg_quality = 15;               // Decent quality for captioning
+    config.fb_count     = 1;
+    config.fb_location  = CAMERA_FB_IN_PSRAM;
+    config.grab_mode    = CAMERA_GRAB_LATEST;
 
-    // Convert to g-units (+-2g range, 16384 LSB/g)
-    float gx = ax / 16384.0f;
-    float gy = ay / 16384.0f;
-    float gz = az / 16384.0f;
-
-    // Low-pass filter tracks gravity at ANY tilt orientation
-    gravX = LP_ALPHA * gravX + (1.0f - LP_ALPHA) * gx;
-    gravY = LP_ALPHA * gravY + (1.0f - LP_ALPHA) * gy;
-    gravZ = LP_ALPHA * gravZ + (1.0f - LP_ALPHA) * gz;
-
-    // Dynamic component only (gravity subtracted)
-    float dx = gx - gravX;
-    float dy = gy - gravY;
-    float dz = gz - gravZ;
-    float stoss = dx*dx + dy*dy + dz*dz;
-
-    // Log every reading for calibration
-    Serial.printf("RAW,%c,%.4f,%.4f,%.4f,%.5f\n",
-                  currentScenario, gx, gy, gz, stoss);
-
-    // Step detection with debounce
-    unsigned long now      = millis();
-    unsigned long interval = now - lastHwStepTime;
-    if (stoss > STEP_BARRIER_G2 && interval > STEP_MIN_MS) {
-        hwStepCount++;
-        intervalStepCount++;
-        lastHwStepTime       = now;
-        lastWalkingStepTime  = now;
-        Serial.printf("STEP,%u,%.5f,%lu\n", hwStepCount, stoss, interval);
+    esp_err_t err = esp_camera_init(&config);
+    if (err != ESP_OK) {
+        Serial.printf("❌ Camera init error: 0x%x\n", err);
+        return false;
     }
+    cameraReady = true;
+    return true;
+}
+
+// ═════════════════════════════════════════════════════════════
+//  CAPTURE & UPLOAD to /upload endpoint
+// ═════════════════════════════════════════════════════════════
+bool captureAndUpload() {
+    if (!cameraReady) {
+        Serial.println("❌ Camera not ready!");
+        return false;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected!");
+        return false;
+    }
+
+    // Capture image
+    Serial.println("📸 Capturing image...");
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        Serial.println("❌ Camera capture FAILED");
+        return false;
+    }
+    Serial.printf("📸 Captured: %d bytes (JPEG %dx%d)\n", fb->len, fb->width, fb->height);
+
+    // Upload to server as binary
+    Serial.printf("📤 Uploading to %s/upload ...\n", SERVER_BASE);
+    
+    sslClient.stop();
+    HTTPClient http;
+    http.setTimeout(15000);
+    http.setConnectTimeout(10000);
+
+    String url = String(SERVER_BASE) + "/upload?device_id=ESP32_TEST";
+    if (!http.begin(sslClient, url)) {
+        Serial.println("❌ HTTP begin failed");
+        esp_camera_fb_return(fb);
+        return false;
+    }
+
+    http.addHeader("Content-Type", "application/octet-stream");
+    
+    unsigned long startMs = millis();
+    int httpCode = http.sendRequest("POST", fb->buf, fb->len);
+    unsigned long elapsed = millis() - startMs;
+
+    if (httpCode == 200) {
+        String response = http.getString();
+        Serial.printf("✅ Upload OK (%lu ms)\n", elapsed);
+        Serial.printf("📝 Server response: %s\n", response.c_str());
+        
+        // Parse image_id from response
+        StaticJsonDocument<512> doc;
+        DeserializationError jsonErr = deserializeJson(doc, response);
+        if (!jsonErr && doc.containsKey("image_id")) {
+            lastImageId = doc["image_id"].as<int>();
+            Serial.printf("🆔 Image ID: %d\n", lastImageId);
+        }
+    } else {
+        Serial.printf("❌ Upload FAILED! HTTP %d (%lu ms)\n", httpCode, elapsed);
+        if (httpCode > 0) {
+            Serial.printf("   Response: %s\n", http.getString().c_str());
+        }
+    }
+
+    http.end();
+    esp_camera_fb_return(fb);
+    return (httpCode == 200);
+}
+
+// ═════════════════════════════════════════════════════════════
+//  FETCH LATEST AI CAPTION from /api/latest-image
+// ═════════════════════════════════════════════════════════════
+bool fetchLatestCaption() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ WiFi not connected!");
+        return false;
+    }
+
+    Serial.println("🤖 Fetching latest AI caption...");
+    
+    sslClient.stop();
+    HTTPClient http;
+    http.setTimeout(10000);
+    http.setConnectTimeout(5000);
+
+    String url = String(SERVER_BASE) + "/api/latest-image";
+    if (!http.begin(sslClient, url)) {
+        Serial.println("❌ HTTP begin failed");
+        return false;
+    }
+
+    int httpCode = http.GET();
+    
+    if (httpCode == 200) {
+        String response = http.getString();
+        
+        StaticJsonDocument<2048> doc;
+        DeserializationError jsonErr = deserializeJson(doc, response);
+        
+        if (!jsonErr) {
+            bool success     = doc["success"] | false;
+            int imageId      = doc["image_id"] | -1;
+            const char* caption  = doc["ai_caption"] | "N/A";
+            const char* filename = doc["filename"] | "N/A";
+            const char* source   = doc["source"] | "N/A";
+            bool hasImage    = doc.containsKey("image_url");
+
+            Serial.println("┌──────────────────────────────────┐");
+            Serial.println("│     📊 LATEST IMAGE RESULT       │");
+            Serial.println("├──────────────────────────────────┤");
+            Serial.printf( "│ Success  : %s\n", success ? "YES ✅" : "NO ❌");
+            Serial.printf( "│ Image ID : %d\n", imageId);
+            Serial.printf( "│ Filename : %s\n", filename);
+            Serial.printf( "│ Source   : %s\n", source);
+            Serial.printf( "│ Has Image: %s\n", hasImage ? "YES" : "NO");
+            Serial.println("├──────────────────────────────────┤");
+            Serial.printf( "│ 🧠 AI Caption: %s\n", caption);
+            Serial.println("└──────────────────────────────────┘");
+
+            // Check if caption is real (not placeholder)
+            String captionStr = String(caption);
+            if (captionStr == "Waiting for AI analysis..." || captionStr == "N/A") {
+                Serial.println("⏳ Caption not ready yet — BLIP may still be processing");
+                Serial.println("   Try again in a few seconds (send 'R')");
+            } else {
+                Serial.println("✅ BLIP CAPTIONING IS WORKING!");
+                
+                // Check emotion keywords
+                captionStr.toLowerCase();
+                const char* positiveWords[] = {"food", "fruit", "bottle", "toy", "person", "man", "woman", "face", "dog", "cat", "snack"};
+                const char* negativeWords[] = {"trash", "dirty", "fire", "dark", "scary"};
+                
+                bool emotionFound = false;
+                for (int i = 0; i < 11; i++) {
+                    if (captionStr.indexOf(positiveWords[i]) >= 0) {
+                        Serial.printf("💖 Emotion trigger: HAPPY (matched keyword: '%s')\n", positiveWords[i]);
+                        emotionFound = true;
+                        break;
+                    }
+                }
+                if (!emotionFound) {
+                    for (int i = 0; i < 5; i++) {
+                        if (captionStr.indexOf(negativeWords[i]) >= 0) {
+                            Serial.printf("😢 Emotion trigger: CRY (matched keyword: '%s')\n", negativeWords[i]);
+                            emotionFound = true;
+                            break;
+                        }
+                    }
+                }
+                if (!emotionFound) {
+                    Serial.println("😐 No emotion keyword matched — neutral response");
+                }
+            }
+        } else {
+            Serial.printf("❌ JSON parse error: %s\n", jsonErr.c_str());
+            Serial.println(response.substring(0, 200));
+        }
+    } else if (httpCode == 404) {
+        Serial.println("📭 No images found in database (404)");
+    } else {
+        Serial.printf("❌ Fetch FAILED! HTTP %d\n", httpCode);
+    }
+
+    http.end();
+    return (httpCode == 200);
+}
+
+// ═════════════════════════════════════════════════════════════
+//  AUTO TEST: Capture → Wait → Fetch caption
+// ═════════════════════════════════════════════════════════════
+void runAutoTest() {
+    Serial.println("\n🔄 === FULL PIPELINE TEST ===\n");
+    
+    // Step 1: Capture & upload
+    Serial.println("── STEP 1/3: Capture & Upload ──");
+    bool uploaded = captureAndUpload();
+    if (!uploaded) {
+        Serial.println("❌ Auto test ABORTED — upload failed");
+        return;
+    }
+
+    // Step 2: Wait for BLIP processing
+    Serial.println("\n── STEP 2/3: Waiting 12s for BLIP to process... ──");
+    for (int i = 12; i > 0; i--) {
+        Serial.printf("   ⏳ %d seconds remaining...\n", i);
+        delay(1000);
+    }
+
+    // Step 3: Fetch caption
+    Serial.println("\n── STEP 3/3: Fetch AI Caption ──");
+    bool gotCaption = fetchLatestCaption();
+
+    // Summary
+    Serial.println("\n╔══════════════════════════════════════╗");
+    Serial.printf( "║  Upload:  %s\n", uploaded ? "✅ SUCCESS" : "❌ FAILED");
+    Serial.printf( "║  Caption: %s\n", gotCaption ? "✅ RECEIVED" : "⏳ PENDING");
+    Serial.println("╚══════════════════════════════════════╝\n");   
 }

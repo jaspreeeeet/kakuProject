@@ -17,11 +17,11 @@ from threading import Thread, Lock
 import base64
 import hashlib
 
-# AI Vision disabled via user request
 # AI / Sensory Analysis Configuration
-AI_AVAILABLE = True
-AI_MODE = "FULL"  # "FULL" uses Google ViT, "SIMPLE" uses keyword mock
-print("🤖 Sensory AI Vision is ENABLED (Sensory Interpreter Mode)")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+AI_AVAILABLE = bool(HF_TOKEN)
+AI_MODE = "FULL"  # "FULL" uses HuggingFace BLIP captioning API
+print(f"🤖 Sensory AI Vision: {'ENABLED' if AI_AVAILABLE else 'DISABLED'} (HuggingFace Inference API)")
 
 # ================= STEP COUNTER STATE =================
 from collections import deque
@@ -213,57 +213,51 @@ def detect_device_orientation(ax, ay, az):
         print(f"❌ Error in orientation detection: {e}")
         return "UNKNOWN", 0.0
 
-# ViT AI Model components (lazy loaded)
-vit_extractor = None
-vit_model = None
+# HuggingFace Inference API — no torch/transformers needed
+import requests as hf_requests
+
+HF_API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
 
 def analyze_image_with_ai(image_data, is_path=False):
-    """Analyze image using Google ViT model or basic fallback"""
-    global vit_extractor, vit_model
-    
-    if not AI_AVAILABLE:
+    """Analyze image using HuggingFace Inference API (BLIP captioning model)"""
+    if not AI_AVAILABLE or not HF_TOKEN:
         return "AI analysis not available"
     
     try:
-        if AI_MODE == "FULL":
-            if vit_model is None:
-                print("Loading Google ViT model...")
-                vit_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224")
-                vit_model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
-                print("✅ Google ViT model loaded successfully")
-            
-            # Load image from path or binary data
-            if is_path:
-                image = Image.open(image_data).convert('RGB')
-            else:
-                import io
-                image = Image.open(io.BytesIO(image_data)).convert('RGB')
-            
-            # Classify image
-            inputs = vit_extractor(images=image, return_tensors="pt")
-            outputs = vit_model(**inputs)
-            logits = outputs.logits
-            predicted_class_idx = logits.argmax(-1).item()
-            label = vit_model.config.id2label[predicted_class_idx]
-            
-            print(f"🤖 ViT Classification: {label}")
-            return label.replace('_', ' ').capitalize()
-            
+        # Get raw bytes
+        if is_path:
+            with open(image_data, "rb") as f:
+                img_bytes = f.read()
         else:
-            # Basic fallback — just acknowledge the image
-            return "Image received"
+            img_bytes = image_data if isinstance(image_data, bytes) else bytes(image_data)
+        
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        response = hf_requests.post(HF_API_URL, headers=headers, data=img_bytes, timeout=30)
+        
+        if response.status_code == 200:
+            results = response.json()
+            if results and len(results) > 0:
+                caption = results[0].get("generated_text", "Unknown")
+                print(f"🤖 BLIP Caption: {caption}")
+                return caption.capitalize()
+            return "No caption generated"
+        elif response.status_code == 503:
+            # Model loading — HuggingFace cold start
+            print("⏳ BLIP model loading on HuggingFace, will retry next time")
+            return "Model loading, please wait"
+        else:
+            print(f"❌ HuggingFace API error: {response.status_code} {response.text[:100]}")
+            return f"API error: {response.status_code}"
             
     except Exception as e:
         print(f"AI Analysis error: {e}")
-        import traceback
-        traceback.print_exc()
         return f"Analysis failed: {str(e)[:80]}"
 
 # ================= BACKGROUND AI ANALYSIS (ENABLED) =================
 def analyze_and_store_image_blob(reading_id, image_blob):
-    """Background task: Run ViT analysis, store result, and trigger emotional override"""
+    """Background task: Run BLIP analysis, store result, and trigger emotional override"""
     try:
-        print(f"🤖 [BACKGROUND] Starting ViT analysis for reading #{reading_id}...")
+        print(f"🤖 [BACKGROUND] Starting BLIP analysis for reading #{reading_id}...")
         ai_caption = analyze_image_with_ai(image_blob, is_path=False)
         
         # Determine device_id from reading
