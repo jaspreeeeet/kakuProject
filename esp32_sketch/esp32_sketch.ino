@@ -1,3 +1,9 @@
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  FORCE_EGG_HATCH — set to true to replay egg animation     ║
+// ║  Set false for normal operation (egg plays once, then never)║
+// ╚══════════════════════════════════════════════════════════════╝
+#define FORCE_EGG_HATCH false   // ← Change to true to replay egg animation
+
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
 
@@ -1354,9 +1360,12 @@ void setup() {
 
   // Disable WiFi modem sleep — keeps connection alive and stable
   WiFi.setSleep(false);
-  // Max TX power for better range (RSSI was -94 dBm, too weak)
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  Serial.println("📶 WiFi: sleep OFF, TX power MAX for stable connection");
+  // Auto-reconnect: SDK-level reconnect if AP drops (sealed device — no user intervention)
+  WiFi.setAutoReconnect(true);
+  // Reduced TX power to save energy (was 19.5dBm/MAX — overkill for most setups)
+  // Options: WIFI_POWER_19_5dBm | _15dBm | _11dBm | _8_5dBm
+  WiFi.setTxPower(WIFI_POWER_11dBm);
+  Serial.println("📶 WiFi: sleep OFF, auto-reconnect ON, TX power 11dBm");
   vTaskDelay(pdMS_TO_TICKS(20)); // 20ms settle after WiFi config
 
   // Keep CPU at 240MHz during setup for stable I2C/camera/animation init
@@ -1374,6 +1383,9 @@ void setup() {
     petPrefs.begin("pet_state", true); // read-only
     bool hasHatched = petPrefs.getBool("hasHatched", false);
     petPrefs.end();
+
+    // FORCE_EGG_HATCH override — replays egg animation regardless of NVS
+    if (FORCE_EGG_HATCH) hasHatched = false;
 
     if (!hasHatched) {
       // ============ FIRST-TIME STARTUP SEQUENCE ============
@@ -1415,7 +1427,7 @@ void setup() {
 
       // Mark hatching as done — will never play again
       petPrefs.begin("pet_state", false);
-      petPrefs.putBool("hasHatched", false);
+      petPrefs.putBool("hasHatched", true);  // FIX: was false (bug), now correctly true
       petPrefs.end();
       Serial.println("🥚 Hatching complete — NVS flag set, won't play again.");
     } else {
@@ -2399,6 +2411,7 @@ void sendKakuCoinReward(int score, float kakucoin) {
   Serial.printf("🎮 Sending game reward: Score=%d, KC=%.1f\n", score, kakucoin);
 
   int httpCode = http.POST(payload);
+  trackHttpResult(httpCode);
 
   if (httpCode == 200) {
     Serial.println("✅ Game reward sent!");
@@ -3012,6 +3025,20 @@ void cycleMenu() {
   Serial.printf("📡 Menu cycle: %s → %s\n", currentScreenType.c_str(),
                 newMenu.c_str());
 
+  // ✅ Reset animation state when LEAVING a menu (prevents stale animations)
+  if (currentScreenType == "TOILET_MENU") {
+    isCleaningPoop = false;
+    cleanSlideX = SCREEN_WIDTH;
+    cleanSlideFrame = 1;
+    holdingLeftForCleaning = false;
+  }
+  if (currentScreenType == "HEALTH_MENU") {
+    givingMedicine = false;
+    holdingLeftForMedicine = false;
+    currentInjectionFrame = 0;
+    medicineAnimLoopCount = 0;
+  }
+
   // ✅ CHANGE MENU LOCALLY FIRST (instant, no server dependency)
   currentScreenType = newMenu;
 
@@ -3603,14 +3630,36 @@ void loop() {
     }
   }
 
-  // Debug: Print WiFi status every 10 seconds
+  // Debug: Print WiFi status + heap health every 10 seconds
   static unsigned long lastWiFiCheck = 0;
   if (millis() - lastWiFiCheck > 10000) {
     lastWiFiCheck = millis();
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t minHeap  = ESP.getMinFreeHeap();
     Serial.printf("🔗 WiFi: %s | IP: %s | RSSI: %d dBm\n",
                   WiFi.status() == WL_CONNECTED ? "✅" : "❌",
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    Serial.printf("🎤 Audio Energy: %d\n", audioEnergyLevel);
+    Serial.printf("🎤 Audio Energy: %d | 🧠 Heap: %u free / %u min\n",
+                  audioEnergyLevel, freeHeap, minHeap);
+
+    // SEALED DEVICE SAFETY: Reboot if heap critically low (memory leak guard)
+    // ESP32-S3 has ~390KB total — below 20KB means imminent crash
+    if (freeHeap < 20000) {
+      Serial.println("🚨 CRITICAL: Heap below 20KB — rebooting to recover!");
+      savePetState();  // Persist state before reboot
+      delay(500);
+      ESP.restart();
+    }
+  }
+
+  // SEALED DEVICE SAFETY: Automatic daily reboot (clears memory fragmentation)
+  // Reboots after 24 hours of uptime — only when device is sleeping (minimal disruption)
+  static const unsigned long DAILY_REBOOT_MS = 86400000UL; // 24 hours
+  if (millis() > DAILY_REBOOT_MS && isDeviceSleeping) {
+    Serial.println("🔄 Daily maintenance reboot (24h uptime, device sleeping)");
+    savePetState();
+    delay(500);
+    ESP.restart();
   }
 
   // ── SENSOR BATCH COLLECTION (every 100ms, fast I2C only, no HTTP) ──────────
@@ -4107,6 +4156,7 @@ bool isServerAlive() {
   }
 
   int code = http.GET();
+  trackHttpResult(code);
   http.end();
 
   return (code == 200);
@@ -4330,6 +4380,7 @@ void postOTAProgress(const char *otaStatus, int progress,
   serializeJson(doc, payload);
 
   int code = http.POST(payload);
+  trackHttpResult(code);
   http.end();
 
   Serial.printf("📡 OTA progress → server: %s %d%% (HTTP %d)\n", otaStatus,
@@ -4447,9 +4498,12 @@ void checkAndPerformOTA() {
 
   // Step 3: Download and flash firmware using global sslOTA + Update library
   sslOTA.stop();
+  sslOTA.setInsecure();          // re-apply after stop() clears state
+  sslOTA.setTimeout(120);        // 120s socket-level read timeout (seconds)
+  sslOTA.setHandshakeTimeout(30); // 30s TLS handshake timeout
   HTTPClient httpOTA;
   httpOTA.setConnectTimeout(15000);
-  httpOTA.setTimeout(120000); // 120s timeout for large firmware downloads
+  httpOTA.setTimeout(120000); // 120s HTTP-level timeout (ms)
 
   if (!httpOTA.begin(sslOTA, downloadUrl)) {
     Serial.println("❌ OTA: Failed to connect for firmware download");
@@ -4509,6 +4563,7 @@ void checkAndPerformOTA() {
   size_t written = 0;
   int lastPct = -1;
   unsigned long lastDataTime = millis();
+  int readErrors = 0; // Track consecutive read errors
 
   // Use global otaBuf[4096] instead of local buf[1024] to save stack
   while (written < (size_t)contentLength) {
@@ -4518,13 +4573,13 @@ void checkAndPerformOTA() {
       break;
     }
 
-    // read() blocks until data arrives or timeout — never misses TLS records
-    // unlike available()+readBytes() which can return 0 while TLS buffers data
+    // read() blocks until data or timeout — handles TLS records properly
     int bytesRead = stream->read(otaBuf, sizeof(otaBuf));
     if (bytesRead > 0) {
       Update.write(otaBuf, bytesRead);
       written += bytesRead;
       lastDataTime = millis();
+      readErrors = 0; // Reset error counter on success
 
       int pct = (written * 100) / contentLength;
       // Update OLED every 10% — lightweight I2C only, NO network calls during
@@ -4546,9 +4601,17 @@ void checkAndPerformOTA() {
         display.display();
       }
     } else if (bytesRead < 0) {
-      // Stream error — connection dropped
-      Serial.println("❌ OTA: Stream read error");
-      break;
+      // TLS read returned -1: transient timeout between Cloud Run chunks
+      readErrors++;
+      if (readErrors > 50) {
+        Serial.printf("❌ OTA: Stream read error (%d consecutive failures)\n", readErrors);
+        break;
+      }
+      if (readErrors % 10 == 0) {
+        Serial.printf("⚠️ OTA: read() returned -1, retry %d/50 (%d%% done)\n",
+                      readErrors, (int)((written * 100) / contentLength));
+      }
+      vTaskDelay(pdMS_TO_TICKS(200)); // Wait 200ms before retry — gives TLS time to receive next record
     } else {
       // bytesRead == 0: no data yet, yield and retry
       vTaskDelay(1);
@@ -4658,6 +4721,7 @@ void notifyServerStartupComplete() {
                 payload.length());
 
   int httpCode = http.POST(payload);
+  trackHttpResult(httpCode);
 
   if (httpCode == 200) {
     String response = http.getString();
@@ -4906,6 +4970,7 @@ void sendImageData(String imageBase64) {
                  "true"); // Tell server this is a feeding action
 
   int httpCode = http.sendRequest("POST", binary_data, data_length);
+  trackHttpResult(httpCode);
 
   if (httpCode == 200) {
     Serial.println("✅ Image uploaded successfully");
@@ -4973,6 +5038,7 @@ void sendAudioData(String audioBase64) {
   Serial.printf("📨 Payload size: %d bytes\n", payload.length());
 
   int httpCode = http.POST(payload);
+  trackHttpResult(httpCode);
 
   if (httpCode == 200) {
     Serial.println("✅ Audio data sent!");
