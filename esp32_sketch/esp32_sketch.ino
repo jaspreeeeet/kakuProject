@@ -1298,7 +1298,7 @@ void oledTask(void *parameter) {
     if (displayReady && startupComplete) {
       displayPetAnimation(); // Draw animation (non-blocking)
     }
-    vTaskDelay(pdMS_TO_TICKS(60)); // ~16 FPS refresh rate
+    vTaskDelay(pdMS_TO_TICKS(100)); // ~10 FPS — sufficient for 64x32 OLED, saves CPU heat
   }
 }
 
@@ -1358,14 +1358,15 @@ void setup() {
   if (displayReady)
     showWiFiSuccess();
 
-  // Disable WiFi modem sleep — keeps connection alive and stable
-  WiFi.setSleep(false);
+  // Enable WiFi light-sleep — radio powers down between beacons (~80% power savings)
+  // Connection stays alive (DTIM-based wake), latency increases by ~100ms
+  WiFi.setSleep(true);
   // Auto-reconnect: SDK-level reconnect if AP drops (sealed device — no user intervention)
   WiFi.setAutoReconnect(true);
   // Reduced TX power to save energy (was 19.5dBm/MAX — overkill for most setups)
   // Options: WIFI_POWER_19_5dBm | _15dBm | _11dBm | _8_5dBm
   WiFi.setTxPower(WIFI_POWER_11dBm);
-  Serial.println("📶 WiFi: sleep OFF, auto-reconnect ON, TX power 11dBm");
+  Serial.println("📶 WiFi: light-sleep ON, auto-reconnect ON, TX 11dBm");
   vTaskDelay(pdMS_TO_TICKS(20)); // 20ms settle after WiFi config
 
   // Keep CPU at 240MHz during setup for stable I2C/camera/animation init
@@ -1492,7 +1493,7 @@ void setup() {
 
   // NOW drop CPU to idle frequency — all hardware init is done
   setCpuFrequencyMhz(80);
-  Serial.println("⚡ CPU idle at 80MHz (boosts to 160MHz during network ops)");
+  Serial.println("⚡ CPU idle at 80MHz (boosts to 160/240MHz for network/camera)");
 
   // Create mutexes for synchronization
   audioMutex = xSemaphoreCreateMutex();
@@ -3796,7 +3797,7 @@ void loop() {
     xQueueSend(networkQueue, &req, 0);
   }
 
-  vTaskDelay(pdMS_TO_TICKS(20)); // 20ms loop cadence (non-blocking)
+  vTaskDelay(pdMS_TO_TICKS(50)); // 50ms loop cadence — reduces CPU heat (was 20ms)
 }
 
 // ================= CAMERA INITIALIZATION =================
@@ -4031,11 +4032,11 @@ void audioMonitorTask(void *parameter) {
       }
     }
 
-    // Mic sleep: if silent for 3+ seconds and not recording, slow-poll to save
-    // power
-    if (!currentlyRecording && (currentTime - lastSoundTime) > 3000) {
+    // Mic sleep: if silent for 2+ seconds and not recording, slow-poll to save
+    // power (major heat reduction — I2S idles instead of continuous read)
+    if (!currentlyRecording && (currentTime - lastSoundTime) > 2000) {
       audioEnergyLevel = 0;           // Report silence
-      vTaskDelay(pdMS_TO_TICKS(200)); // Sleep 200ms between reads
+      vTaskDelay(pdMS_TO_TICKS(500)); // Sleep 500ms between reads (was 200ms)
       continue;
     }
 
