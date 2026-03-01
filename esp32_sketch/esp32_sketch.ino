@@ -2,7 +2,7 @@
 // ║  FORCE_EGG_HATCH — set to true to replay egg animation     ║
 // ║  Set false for normal operation (egg plays once, then never)║
 // ╚══════════════════════════════════════════════════════════════╝
-#define FORCE_EGG_HATCH false   // ← Change to true to replay egg animation
+#define FORCE_EGG_HATCH true   // ← Change to true to replay egg animation
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -56,7 +56,7 @@ Required Libraries:
 
 // ================= FIRMWARE VERSION (increment before each upload)
 // =================
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.5"
 
 // ================= WIFI =================
 #define WIFI_SSID "Airtel_BumbleBee-777"
@@ -777,8 +777,13 @@ enum NetReqType : uint8_t {
   NET_IMAGE = 3,  // Upload camera image to server (on feeding gesture)
   NET_CLEAN = 4,  // Send cleaning request (left tilt 3s on TOILET_MENU)
   NET_INJECT = 5, // Send medicine given (left tilt 3s on HEALTH_MENU)
-  NET_HAPPY = 6   // Right tilt menu cycle interaction → happiness +5
+  NET_HAPPY = 6,       // Right tilt menu cycle interaction → happiness +5
+  NET_GAME_REWARD = 7  // Send game score + KakuCoin reward after game over
 };
+
+// Pending game reward (written by OLED task, read by networkTask)
+volatile int pendingRewardScore = 0;
+volatile float pendingRewardKC = 0;
 
 QueueHandle_t networkQueue;         // Queue: loop() → networkTask
 SemaphoreHandle_t networkDataMutex; // Protect g_pendingSensor
@@ -2084,14 +2089,14 @@ void readTiltForGame() {
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
 
-  float accelX = ax / 16384.0;
+  float accelY = ay / 16384.0; // Forward/back tilt for gameplay
 
-  filteredX = 0.9 * filteredX + 0.1 * accelX;
+  filteredX = 0.6 * filteredX + 0.4 * accelY; // Snappy response (less smoothing)
 
-  if (abs(filteredX) < 0.3) {
+  if (abs(filteredX) < 0.12) { // Tight dead zone — small tilts register
     velocity = 0;
   } else {
-    velocity = filteredX * 3.0;
+    velocity = filteredX * 6.0; // Fast movement
   }
 
   playerX += velocity;
@@ -2235,6 +2240,18 @@ void checkStartGesture() {
       activeGame = random(0, 2); // 0 = catch food, 1 = dodge obstacle
       resetGameState();
       dodgeFallSpeed = 120; // reset dodge speed
+
+      // Show "GET READY!" for 2 seconds so user can stabilize device
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(4, 8);
+      display.print("GET READY!");
+      display.setCursor(4, 20);
+      display.print(activeGame == 0 ? "Catch Food" : "Dodge!");
+      display.display();
+      vTaskDelay(pdMS_TO_TICKS(2000));
+
       playGameState = GAME_PLAYING;
       gameStartTime = millis();
       Serial.printf("🎮 Game started! Type: %s\n",
@@ -2280,13 +2297,13 @@ void readTiltForDodge() {
     return;
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
-  float accelX = ax / 16384.0;
-  playerX += accelX * 3.0;
+  float accelY = ay / 16384.0; // Forward/back tilt for gameplay
+  playerX += accelY * 6.0; // Fast responsive movement
   if (playerX < 0)
     playerX = 0;
   if (playerX > SCREEN_WIDTH - 8)
     playerX = SCREEN_WIDTH - 8;
-  if (abs(accelX) > 0.2) {
+  if (abs(accelY) > 0.1) { // Tight threshold for walk animation
     if (millis() - lastWalkFrameTime > 120) {
       walkFrame = !walkFrame;
       lastWalkFrameTime = millis();
@@ -2461,11 +2478,13 @@ void displayPlayMenu() {
         if (!dodgeGameOverAnimDone) {
           playDodgeGameOverAnim(); // blocking animation
         }
-        // Send reward and return to idle
-        float kc = dodgeScore * 0.8;
-        sendKakuCoinReward(dodgeScore, kc);
+        // Queue reward to networkTask (Core 1) — NEVER call HTTP from OLED task (Core 0)!
+        pendingRewardScore = dodgeScore;
+        pendingRewardKC = dodgeScore * 0.8;
+        uint8_t req = NET_GAME_REWARD;
+        xQueueSend(networkQueue, &req, 0);
         playGameState = GAME_IDLE;
-        Serial.println("🎮 Dodge game ended, resuming normal operations");
+        Serial.println("🎮 Dodge game ended, reward queued");
       }
     }
     break;
@@ -2475,13 +2494,15 @@ void displayPlayMenu() {
     drawGameOverScreen();
 
     if (millis() - gameOverStartTime > 5000) {
-      // Send reward to server
-      float kakuCoin = calculateKakuCoin(gameScore);
-      sendKakuCoinReward(gameScore, kakuCoin);
+      // Queue reward to networkTask (Core 1) — NEVER call HTTP from OLED task (Core 0)!
+      pendingRewardScore = gameScore;
+      pendingRewardKC = calculateKakuCoin(gameScore);
+      uint8_t req = NET_GAME_REWARD;
+      xQueueSend(networkQueue, &req, 0);
 
       // Resume normal operations
       playGameState = GAME_IDLE;
-      Serial.println("🎮 Game ended, resuming normal operations");
+      Serial.println("🎮 Game ended, reward queued");
     }
     break;
   }
@@ -3493,6 +3514,11 @@ void networkTask(void *parameter) {
       case NET_HAPPY:
         // Right-tilt menu cycle interaction → happiness +5 on server
         sendCoverHappyRequest();
+        break;
+
+      case NET_GAME_REWARD:
+        // Game over — send score + KakuCoin reward (safe on Core 1)
+        sendKakuCoinReward(pendingRewardScore, pendingRewardKC);
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(20)); // Brief settle between requests
