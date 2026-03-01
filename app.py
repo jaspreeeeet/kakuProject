@@ -1624,6 +1624,8 @@ def get_latest_data():
 def get_latest_image():
     """Get the latest image as base64 from database with AI caption"""
     try:
+        caption_only = request.args.get('caption_only', '0') == '1'
+        
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -1643,18 +1645,20 @@ def get_latest_image():
             image_filename = result[2] if result[2] else f"image_{image_id}.jpg"
             ai_caption = result[3] if result[3] else "Waiting for AI analysis..."
             
-            # ✅ Return base64 image data from database
-            image_base64 = base64.b64encode(image_binary).decode('utf-8')
-            image_url = f'data:image/jpeg;base64,{image_base64}'
-            
-            return jsonify({
+            response_data = {
                 'success': True,
-                'image_url': image_url,
                 'image_id': image_id,
                 'filename': image_filename,
                 'ai_caption': ai_caption,
                 'source': 'database'
-            }), 200
+            }
+            
+            # Skip base64 image when caption_only=1 (saves bandwidth for ESP32)
+            if not caption_only:
+                image_base64 = base64.b64encode(image_binary).decode('utf-8')
+                response_data['image_url'] = f'data:image/jpeg;base64,{image_base64}'
+            
+            return jsonify(response_data), 200
         else:
             return jsonify({
                 'success': False,

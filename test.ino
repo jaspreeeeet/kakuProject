@@ -277,7 +277,7 @@ bool fetchLatestCaption() {
     http.setTimeout(10000);
     http.setConnectTimeout(5000);
 
-    String url = String(SERVER_BASE) + "/api/latest-image";
+    String url = String(SERVER_BASE) + "/api/latest-image?caption_only=1";
     if (!http.begin(sslClient, url)) {
         Serial.println("❌ HTTP begin failed");
         return false;
