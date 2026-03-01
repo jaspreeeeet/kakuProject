@@ -3298,11 +3298,16 @@ void displayPetAnimation() {
   if (!displayReady)
     return;
 
-  // Age transition animation — plays immediately, blocks OLED task until done
-  if (pendingAgeTransition) {
-    pendingAgeTransition = false;
-    playAgeTransitionAnimation();
-    return;
+  // Age transition animation — only plays on MAIN screen
+  // If not on MAIN, keep pendingAgeTransition=true until user returns
+  if (pendingAgeTransition && currentScreenType == "MAIN") {
+    if (ageTransitionAge > 0 && ageTransitionXP >= 0) {
+      pendingAgeTransition = false;
+      playAgeTransitionAnimation();
+      return;
+    } else {
+      pendingAgeTransition = false; // Invalid values, discard
+    }
   }
 
   // Display animation every 150ms
