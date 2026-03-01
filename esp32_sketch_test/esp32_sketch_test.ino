@@ -4,7 +4,7 @@
 // ║  Only aging/hunger/poop/sickness timers are sped up         ║
 // ╚══════════════════════════════════════════════════════════════╝
 #define FORCE_EGG_HATCH true   // ← Always replay egg animation in test
-#define TEST_START_AGE 10     // ← Set to 0-18 to force pet age (days), 99 = use saved age
+#define TEST_START_AGE 18     // ← Set to 0-18 to force pet age (days), 99 = use saved age
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -2665,7 +2665,7 @@ void displayStatusInfoMenu() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(30, 4);
   display.print(petAgeInt);
-  display.print(" yrs");
+  display.print(" yr");
 
   // --- Q3: Flash / energy icon (bottom-left) ---
   drawFlashStatus(0, 16);
@@ -3482,8 +3482,8 @@ void displayPetAnimation() {
       // SAD/HUNGER/SICK - sad animation + heart icon (sick = sad face + blinking heart)
       switch (petAge) {
       case INFANT: {
-        frameData = infant_sad_frames[currentFrame % INFANT_SAD_FRAME_COUNT];
-        frameCount = INFANT_SAD_FRAME_COUNT;
+        frameData = infant_sad_frames[0]; // Static frame (no blinking)
+        frameCount = 1;
         display.drawBitmap(0, 0, frameData, INFANT_SAD_WIDTH, INFANT_SAD_HEIGHT,
                            SSD1306_WHITE);
         break;
