@@ -221,8 +221,8 @@ bool captureAndUpload() {
     
     sslClient.stop();
     HTTPClient http;
-    http.setTimeout(15000);
-    http.setConnectTimeout(10000);
+    http.setTimeout(30000);
+    http.setConnectTimeout(15000);
 
     String url = String(SERVER_BASE) + "/upload?device_id=ESP32_TEST";
     if (!http.begin(sslClient, url)) {
@@ -274,8 +274,8 @@ bool fetchLatestCaption() {
     
     sslClient.stop();
     HTTPClient http;
-    http.setTimeout(10000);
-    http.setConnectTimeout(5000);
+    http.setTimeout(30000);
+    http.setConnectTimeout(15000);
 
     String url = String(SERVER_BASE) + "/api/latest-image?caption_only=1";
     if (!http.begin(sslClient, url)) {
