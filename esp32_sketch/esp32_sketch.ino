@@ -3446,10 +3446,29 @@ void networkTask(void *parameter) {
       case NET_OLED:
         // Consolidated: fetch OLED state + bundled events in one SSL handshake
         getOLEDDisplayFromServer();
-        // If server flagged OTA update, perform it now
+        // If server flagged OTA update, perform it now (with retry for sealed device)
         if (otaUpdateRequested) {
-          safeCpuFreq(160);
-          checkAndPerformOTA();
+          safeCpuFreq(240);
+          for (int otaAttempt = 1; otaAttempt <= 3 && otaUpdateRequested; otaAttempt++) {
+            Serial.printf("🔄 OTA attempt %d/3\n", otaAttempt);
+            checkAndPerformOTA();
+            // If still requested after return, download failed — retry after delay
+            if (otaUpdateRequested && otaAttempt < 3) {
+              Serial.printf("⚠️ OTA attempt %d failed, retrying in 30s...\n", otaAttempt);
+              // Show retry notice on OLED
+              display.clearDisplay();
+              display.setCursor(2, 4);
+              display.println("OTA RETRY");
+              display.setCursor(2, 16);
+              display.printf("%d/3 in 30s", otaAttempt + 1);
+              display.display();
+              vTaskDelay(pdMS_TO_TICKS(30000)); // 30s between retries
+            }
+          }
+          if (otaUpdateRequested) {
+            Serial.println("❌ OTA: All 3 attempts failed — will retry on next server poll");
+            otaUpdateRequested = false; // Clear so normal operation resumes
+          }
           safeCpuFreq(80);
         }
         break;
@@ -4416,6 +4435,9 @@ void checkAndPerformOTA() {
   setCpuFrequencyMhz(240); // Max CPU for OTA
 
   sslOTA.stop(); // Reset connection state
+  sslOTA.setInsecure();          // Re-apply after stop() clears SSL config
+  sslOTA.setTimeout(120);
+  sslOTA.setHandshakeTimeout(30);
   HTTPClient http;
   http.setConnectTimeout(10000);
   http.setTimeout(10000);
@@ -4554,6 +4576,12 @@ void checkAndPerformOTA() {
     Serial.printf("❌ OTA: Not enough space for update: %s\n",
                   Update.errorString());
     httpOTA.end();
+    postOTAProgress("failed", 0, newVersion, "Not enough space for update");
+    // Resume tasks on failure
+    otaInProgress = false;
+    if (oledTaskHandle) vTaskResume(oledTaskHandle);
+    if (cameraTaskHandle) vTaskResume(cameraTaskHandle);
+    if (audioTaskHandle) vTaskResume(audioTaskHandle);
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
     return;
@@ -4567,14 +4595,23 @@ void checkAndPerformOTA() {
 
   // Use global otaBuf[4096] instead of local buf[1024] to save stack
   while (written < (size_t)contentLength) {
-    // Watchdog — abort if no data for 60s
-    if (millis() - lastDataTime > 60000) {
-      Serial.println("❌ OTA: Download stalled (60s no data)");
+    // Watchdog — abort if no data for 120s (Cloud Run can pause on scaling)
+    if (millis() - lastDataTime > 120000) {
+      Serial.println("❌ OTA: Download stalled (120s no data)");
       break;
     }
 
-    // read() blocks until data or timeout — handles TLS records properly
-    int bytesRead = stream->read(otaBuf, sizeof(otaBuf));
+    // Check if data is available before blocking read (avoids wasting retries)
+    int avail = stream->available();
+    if (avail <= 0) {
+      // No data ready yet — brief yield without counting as error
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    // Read available data (capped to buffer size)
+    int toRead = min((int)sizeof(otaBuf), avail);
+    int bytesRead = stream->read(otaBuf, toRead);
     if (bytesRead > 0) {
       Update.write(otaBuf, bytesRead);
       written += bytesRead;
@@ -4582,14 +4619,12 @@ void checkAndPerformOTA() {
       readErrors = 0; // Reset error counter on success
 
       int pct = (written * 100) / contentLength;
-      // Update OLED every 10% — lightweight I2C only, NO network calls during
-      // flash
-      if (pct != lastPct && pct % 10 == 0) {
+      // Update OLED every 5% — lightweight I2C only, NO network calls during flash
+      if (pct != lastPct && pct % 5 == 0) {
         lastPct = pct;
-        Serial.printf("   OTA: %d%%\n", pct);
+        Serial.printf("   OTA: %d%% (%d/%d)\n", pct, written, contentLength);
 
-        // OLED progress bar only (no postOTAProgress — SSL blocks download
-        // stream)
+        // OLED progress bar only (no postOTAProgress — SSL blocks download stream)
         display.clearDisplay();
         display.setCursor(2, 4);
         display.println("FLASHING");
@@ -4601,20 +4636,24 @@ void checkAndPerformOTA() {
         display.display();
       }
     } else if (bytesRead < 0) {
-      // TLS read returned -1: transient timeout between Cloud Run chunks
+      // TLS read returned -1: transient error
       readErrors++;
-      if (readErrors > 50) {
-        Serial.printf("❌ OTA: Stream read error (%d consecutive failures)\n", readErrors);
+      if (readErrors > 150) { // 150 × 200ms = 30s tolerance for Cloud Run pauses
+        Serial.printf("❌ OTA: Stream read error (%d consecutive failures at %d%%)\n",
+                      readErrors, (int)((written * 100) / contentLength));
         break;
       }
-      if (readErrors % 10 == 0) {
-        Serial.printf("⚠️ OTA: read() returned -1, retry %d/50 (%d%% done)\n",
-                      readErrors, (int)((written * 100) / contentLength));
+      if (readErrors % 25 == 0) {
+        Serial.printf("⚠️ OTA: read()=-1, retry %d/150 (%d%% done, heap=%u)\n",
+                      readErrors, (int)((written * 100) / contentLength),
+                      ESP.getFreeHeap());
       }
-      vTaskDelay(pdMS_TO_TICKS(200)); // Wait 200ms before retry — gives TLS time to receive next record
+      // Exponential backoff: 100ms → 200ms → 400ms (capped)
+      int backoff = min(400, 100 * (1 + readErrors / 25));
+      vTaskDelay(pdMS_TO_TICKS(backoff));
     } else {
       // bytesRead == 0: no data yet, yield and retry
-      vTaskDelay(1);
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
 
