@@ -1,8 +1,9 @@
 // ╔══════════════════════════════════════════════════════════════╗
-// ║  FORCE_EGG_HATCH — set to true to replay egg animation     ║
-// ║  Set false for normal operation (egg plays once, then never)║
+// ║  ⚠️ TEST BUILD — Fast timers for quick device testing       ║
+// ║  All user interactions work normally (feed, clean, play)    ║
+// ║  Only aging/hunger/poop/sickness timers are sped up         ║
 // ╚══════════════════════════════════════════════════════════════╝
-#define FORCE_EGG_HATCH true   // ← Change to true to replay egg animation
+#define FORCE_EGG_HATCH true   // ← Always replay egg animation in test
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -346,7 +347,7 @@ struct PetLocalState {
 
 PetLocalState g_petState;
 unsigned long lastPhysioTick = 0;
-#define PHYSIO_TICK_MS 360000 // Run physiology logic every 120 seconds
+#define PHYSIO_TICK_MS 90000 // ⚡ TEST: Every 90 seconds — enough time to test menus between ticks
 
 void savePetState() {
   petPrefs.begin("pet_state", false);
@@ -437,7 +438,7 @@ void syncLocalStateToUI() {
 
   // 🎮 Play icon: appears 15 min (900000ms) after poop is cleared
   if (poopClearedTime > 0 && !showPoopIcon && !petIsSick &&
-      millis() - poopClearedTime >= 900000) {
+      millis() - poopClearedTime >= 60000) { // ⚡ TEST: Play icon after 1 min (was 15 min)
     showPlayIcon = true;
   }
   // Reset play icon when poop reappears or pet gets sick
@@ -1318,6 +1319,11 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  Serial.println("\n\n⚠️⚠️⚠️ TEST BUILD — FAST TIMERS ACTIVE ⚠️⚠️⚠️");
+  Serial.println("Physio tick: 90s | Aging: +4hrs/tick | 1 day every ~9 min");
+  Serial.println("Play icon: 1 min after clean | Egg hatch: FORCED ON");
+  Serial.println("All user interactions (feed/clean/medicine/game) work normally");
+  Serial.println("════════════════════════════════════════════════════════");
   Serial.println("\n\nESP32 Dashboard Client Starting...");
 
   // Initialize LED
@@ -3708,7 +3714,7 @@ void handlePhysiology() {
   Serial.println("💓 Physiology Tick (120s)");
 
   // 1️⃣ Uptime & Aging
-  g_petState.totalUptimeSecs += 120;
+  g_petState.totalUptimeSecs += 14400; // ⚡ TEST: +4 hours per tick (was +120s) → 1 day every 6 ticks (3 min)
   int newAgeDays = g_petState.totalUptimeSecs / 86400; // 24 hours
   if (newAgeDays > g_petState.ageInt) {
     g_petState.ageInt = newAgeDays;
@@ -3747,20 +3753,20 @@ void handlePhysiology() {
     healthPenalty += 10;
 
   // Sickness Engine (Hardware Authoritative)
-  // Pet gets sick if neglected: Health drops too low, or generic random chance
+  // ⚡ TEST: Boosted chances so sickness triggers reliably during testing
   if (!g_petState.isSick) {
-    if (g_petState.health <= 50 && random(0, 100) < 30) {
-      // 30% chance to get sick each tick if health is critical (<=50)
+    if (g_petState.health <= 70 && random(0, 100) < 60) {
+      // ⚡ TEST: 60% chance if health <= 70 (was 30% at <=50)
       g_petState.isSick = true;
       Serial.println("🤒 Pet became sick due to poor health/neglect!");
-    } else if (g_petState.hasPoop && random(0, 100) < 15) {
-      // 15% chance to get sick each tick if poop is left uncleared
+    } else if (g_petState.hasPoop && random(0, 100) < 50) {
+      // ⚡ TEST: 50% chance with poop (was 15%)
       g_petState.isSick = true;
       Serial.println("🤒 Pet became sick from living with poop!");
-    } else if (petAge == OLD && random(0, 100) < 5) {
-      // 5% chance for old pets naturally
+    } else if (random(0, 100) < 15) {
+      // ⚡ TEST: 15% chance any age (was 5% OLD only)
       g_petState.isSick = true;
-      Serial.println("🤒 Old pet became sick naturally");
+      Serial.println("🤒 Pet became sick (test random chance)");
     }
   }
 
@@ -3770,8 +3776,8 @@ void handlePhysiology() {
   g_petState.health = max(0, g_petState.health - healthPenalty);
 
   // Poop generation (30 min after feed)
-  // Simplified: 5% chance per tick if hunger < 50 and no poop
-  if (!g_petState.hasPoop && g_petState.hunger < 50 && random(0, 100) < 5) {
+  // ⚡ TEST: 25% poop chance (was 5%) so you can test cleaning often
+  if (!g_petState.hasPoop && g_petState.hunger < 60 && random(0, 100) < 25) {
     g_petState.hasPoop = true;
     Serial.println("💩 Pet pooped!");
   }
