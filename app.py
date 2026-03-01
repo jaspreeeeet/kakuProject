@@ -19,7 +19,7 @@ import hashlib
 
 # AI / Sensory Analysis Configuration
 _hf_prefix = "hf_"
-_hf_suffix = "AzcNCoSJJtMIzmmQqohyOLnyjFhDMaClZH"
+_hf_suffix = "lLNwbwyShpzYRBsGuAvwZzlWpgawrEQOed"
 HF_TOKEN = os.environ.get("HF_TOKEN", _hf_prefix + _hf_suffix)
 AI_AVAILABLE = bool(HF_TOKEN)
 AI_MODE = "FULL"  # "FULL" uses HuggingFace BLIP captioning API
@@ -215,13 +215,17 @@ def detect_device_orientation(ax, ay, az):
         print(f"❌ Error in orientation detection: {e}")
         return "UNKNOWN", 0.0
 
-# HuggingFace Inference API — no torch/transformers needed
+# HuggingFace Inference API — Google ViT image classification
 import requests as hf_requests
 
-HF_API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/google/vit-base-patch16-224"
 
 def analyze_image_with_ai(image_data, is_path=False):
-    """Analyze image using HuggingFace Inference API (BLIP captioning model)"""
+    """Analyze image using HuggingFace Inference API (Google ViT classifier)
+    
+    Uses google/vit-base-patch16-224 for image classification.
+    Converts top classification labels into a descriptive caption.
+    """
     if not AI_AVAILABLE or not HF_TOKEN:
         return "AI analysis not available"
     
@@ -233,19 +237,48 @@ def analyze_image_with_ai(image_data, is_path=False):
         else:
             img_bytes = image_data if isinstance(image_data, bytes) else bytes(image_data)
         
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "image/jpeg"
+        }
         response = hf_requests.post(HF_API_URL, headers=headers, data=img_bytes, timeout=30)
         
         if response.status_code == 200:
             results = response.json()
             if results and len(results) > 0:
-                caption = results[0].get("generated_text", "Unknown")
-                print(f"🤖 BLIP Caption: {caption}")
-                return caption.capitalize()
-            return "No caption generated"
+                # Build caption from top classification labels
+                top_labels = []
+                for item in results[:3]:
+                    label = item.get("label", "")
+                    score = item.get("score", 0)
+                    # Take first name if comma-separated (e.g. "punching bag, punchball" -> "punching bag")
+                    clean_label = label.split(",")[0].strip()
+                    if score > 0.05:  # Only include labels with >5% confidence
+                        top_labels.append(clean_label)
+                
+                if top_labels:
+                    # Primary label with high confidence
+                    primary = results[0]
+                    primary_label = primary["label"].split(",")[0].strip()
+                    primary_score = primary["score"]
+                    
+                    if primary_score > 0.5:
+                        caption = f"I see a {primary_label}"
+                    elif len(top_labels) == 1:
+                        caption = f"Looks like a {top_labels[0]}"
+                    else:
+                        caption = f"I see {', '.join(top_labels[:2])}"
+                    
+                    # Add all top labels for keyword matching
+                    full_caption = f"{caption} ({', '.join(top_labels)})"
+                    print(f"🤖 ViT Classification: {full_caption}")
+                    return full_caption
+                    
+                return "Could not classify image"
+            return "No classification results"
         elif response.status_code == 503:
             # Model loading — HuggingFace cold start
-            print("⏳ BLIP model loading on HuggingFace, will retry next time")
+            print("⏳ ViT model loading on HuggingFace, will retry next time")
             return "Model loading, please wait"
         else:
             print(f"❌ HuggingFace API error: {response.status_code} {response.text[:100]}")
@@ -259,7 +292,7 @@ def analyze_image_with_ai(image_data, is_path=False):
 def analyze_and_store_image_blob(reading_id, image_blob):
     """Background task: Run BLIP analysis, store result, and trigger emotional override"""
     try:
-        print(f"🤖 [BACKGROUND] Starting BLIP analysis for reading #{reading_id}...")
+        print(f"🤖 [BACKGROUND] Starting ViT analysis for reading #{reading_id}...")
         ai_caption = analyze_image_with_ai(image_blob, is_path=False)
         
         # Determine device_id from reading
@@ -283,7 +316,7 @@ def analyze_and_store_image_blob(reading_id, image_blob):
                     if row: device_id = row[0]
                     
                     conn.commit()
-                    print(f"✅ [BG] Stored BLIP caption for reading #{reading_id}: {ai_caption}")
+                    print(f"✅ [BG] Stored ViT caption for reading #{reading_id}: {ai_caption}")
                 except sqlite3.Error as e:
                     print(f"❌ [BG] DB Error: {e}")
                 finally:
@@ -292,8 +325,19 @@ def analyze_and_store_image_blob(reading_id, image_blob):
         # 🧠 SENSORY INTELLIGENCE: Trigger emotion based on AI analysis
         if ai_caption:
             caption_lower = ai_caption.lower()
-            positive_keywords = ["food", "fruit", "bottle", "toy", "person", "man", "woman", "face", "dog", "cat", "snack"]
-            negative_keywords = ["trash", "dirty", "fire", "dark", "scary"]
+            # ImageNet class labels from Google ViT classifier
+            positive_keywords = [
+                "food", "fruit", "bottle", "toy", "person", "man", "woman", "face", "dog", "cat", "snack",
+                "teddy", "pizza", "ice cream", "cake", "banana", "orange", "cup", "plate", "bowl",
+                "golden retriever", "labrador", "poodle", "kitten", "puppy", "hamster",
+                "flower", "daisy", "sunflower", "rose", "garden", "park", "beach",
+                "ball", "comic book", "mouse", "keyboard", "laptop", "television"
+            ]
+            negative_keywords = [
+                "trash", "dirty", "fire", "dark", "scary",
+                "scorpion", "spider", "snake", "cockroach", "toilet", "syringe",
+                "guillotine", "rifle", "assault rifle", "knife", "chain"
+            ]
             
             if any(k in caption_lower for k in positive_keywords):
                 print(f"💖 AI Senses: POSITIVE ({ai_caption}) -> Triggering HAPPY emotion")
