@@ -1146,6 +1146,12 @@
                 }
             });
 
+            // Listen for new image uploads to auto-refresh
+            socket.on('new_image_available', function (data) {
+                console.log('📸 New image uploaded! Auto-refreshing...');
+                loadLatestAIImage();
+            });
+
             socket.on('sensor_update', function (data) {
                 console.log('Received sensor update:', data);
                 updateDashboard(data);

@@ -1541,6 +1541,9 @@ def upload_binary_image():
         socketio.start_background_task(analyze_and_store_image_blob, image_id, image_data)
         print(f"🤖 [UPLOAD] Triggered background AI analysis for image #{image_id}")
         
+        # Broadcast to frontend that a new image is available
+        socketio.emit('new_image_available', {'image_id': image_id})
+        
         # NOTE: PET FEEDING logic moved to LOCAL HARDWARE for instant response.
         # Server mirroring happens via /api/sensor-data sync.
         

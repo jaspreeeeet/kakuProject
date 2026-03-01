@@ -426,6 +426,7 @@ void syncLocalStateToUI() {
   petIsHungry = (g_petState.hunger > 70);
   petIsSick = g_petState.isSick;
   showPoopIcon = g_petState.hasPoop;
+  showSickIcon = petIsSick;  // Heart icon when pet is sick
   showFoodIcon = petIsHungry;
 
   // 🎮 Play icon: appears 15 min (900000ms) after poop is cleared
@@ -1414,7 +1415,7 @@ void setup() {
 
       // Mark hatching as done — will never play again
       petPrefs.begin("pet_state", false);
-      petPrefs.putBool("hasHatched", true);
+      petPrefs.putBool("hasHatched", false);
       petPrefs.end();
       Serial.println("🥚 Hatching complete — NVS flag set, won't play again.");
     } else {
@@ -3239,8 +3240,8 @@ void displayPetAnimation() {
       }
       }
     } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER" ||
-               currentEmotion == "POOP") {
-      // SAD/HUNGER/POOP - sad animation (poop present = pet is uncomfortable)
+               currentEmotion == "SICK") {
+      // SAD/HUNGER/SICK - sad animation + heart icon (sick = sad face + blinking heart)
       switch (petAge) {
       case INFANT: {
         frameData = infant_sad_frames[currentFrame % INFANT_SAD_FRAME_COUNT];
@@ -3267,6 +3268,38 @@ void displayPetAnimation() {
         frameData = old_sad[currentFrame % OLD_SAD_FRAME_COUNT];
         frameCount = OLD_SAD_FRAME_COUNT;
         display.drawBitmap(0, 0, frameData, OLD_SAD_WIDTH, OLD_SAD_HEIGHT,
+                           SSD1306_WHITE);
+        break;
+      }
+      }
+    } else if (currentEmotion == "POOP") {
+      // POOP - angry animation + poop icon (pet is annoyed by poop)
+      switch (petAge) {
+      case INFANT: {
+        frameData = infant_angry_frames[currentFrame % INFANT_ANGRY_FRAME_COUNT];
+        frameCount = INFANT_ANGRY_FRAME_COUNT;
+        display.drawBitmap(0, 0, frameData, INFANT_ANGRY_WIDTH, INFANT_ANGRY_HEIGHT,
+                           SSD1306_WHITE);
+        break;
+      }
+      case CHILD: {
+        frameData = child_angry[currentFrame % CHILD_ANGRY_FRAME_COUNT];
+        frameCount = CHILD_ANGRY_FRAME_COUNT;
+        display.drawBitmap(0, 0, frameData, CHILD_ANGRY_WIDTH, CHILD_ANGRY_HEIGHT,
+                           SSD1306_WHITE);
+        break;
+      }
+      case ADULT: {
+        frameData = angry_adult[currentFrame % ANGRY_ADULT_FRAME_COUNT];
+        frameCount = ANGRY_ADULT_FRAME_COUNT;
+        display.drawBitmap(0, 0, frameData, ANGRY_ADULT_WIDTH, ANGRY_ADULT_HEIGHT,
+                           SSD1306_WHITE);
+        break;
+      }
+      case OLD: {
+        frameData = old_angry[currentFrame % OLD_ANGRY_FRAME_COUNT];
+        frameCount = OLD_ANGRY_FRAME_COUNT;
+        display.drawBitmap(0, 0, frameData, OLD_ANGRY_WIDTH, OLD_ANGRY_HEIGHT,
                            SSD1306_WHITE);
         break;
       }
@@ -4477,47 +4510,49 @@ void checkAndPerformOTA() {
   int lastPct = -1;
   unsigned long lastDataTime = millis();
 
-  uint8_t buf[1024];
-  while (httpOTA.connected() && (written < (size_t)contentLength)) {
+  // Use global otaBuf[4096] instead of local buf[1024] to save stack
+  while (written < (size_t)contentLength) {
     // Watchdog — abort if no data for 60s
     if (millis() - lastDataTime > 60000) {
       Serial.println("❌ OTA: Download stalled (60s no data)");
       break;
     }
 
-    size_t available = stream->available();
-    if (available) {
-      int bytesRead =
-          stream->readBytes(buf, min((size_t)sizeof(buf), available));
-      if (bytesRead > 0) {
-        Update.write(buf, bytesRead);
-        written += bytesRead;
-        lastDataTime = millis();
+    // read() blocks until data arrives or timeout — never misses TLS records
+    // unlike available()+readBytes() which can return 0 while TLS buffers data
+    int bytesRead = stream->read(otaBuf, sizeof(otaBuf));
+    if (bytesRead > 0) {
+      Update.write(otaBuf, bytesRead);
+      written += bytesRead;
+      lastDataTime = millis();
 
-        int pct = (written * 100) / contentLength;
-        // Update OLED every 10% — lightweight I2C only, NO network calls during
-        // flash
-        if (pct != lastPct && pct % 10 == 0) {
-          lastPct = pct;
-          Serial.printf("   OTA: %d%%\n", pct);
+      int pct = (written * 100) / contentLength;
+      // Update OLED every 10% — lightweight I2C only, NO network calls during
+      // flash
+      if (pct != lastPct && pct % 10 == 0) {
+        lastPct = pct;
+        Serial.printf("   OTA: %d%%\n", pct);
 
-          // OLED progress bar only (no postOTAProgress — SSL blocks download
-          // stream)
-          display.clearDisplay();
-          display.setCursor(2, 4);
-          display.println("FLASHING");
-          display.setCursor(2, 16);
-          display.printf("%d%%", pct);
-          // Draw progress bar
-          display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
-          display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
-          display.display();
-        }
+        // OLED progress bar only (no postOTAProgress — SSL blocks download
+        // stream)
+        display.clearDisplay();
+        display.setCursor(2, 4);
+        display.println("FLASHING");
+        display.setCursor(2, 16);
+        display.printf("%d%%", pct);
+        // Draw progress bar
+        display.drawRect(2, 26, 60, 4, SSD1306_WHITE);
+        display.fillRect(2, 26, (60 * pct) / 100, 4, SSD1306_WHITE);
+        display.display();
       }
+    } else if (bytesRead < 0) {
+      // Stream error — connection dropped
+      Serial.println("❌ OTA: Stream read error");
+      break;
+    } else {
+      // bytesRead == 0: no data yet, yield and retry
+      vTaskDelay(1);
     }
-
-    // Yield to RTOS, retry quickly
-    vTaskDelay(1);
   }
 
   httpOTA.end();
@@ -4848,15 +4883,16 @@ void sendImageData(String imageBase64) {
   // NOTE: binary_data allocated with malloc() above — acceptable for network
   // send buffer The source (capturedImageBuffer) correctly uses ps_malloc() in
   // cameraMonitorTask
-  WiFiClientSecure client;
-  client.setInsecure();
+  // Use global sslNet instead of local WiFiClientSecure to avoid stack overflow
+  // on 16KB network task (WiFiClientSecure uses ~10KB on ESP32)
+  sslNet.stop(); // Reset connection state before reuse
 
   HTTPClient http;
   http.setTimeout(10000);       // Reduced from 30s
   http.setConnectTimeout(5000); // Reduced from 10s
 
   if (!http.begin(
-          client,
+          sslNet,
           "https://kakuproject-90943350924.asia-south1.run.app/upload")) {
     Serial.println("❌ HTTP begin failed");
     free(binary_data);
@@ -5231,6 +5267,10 @@ void sendInjectRequest() {
 }
 
 void processEvent(const char *event_type, const char *message) {
+  if (!event_type || !message) {
+    Serial.println("⚠️ processEvent: null event_type or message, skipping");
+    return;
+  }
   Serial.println("🔧 Processing event...");
 
   // Simple event processing - you can extend this based on your needs

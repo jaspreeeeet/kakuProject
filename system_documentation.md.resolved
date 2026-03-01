@@ -1,0 +1,230 @@
+# KAKU System Documentation
+
+## NVS (Non-Volatile Storage)
+
+| NVS Key | Type | Default | Description |
+|---------|------|---------|-------------|
+| `hunger` | int | 0 | 0-100 (100 = starving) |
+| [health](file:///f:/kakuProject-main/app.py#1760-1768) | int | 100 | 0-100 |
+| `energy` | int | 100 | 0-100 |
+| `happiness` | int | 100 | 0-100 |
+| `discipline` | int | 100 | 0-100 |
+| [xp](file:///f:/kakuProject-main/app.py#1704-1744) | int | 0 | Cumulative experience |
+| `level` | int | 1 | Pet level |
+| `ageInt` | int | 0 | Age in days |
+| `uptime` | uint32 | 0 | Total active seconds |
+| `isSick` | bool | false | Sickness state |
+| `hasPoop` | bool | false | Poop present |
+| `version` | int | 0 | State version (conflict resolution) |
+
+WiFi credentials also stored in NVS namespace `"wifi"`.
+
+---
+
+## Boot / Reset Behavior
+
+> [!CAUTION]
+> **Currently, every boot resets all pet state to INFANT defaults** (hunger=0, health=100, etc.) and plays the full egg-hatching animation. This means losing all progress on every power cycle.
+
+**Boot sequence:**
+1. Serial init → I2C/OLED init → WiFi provisioning (NVS creds → hardcoded → AP mode)
+2. Show "KAKU Starting..." text
+3. Play egg cracking animation → slide egg out → slide infant in
+4. **Reset ALL pet state to defaults** ([savePetState()](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#348-366) with fresh values)
+5. Init MPU6050, camera, audio → drop CPU to 80MHz
+6. Start FreeRTOS tasks: [oledTask](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#829-832) (Core 0), [networkTask](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#831-834) (Core 1)
+
+---
+
+## Data Flow: Hardware ↔ Server
+
+### When data IS sent (all via [networkTask](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#831-834) on Core 1):
+
+| Request | Trigger | Interval | Data Sent |
+|---------|---------|----------|-----------|
+| `NET_SENSOR` | Staggered scheduler | Every **10s** | Accel/gyro batch, mic level, chip temp, sleep seconds, step count, **full pet_state** (hunger, health, happiness, discipline, energy, level, xp, is_sick, has_poop, age, uptime) |
+| `NET_OLED` | Staggered scheduler | Every **2s** | GET request to `/api/oled-display/get` — receives pet state, emotion, icons, events, OTA flag |
+| `NET_IMAGE` | Feeding gesture (left tilt 3s on FOOD_MENU) | On demand | Base64 camera image |
+| `NET_CLEAN` | Cleaning gesture (left tilt 3s on TOILET_MENU) | On demand | Cleaning request to `/api/pet/clean` |
+| `NET_INJECT` | Medicine gesture (left tilt 3s on HEALTH_MENU) | On demand | Injection request to `/api/pet/inject` |
+| `NET_HAPPY` | Right tilt menu cycle | On each cycle | Happiness +5 request |
+
+### When data is NOT sent:
+- **During sleep** — all network activity is paused
+- **During image upload** — sensor/OLED polling paused to avoid SSL conflicts
+- **WiFi disconnected** — retries with stored/hardcoded credentials
+
+---
+
+## OTA Updates
+
+OTA does **NOT** run on a periodic timer. It works as follows:
+1. Server sets `ota_update: true` in the OLED poll response (`/api/oled-display/get`)
+2. Hardware reads this flag during `NET_OLED` processing
+3. If `otaUpdateRequested == true`, calls [checkAndPerformOTA()](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#4271-4553) immediately
+4. OTA checks `/api/firmware/latest?device_id=ESP32_001&current_version=X.X.X`
+5. If newer version exists, downloads and flashes
+
+**Trigger:** Manual toggle from the frontend dashboard (Enable OTA button).
+
+---
+
+## Home Screen Icons
+
+### Top-Left Corner (mutually exclusive):
+
+| Icon | Variable | When Shown | Cause |
+|------|----------|------------|-------|
+| 🏠 Home | `showHomeIcon` | On MAIN screen when no play icon | Default, set when `currentScreenType == "MAIN"` |
+| 🎮 Play | `showPlayIcon` | **Overrides Home** when active | Currently: set by server via [show_play_icon](file:///f:/kakuProject-main/app.py#2296-2318) in OLED poll (not yet implemented locally) |
+
+### Bottom-Right Corner (priority: SICK > POOP > HUNGER):
+
+| Icon | Variable | When Shown | Cause & Trigger |
+|------|----------|------------|-----------------|
+| ❤️ Sick | `showSickIcon` | Pet is sick | Poop neglected >15 min (server-side logic), or 1% random chance per tick if OLD age |
+| 💩 Poop | `showPoopIcon` | Poop present | 5% random chance per 60s physiology tick, only when `hunger < 50` and no existing poop |
+| 🍽️ Food | `showFoodIcon` | Pet is hungry | `hunger > 70` (set in [syncLocalStateToUI](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#420-460)) |
+
+> [!IMPORTANT]
+> Icons are **hidden during walking and sleeping** animations.
+
+---
+
+## State Triggers & Timing
+
+### When does HUNGER occur?
+- Every **60s** physiology tick, hunger increases by a stage-dependent amount:
+  - INFANT: +15 per tick
+  - CHILD: +10 per tick
+  - ADULT: +8 per tick
+  - OLD: +12 per tick
+- **Food icon appears** when `hunger > 70`
+- **Emotion changes** to CRY (infant) or HUNGER (others)
+- **Cure:** Feed via left tilt 3s on FOOD_MENU (camera captures food)
+
+### When does POOP occur?
+- Every 60s tick: **5% random chance** if `hunger < 50` and no existing poop
+- This means poop comes **after the pet has been fed** (low hunger)
+- **Cure:** Left tilt 3s on TOILET_MENU → cleaning animation
+
+### When does SICK occur?
+- **Server-side:** Poop neglected for >15 minutes → `is_sick = true`
+- **Hardware:** 1% random chance per tick if pet is OLD age
+- **Cure:** Left tilt 3s on HEALTH_MENU → injection animation (3 loops)
+
+### When does PLAY icon appear?
+- **Currently:** Set by server via [show_play_icon](file:///f:/kakuProject-main/app.py#2296-2318) in OLED poll response
+- **Planned:** Will appear 15 minutes after poop is cleared
+
+---
+
+## Consequences of Neglect
+
+Every 60s physiology tick applies **health penalties**:
+
+| Neglected Condition | Health Loss/tick | Other Effects |
+|---------------------|-----------------|---------------|
+| `hunger > 80` | -5 | — |
+| `energy < 20` | -2 | — |
+| `hasPoop == true` | -10 | Discipline -2/tick |
+| `isSick == true` | -15 | — |
+| `hunger > 90` | — | Discipline -2/tick |
+
+If health reaches 0 → pet is in critical condition but does not die.
+
+---
+
+## Age System
+
+### How age increases:
+- `totalUptimeSecs` increments by 60 every physiology tick
+- **1 day = 86,400 seconds** of active uptime
+- When `totalUptimeSecs / 86400 > ageInt`, age increments + level up + 100 XP
+
+### Age → Stage mapping:
+
+| Age (days) | Stage | Variable |
+|-----------|-------|----------|
+| 0-5 | INFANT | `petAge = INFANT` |
+| 6-10 | CHILD | `petAge = CHILD` |
+| 11-17 | ADULT | `petAge = ADULT` |
+| 18+ | OLD | `petAge = OLD` |
+
+### Animations by age × emotion:
+
+| Emotion | Animation Arrays |
+|---------|-----------------|
+| HAPPY | `infant_happy`, `happy_child`, `happy_adult`, `old_happy` |
+| CRY | `infant_cry_frames`, `cry_child`, `cry_adult`, `old_cry` |
+| SURPRISE | `infant_surprise_frames`, `child_surprise`, `surprise_adult`, `old_surprise` |
+| SAD/HUNGER/POOP | `infant_sad_frames`, `child_sad`, `adult_sad`, `old_sad` |
+| IDLE | `infant_frames[0]`, `child_frames[0]`, `adult_frames[0]`, `old_happy[0]` (static) |
+| Default | `infant_frames`, `child_frames`, `adult_frames`, `old_happy` (animated) |
+
+> [!NOTE]
+> Food, hunger, poop, play, sickness **work at every age**. Only animation sprites change.
+
+---
+
+## Sleep System
+
+- **Trigger:** Device held **inverted (face-down) for 30 seconds** continuously
+- **Variable:** `isDeviceSleeping`, `NEUTRAL_SLEEP_TIMEOUT = 30000ms`
+- **Detection:** [isDeviceInverted()](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#733-735) checks if Z-axis < -7.0 m/s²
+- **Wake:** Any non-inverted movement
+
+### Effects of sleep:
+- All **network activity paused** (no sensor send, no OLED poll)
+- **OLED shows sleeping animation** (2-frame, `sleeping_frames[]`)
+- **Icons hidden** during sleep
+- **Sleep seconds accumulated** in `accumulatedSleepSec`, sent with next sensor upload
+- **Physiology tick continues** (hunger still rises during sleep)
+
+---
+
+## Menu System
+
+**Cycle order:** `MAIN → FOOD → TOILET → PLAY → HEALTH → STATUS_INFO → STATS → MAIN`
+**Gesture:** Right tilt (accelX > 0.8) held for **2 seconds** → cycles to next menu
+
+### Menu contents by state:
+
+| Menu | No Issues | Hungry | Sick | Poop | Play Active |
+|------|-----------|--------|------|------|-------------|
+| MAIN | Pet animation + Home icon | SAD animation + Food icon | SAD animation + Sick icon | SAD animation + Poop icon | Pet animation + Play icon (blinks) |
+| FOOD | Static food icon + "Feed Me" or tilt-to-feed prompt | Same + feeding gesture available | Same | Same | Same |
+| TOILET | Static toilet icon + "Clean" or "No Poop" | — | — | "Clean!" + cleaning gesture available | — |
+| PLAY | Play icon + game start prompt (left tilt 3s) | Same | Same | Same | Same |
+| HEALTH | Heart icon + "All Good" | Same | **"Give Med"** + injection gesture available | Same | Same |
+| STATUS_INFO | Smiley + Age + Flash + Calories | Same | Same | Same | Same |
+| STATS | Happiness bar + Discipline bar | Same | Same | Same | Same |
+
+---
+
+## Stats Display — Who Updates, When, How
+
+### OLED Stats:
+- **Updated by:** ESP32 hardware locally via [syncLocalStateToUI()](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#420-460) 
+- **When:** After every physiology tick (60s), after gestures (feed/clean/inject), and after OLED poll syncs server state
+- **How:** `g_petState` struct → legacy UI globals (`petHappiness`, `petDiscipline`, `petAgeInt`, etc.)
+
+### Frontend Dashboard (Hardware/Debug section):
+- **Updated by:** Server broadcasts via Socket.IO when sensor data arrives
+- **When:** Every **10 seconds** (when `NET_SENSOR` delivers data)
+- **How:** ESP32 sends [pet_state](file:///f:/kakuProject-main/app.py#990-1036) JSON → server's [sync_pet_state_to_db()](file:///f:/kakuProject-main/app.py#344-418) → Socket.IO [emit('pet_state_update')](file:///f:/kakuProject-main/app.py#477-486) → frontend's [updateDebugDashboard(data)](file:///f:/kakuProject-main/index.html#1720-1736)
+
+### Key variables:
+
+| Variable | Source | Controls |
+|----------|--------|----------|
+| `g_petState.*` | Hardware (authoritative) | All physiology calculations |
+| `petIsHungry` | `g_petState.hunger > 70` | Food icon + emotion |
+| `petIsSick` | `g_petState.isSick` | Sick icon + health menu |
+| `showPoopIcon` | `g_petState.hasPoop` | Poop icon + emotion |
+| `showFoodIcon` | `petIsHungry` | Food icon drawing |
+| `showSickIcon` | Server's `is_sick` via OLED poll | Sick icon drawing |
+| `showPlayIcon` | Server's [show_play_icon](file:///f:/kakuProject-main/app.py#2296-2318) via OLED poll | Play icon drawing |
+| `currentEmotion` | Computed in [syncLocalStateToUI()](file:///f:/kakuProject-main/esp32_sketch/esp32_sketch.ino#420-460) | Animation selection |
+| `petAge` | Computed from `petAgeInt` | Animation sprite set |
+| `currentScreenType` | Local menu cycling | Which screen to display |
