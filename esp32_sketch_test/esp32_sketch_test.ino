@@ -4,6 +4,7 @@
 // ║  Only aging/hunger/poop/sickness timers are sped up         ║
 // ╚══════════════════════════════════════════════════════════════╝
 #define FORCE_EGG_HATCH true   // ← Always replay egg animation in test
+#define TEST_START_AGE 10     // ← Set to 0-18 to force pet age (days), 99 = use saved age
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -1564,6 +1565,14 @@ void setup() {
 
   // Start dedicated network task on Core 1 (HTTP only, queue-driven)
   loadPetState();
+
+  // TEST_START_AGE override — force pet to a specific age for testing
+  #if TEST_START_AGE < 99
+    g_petState.ageInt = TEST_START_AGE;
+    g_petState.totalUptimeSecs = (uint32_t)TEST_START_AGE * 86400;
+    Serial.printf("⚡ TEST: Forced age to %d days (uptime=%lu)\n", TEST_START_AGE, g_petState.totalUptimeSecs);
+  #endif
+
   syncLocalStateToUI();
 
   xTaskCreatePinnedToCore(

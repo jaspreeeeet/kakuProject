@@ -1025,9 +1025,9 @@ def get_pet_state(device_id='ESP32_001'):
             
             # Derive stage from age (matching hardware logic)
             age = state['age']
-            if age < 3: state['stage'] = 'INFANT'
-            elif age < 10: state['stage'] = 'CHILD'
-            elif age < 25: state['stage'] = 'ADULT'
+            if age <= 5: state['stage'] = 'INFANT'
+            elif age <= 10: state['stage'] = 'CHILD'
+            elif age <= 17: state['stage'] = 'ADULT'
             else: state['stage'] = 'OLD'
             
             return state

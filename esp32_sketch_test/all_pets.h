@@ -54,7 +54,7 @@ PROGMEM const uint8_t infant_frames[INFANT_FRAME_COUNT][256] = {
 #define CHILD_WIDTH 64
 #define CHILD_HEIGHT 32
 
-const uint16_t child_delays[CHILD_FRAME_COUNT] = {100, 100, 100};
+const uint16_t child_delays[CHILD_FRAME_COUNT] = {500, 500,500};
 
 PROGMEM const uint8_t child_frames[CHILD_FRAME_COUNT][256] = {
   {
@@ -1617,7 +1617,7 @@ PROGMEM const uint8_t old_angry[OLD_ANGRY_FRAME_COUNT][256] = {
 #define HAPPY_CHILD_WIDTH 64
 #define HAPPY_CHILD_HEIGHT 32
 
-const uint16_t happy_child_delays[HAPPY_CHILD_FRAME_COUNT] = {600, 600};
+const uint16_t happy_child_delays[HAPPY_CHILD_FRAME_COUNT] = {800, 800};
 
 PROGMEM const uint8_t happy_child[HAPPY_CHILD_FRAME_COUNT][256] = {
   {
