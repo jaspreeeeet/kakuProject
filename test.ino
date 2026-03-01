@@ -98,6 +98,7 @@ void setup() {
 
     // Skip SSL certificate verification (for testing)
     sslClient.setInsecure();
+    sslClient.setTimeout(10);  // 10s SSL handshake timeout (matches main sketch)
 
     Serial.println("\n🟢 Ready! Send C/R/A via Serial Monitor.\n");
 }
@@ -216,49 +217,63 @@ bool captureAndUpload() {
     }
     Serial.printf("📸 Captured: %d bytes (JPEG %dx%d)\n", fb->len, fb->width, fb->height);
 
-    // Upload to server as binary
-    Serial.printf("📤 Uploading to %s/upload ...\n", SERVER_BASE);
-    
-    sslClient.stop();
-    HTTPClient http;
-    http.setTimeout(30000);
-    http.setConnectTimeout(15000);
-
-    String url = String(SERVER_BASE) + "/upload?device_id=ESP32_TEST";
-    if (!http.begin(sslClient, url)) {
-        Serial.println("❌ HTTP begin failed");
-        esp_camera_fb_return(fb);
-        return false;
-    }
-
-    http.addHeader("Content-Type", "application/octet-stream");
-    
-    unsigned long startMs = millis();
-    int httpCode = http.sendRequest("POST", fb->buf, fb->len);
-    unsigned long elapsed = millis() - startMs;
-
-    if (httpCode == 200) {
-        String response = http.getString();
-        Serial.printf("✅ Upload OK (%lu ms)\n", elapsed);
-        Serial.printf("📝 Server response: %s\n", response.c_str());
+    // Upload to server as binary (with retry)
+    bool success = false;
+    for (int attempt = 1; attempt <= 3 && !success; attempt++) {
+        if (attempt > 1) {
+            Serial.printf("🔄 Retry attempt %d/3...\n", attempt);
+            delay(2000);
+        }
         
-        // Parse image_id from response
-        StaticJsonDocument<512> doc;
-        DeserializationError jsonErr = deserializeJson(doc, response);
-        if (!jsonErr && doc.containsKey("image_id")) {
-            lastImageId = doc["image_id"].as<int>();
-            Serial.printf("🆔 Image ID: %d\n", lastImageId);
+        Serial.printf("📤 Uploading to %s/upload ...\n", SERVER_BASE);
+        
+        sslClient.stop();
+        delay(100);
+        sslClient.setInsecure();
+        sslClient.setTimeout(10);
+        
+        HTTPClient http;
+        http.setTimeout(10000);
+        http.setConnectTimeout(5000);
+
+        String url = String(SERVER_BASE) + "/upload?device_id=ESP32_TEST";
+        if (!http.begin(sslClient, url)) {
+            Serial.println("❌ HTTP begin failed");
+            continue;
         }
-    } else {
-        Serial.printf("❌ Upload FAILED! HTTP %d (%lu ms)\n", httpCode, elapsed);
-        if (httpCode > 0) {
-            Serial.printf("   Response: %s\n", http.getString().c_str());
+
+        http.addHeader("Content-Type", "application/octet-stream");
+        
+        unsigned long startMs = millis();
+        int httpCode = http.sendRequest("POST", fb->buf, fb->len);
+        unsigned long elapsed = millis() - startMs;
+
+        if (httpCode == 200) {
+            String response = http.getString();
+            Serial.printf("✅ Upload OK (%lu ms)\n", elapsed);
+            Serial.printf("📝 Server response: %s\n", response.c_str());
+            
+            // Parse image_id from response
+            StaticJsonDocument<512> doc;
+            DeserializationError jsonErr = deserializeJson(doc, response);
+            if (!jsonErr && doc.containsKey("image_id")) {
+                lastImageId = doc["image_id"].as<int>();
+                Serial.printf("🆔 Image ID: %d\n", lastImageId);
+            }
+            success = true;
+        } else {
+            Serial.printf("❌ Upload FAILED! HTTP %d (%lu ms)\n", httpCode, elapsed);
+            if (httpCode > 0) {
+                Serial.printf("   Response: %s\n", http.getString().c_str());
+            } else {
+                Serial.printf("   Error: connection failed (SSL handshake timeout?)\n");
+            }
         }
+        http.end();
     }
 
-    http.end();
     esp_camera_fb_return(fb);
-    return (httpCode == 200);
+    return success;
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -273,9 +288,13 @@ bool fetchLatestCaption() {
     Serial.println("🤖 Fetching latest AI caption...");
     
     sslClient.stop();
+    delay(100);
+    sslClient.setInsecure();
+    sslClient.setTimeout(10);
+    
     HTTPClient http;
-    http.setTimeout(30000);
-    http.setConnectTimeout(15000);
+    http.setTimeout(10000);
+    http.setConnectTimeout(5000);
 
     String url = String(SERVER_BASE) + "/api/latest-image?caption_only=1";
     if (!http.begin(sslClient, url)) {
