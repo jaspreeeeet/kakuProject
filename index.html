@@ -559,6 +559,30 @@
                 <div class="sensor-label">Samples/sec</div>
             </div>
 
+            <!-- Live Speech-to-Text Card -->
+            <div class="card">
+                <h2><span class="card-icon">🗣️</span> Live STT</h2>
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                    <div id="sttStatusDot" style="width: 10px; height: 10px; border-radius: 50%; background: #888; flex-shrink: 0;"></div>
+                    <span id="sttStatusText" style="color: #888; font-size: 0.85em;">Waiting for audio...</span>
+                </div>
+                <div id="sttLatestText" style="
+                    background: #1a1a2e;
+                    border: 1px solid #333;
+                    border-radius: 10px;
+                    padding: 16px;
+                    min-height: 50px;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 1.1em;
+                    line-height: 1.5;
+                    color: #e0e0e0;
+                    text-align: center;
+                ">🎤 Waiting...</div>
+                <div style="margin-top: 8px; font-size: 0.75em; color: #888; text-align: center;">
+                    <span id="sttLastTime">—</span>
+                </div>
+            </div>
+
             <!-- Chip Temperature Card -->
             <div class="card">
                 <h2><span class="card-icon">🌡️</span> Chip Temperature</h2>
@@ -1150,6 +1174,12 @@
             socket.on('new_image_available', function (data) {
                 console.log('📸 New image uploaded! Auto-refreshing...');
                 loadLatestAIImage();
+            });
+
+            // 🗣️ Live Speech-to-Text from ESP32 audio
+            socket.on('stt_transcription', function (data) {
+                console.log('🗣️ STT transcription:', data);
+                addSttTranscript(data);
             });
 
             socket.on('sensor_update', function (data) {
@@ -1969,6 +1999,52 @@
                 })
                 .catch(err => console.log('OTA progress poll error:', err));
         }
+
+        // ================= SPEECH-TO-TEXT LIVE DISPLAY =================
+        function addSttTranscript(data) {
+            const textEl = document.getElementById('sttLatestText');
+            const time = data.timestamp || new Date().toLocaleTimeString();
+            document.getElementById('sttLastTime').textContent = time;
+
+            const dot = document.getElementById('sttStatusDot');
+            const statusText = document.getElementById('sttStatusText');
+
+            if (data.text && data.text.trim().length > 0) {
+                dot.style.background = '#51cf66';
+                statusText.textContent = 'Speech detected';
+                statusText.style.color = '#51cf66';
+                textEl.style.color = '#fff';
+                textEl.style.textAlign = 'left';
+                textEl.innerHTML = '🗣️ ' + data.text;
+            } else {
+                dot.style.background = '#ffd43b';
+                statusText.textContent = 'Silence';
+                statusText.style.color = '#ffd43b';
+                textEl.style.color = '#666';
+                textEl.style.textAlign = 'center';
+                textEl.innerHTML = '🔇 (silence)';
+            }
+
+            setTimeout(() => {
+                dot.style.background = '#888';
+                statusText.textContent = 'Listening...';
+                statusText.style.color = '#888';
+            }, 3000);
+        }
+
+        // Load only the latest STT on page load
+        function loadSttHistory() {
+            fetch(API_BASE + '/api/stt-history')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.transcripts && data.transcripts.length > 0) {
+                        addSttTranscript(data.transcripts[data.transcripts.length - 1]);
+                    }
+                })
+                .catch(err => console.log('STT history load error:', err));
+        }
+
+        loadSttHistory();
     </script>
 </body>
 

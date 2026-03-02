@@ -1533,6 +1533,111 @@ def upload_audio_data():
         'message': 'Audio upload is currently disabled (ESP32 not sending audio)'
     }), 200
 
+# ================= AUDIO STT ENDPOINT (ElevenLabs) =================
+# ESP32 sends WAV file via multipart → server forwards to ElevenLabs STT
+# Transcription text broadcast to frontend via SocketIO in real-time
+
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "sk_7896fd646fe6b65cafb3985768909e08147f0a6d473b32f1")
+ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+
+# In-memory transcript history (latest N entries)
+stt_transcript_history = deque(maxlen=50)
+
+@app.route('/api/audio-stt', methods=['POST'])
+def audio_stt():
+    """
+    Receive WAV audio from ESP32 (multipart/form-data), forward to ElevenLabs STT.
+    Returns transcription text and broadcasts to frontend via SocketIO.
+    """
+    try:
+        # Get uploaded WAV file
+        if 'file' not in request.files:
+            # Fallback: try reading raw body
+            wav_data = request.get_data()
+            if not wav_data or len(wav_data) < 100:
+                return jsonify({'status': 'error', 'message': 'No audio file received'}), 400
+        else:
+            wav_file = request.files['file']
+            wav_data = wav_file.read()
+
+        audio_size_kb = len(wav_data) / 1024
+        duration_sec = max(0, (len(wav_data) - 44)) / (16000 * 2)  # Estimate from PCM size
+        print(f'🎤 Audio received: {audio_size_kb:.1f} KB ({duration_sec:.1f}s)')
+
+        # Forward to ElevenLabs STT API
+        import requests as stt_requests
+
+        files = {
+            'file': ('audio.wav', wav_data, 'audio/wav'),
+        }
+        data = {
+            'model_id': 'scribe_v1',
+        }
+        headers = {
+            'xi-api-key': ELEVENLABS_API_KEY,
+        }
+
+        stt_response = stt_requests.post(
+            ELEVENLABS_STT_URL,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=30
+        )
+
+        transcribed_text = ""
+        if stt_response.status_code == 200:
+            stt_result = stt_response.json()
+            transcribed_text = stt_result.get('text', '')
+            print(f'🗣️ STT result: "{transcribed_text}"')
+        else:
+            print(f'❌ ElevenLabs STT error {stt_response.status_code}: {stt_response.text[:200]}')
+            return jsonify({
+                'status': 'error',
+                'message': f'ElevenLabs STT failed: {stt_response.status_code}',
+                'detail': stt_response.text[:300]
+            }), 502
+
+        # Store in history
+        import time as stt_time
+        entry = {
+            'text': transcribed_text,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'epoch': stt_time.time(),
+            'audio_size_kb': round(audio_size_kb, 1),
+            'duration_sec': round(duration_sec, 1),
+        }
+        stt_transcript_history.append(entry)
+
+        # Broadcast to frontend via SocketIO
+        def emit_transcript():
+            try:
+                socketio.emit('stt_transcription', entry)
+            except Exception as e:
+                print(f'⚠️ SocketIO STT broadcast failed: {e}')
+        socketio.start_background_task(emit_transcript)
+
+        return jsonify({
+            'status': 'success',
+            'text': transcribed_text,
+            'audio_size_kb': round(audio_size_kb, 1),
+            'duration_sec': round(duration_sec, 1),
+        }), 200
+
+    except Exception as e:
+        print(f'❌ Audio STT error: {e}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/stt-history', methods=['GET'])
+def get_stt_history():
+    """Return recent transcription history for frontend on load"""
+    return jsonify({
+        'status': 'success',
+        'transcripts': list(stt_transcript_history)
+    }), 200
+
 @app.route('/upload', methods=['POST'])
 def upload_binary_image():
     """
