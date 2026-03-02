@@ -27,7 +27,7 @@ const char* AUDIO_UPLOAD_URL = "https://kakuproject-90943350924.asia-south1.run.
 #define SAMPLE_RATE     16000
 #define BUFFER_SIZE     512        // Samples per I2S read
 #define MAX_AUDIO_SIZE  (SAMPLE_RATE * 2 * 6)  // ~6 seconds max buffer (192KB)
-#define SEND_INTERVAL   5000       // Send every 5 seconds
+#define SEND_INTERVAL   3000       // Send every 5 seconds
 #define WAV_HEADER_SIZE 44
 #define VOLUME_GAIN     2          // Bit-shift amplification
 

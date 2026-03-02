@@ -4,7 +4,7 @@
 // ║  Only aging/hunger/poop/sickness timers are sped up         ║
 // ╚══════════════════════════════════════════════════════════════╝
 #define FORCE_EGG_HATCH true   // ← Always replay egg animation in test
-#define TEST_START_AGE 18     // ← Set to 0-18 to force pet age (days), 99 = use saved age
+#define TEST_START_AGE 0     // ← Set to 0-18 to force pet age (days), 99 = use saved age
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -519,6 +519,35 @@ const float LP_ALPHA_STEP =
 // ── OTA UPDATE STATE ───────────────────────────────────────────────────
 bool otaUpdateRequested = false; // Set true when server sends ota_update flag
 
+// ── STT (Speech-to-Text) MODE — activated by 3 rotations ──────────────
+volatile bool sttEnabled = false;           // True when STT mode is active
+uint8_t *stt_audio_buffer = NULL;           // PSRAM buffer for STT audio (raw PCM)
+size_t   stt_audio_size   = 0;              // Current bytes in STT buffer
+bool     stt_has_voice    = false;          // VAD positive in current STT window
+unsigned long stt_last_send_time = 0;       // Last time STT chunk was sent
+unsigned long stt_last_motion_time = 0;     // Last significant motion timestamp
+unsigned long sttChunkCount = 0;            // Total STT chunks sent
+const size_t  MAX_STT_AUDIO_SIZE = (16000 * 2 * 11); // ~11s max (352KB)
+const unsigned long STT_SEND_INTERVAL = 10000;        // Send STT every 10s
+const unsigned long STT_IDLE_TIMEOUT  = 20000;        // 20s no motion → disable STT
+const char* STT_UPLOAD_URL = "https://kakuproject-90943350924.asia-south1.run.app/api/audio-stt";
+
+// ── ROTATION DETECTION (3 flips → activate STT) ──────────────────────
+#define ROTATIONS_NEEDED      2
+#define ROTATION_TIMEOUT      5000   // ms — must complete one flip within this
+#define ROTATION_COOLDOWN     3000   // ms — pause after 3 rotations detected
+#define ROTATION_LP_ALPHA     0.3f   // Low-pass filter for accel (rotation)
+
+int   rot_current_quadrant   = 0;
+int   rot_quadrants_visited  = 0;    // Bitmask bits 0-3
+int   rot_last_quadrant      = -1;
+int   rot_direction          = 0;    // +1 forward, -1 backward
+int   rot_count              = 0;    // Full rotations completed
+unsigned long rot_start_time = 0;    // When current rotation attempt started
+unsigned long rot_last_rotation_time = 0;  // When last successful rotation happened
+float rot_filtered_ax = 0, rot_filtered_az = 0;  // LP-filtered accel
+bool  rot_filter_warmed = false;     // LP filter warmed up flag
+
 // Global SSL client for OTA — WiFiClientSecure is ~16KB, MUST be global (not on
 // stack)
 WiFiClientSecure sslOTA;
@@ -786,7 +815,8 @@ enum NetReqType : uint8_t {
   NET_CLEAN = 4,  // Send cleaning request (left tilt 3s on TOILET_MENU)
   NET_INJECT = 5, // Send medicine given (left tilt 3s on HEALTH_MENU)
   NET_HAPPY = 6,       // Right tilt menu cycle interaction → happiness +5
-  NET_GAME_REWARD = 7  // Send game score + KakuCoin reward after game over
+  NET_GAME_REWARD = 7, // Send game score + KakuCoin reward after game over
+  NET_STT = 8          // Send STT audio chunk to server for transcription
 };
 
 // Pending game reward (written by OLED task, read by networkTask)
@@ -867,6 +897,12 @@ void networkTask(
     void *parameter); // Dedicated HTTP task on Core 1 (queue-driven)\nvoid
                       // checkAndPerformOTA();           // Check firmware
                       // server and perform OTA if newer version exists
+
+// ── STT / Rotation forward declarations ──────────────────────────────
+int  getRotationQuadrant(float angle_deg);   // Pitch angle → quadrant 0-3
+void resetRotationState();                    // Reset rotation tracking state
+void checkRotationDetection(float ax, float az); // Process accel for rotation
+bool sendSTTAudioToServer();                  // Send STT audio via multipart POST
 
 // ================= WIFI PROVISIONING FUNCTIONS =================
 
@@ -1509,6 +1545,30 @@ void setup() {
 
   // Initialize I2S Microphone
   initAudio();
+
+  // ── Allocate STT audio buffer in PSRAM ──────────────────────────────
+  stt_audio_buffer = (uint8_t*)ps_malloc(MAX_STT_AUDIO_SIZE);
+  if (stt_audio_buffer) {
+    Serial.printf("✅ STT buffer allocated: %d KB in PSRAM\n", MAX_STT_AUDIO_SIZE / 1024);
+  } else {
+    Serial.println("⚠️ STT PSRAM alloc failed — STT disabled");
+  }
+
+  // ── Warm up rotation LP filter using MPU data ───────────────────────
+  if (mpuAvailable) {
+    for (int i = 0; i < 20; i++) {
+      int16_t rax, ray, raz;
+      mpu.getAcceleration(&rax, &ray, &raz);
+      rot_filtered_ax = rax / 16384.0f;
+      rot_filtered_az = raz / 16384.0f;
+      delay(20);
+    }
+    float init_angle = atan2(rot_filtered_ax, rot_filtered_az) * 180.0f / M_PI;
+    rot_current_quadrant = getRotationQuadrant(init_angle);
+    rot_last_quadrant = rot_current_quadrant;
+    rot_filter_warmed = true;
+    Serial.printf("✅ Rotation LP warmed (angle=%.1f° Q%d)\n", init_angle, rot_current_quadrant);
+  }
 
   // NOW drop CPU to idle frequency — all hardware init is done
   setCpuFrequencyMhz(80);
@@ -3624,6 +3684,16 @@ void displayPetAnimation() {
       }
     }
 
+    // ── STT "Talk" indicator — tiny text at top-right when STT active ──
+    // Bitmap is full 64×32 — must clear area first so text is visible
+    if (sttEnabled) {
+      display.fillRect(39, 0, 25, 9, SSD1306_BLACK);  // Clear bg behind text
+      display.setTextSize(1);                // Smallest (6×8 font)
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(40, 1);              // Top-right area on 64×32 display
+      display.print("Talk");
+    }
+
     // Only animation - no text
     display.display();
 
@@ -3713,6 +3783,11 @@ void networkTask(void *parameter) {
       case NET_GAME_REWARD:
         // Game over — send score + KakuCoin reward (safe on Core 1)
         sendKakuCoinReward(pendingRewardScore, pendingRewardKC);
+        break;
+
+      case NET_STT:
+        // Send STT audio chunk to server for transcription
+        sendSTTAudioToServer();
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(20)); // Brief settle between requests
@@ -3905,6 +3980,14 @@ void loop() {
   // ── SENSOR BATCH COLLECTION (every 100ms, fast I2C only, no HTTP) ──────────
   if (millis() - lastInternalReadTime >= INTERNAL_READ_INTERVAL) {
     lastInternalReadTime = millis();
+
+    // ── Rotation detection runs ALWAYS (not gated by batch full) ──────
+    if (mpuAvailable) {
+      int16_t rax, ray, raz;
+      mpu.getAcceleration(&rax, &ray, &raz);
+      checkRotationDetection(rax / 16384.0f, raz / 16384.0f);
+    }
+
     if (sensorBatch.reading_count < SensorDataBatch::MAX_READINGS) {
       SingleReading reading;
       reading.timestamp_ms = millis();
@@ -3918,6 +4001,18 @@ void loop() {
         reading.gyro_x = gx / 131.0;
         reading.gyro_y = gy / 131.0;
         reading.gyro_z = gz / 131.0;
+
+        // ── STT idle motion tracking ──
+        // Any significant accel deviation from gravity → device is moving
+        if (sttEnabled) {
+          float totalG = sqrt(reading.accel_x * reading.accel_x +
+                              reading.accel_y * reading.accel_y +
+                              reading.accel_z * reading.accel_z);
+          if (fabs(totalG - 9.81) > 2.0 || fabs(reading.gyro_x) > 30 ||
+              fabs(reading.gyro_y) > 30 || fabs(reading.gyro_z) > 30) {
+            stt_last_motion_time = millis();
+          }
+        }
       } else {
         reading.accel_x = reading.accel_y = reading.accel_z = 0.0;
         reading.gyro_x = reading.gyro_y = reading.gyro_z = 0.0;
@@ -3940,6 +4035,27 @@ void loop() {
     Serial.println("⚠️ Feeding gesture timeout - resetting flags");
     capturingForFeeding = false;
     isUploadingImage = false; // Also reset eating animation
+  }
+
+  // ── STT STATUS LOG (every 5s while active) ─────────────────────────────
+  static unsigned long lastSttLoopLog = 0;
+  if (sttEnabled && millis() - lastSttLoopLog >= 5000) {
+    Serial.printf("📡 STT status: enabled=%d | buf=%s | size=%d | motion=%lus ago\n",
+      sttEnabled, stt_audio_buffer ? "OK" : "NULL",
+      stt_audio_size, (millis() - stt_last_motion_time) / 1000);
+    lastSttLoopLog = millis();
+  }
+
+  // ── STT IDLE TIMEOUT — disable STT if no motion for 20s ───────────────
+  if (sttEnabled && stt_last_motion_time > 0 &&
+      (millis() - stt_last_motion_time >= STT_IDLE_TIMEOUT)) {
+    sttEnabled = false;
+    stt_audio_size = 0;
+    stt_has_voice = false;
+    rot_count = 0;
+    resetRotationState();
+    Serial.println("🔇 STT disabled — no movement for 20s (rotate again to re-enable)");
+    Serial.printf("   Last motion was %lus ago\n", (millis() - stt_last_motion_time) / 1000);
   }
 
   // ── NEUTRAL / SLEEP STATE DETECTION ──────────────────────────────────────
@@ -4254,10 +4370,61 @@ void audioMonitorTask(void *parameter) {
 
     // Mic sleep: if silent for 2+ seconds and not recording, slow-poll to save
     // power (major heat reduction — I2S idles instead of continuous read)
-    if (!currentlyRecording && (currentTime - lastSoundTime) > 2000) {
+    // BUT: keep mic active when STT is enabled (continuous streaming)
+    if (!sttEnabled && !currentlyRecording && (currentTime - lastSoundTime) > 2000) {
       audioEnergyLevel = 0;           // Report silence
       vTaskDelay(pdMS_TO_TICKS(500)); // Sleep 500ms between reads (was 200ms)
       continue;
+    }
+
+    // ── STT CONTINUOUS STREAMING (when rotation-activated) ────────────
+    // Same as test_audio_stream: record 5s → send to server → repeat
+    if (sttEnabled) {
+      // VAD check for STT
+      bool voice = (energy > 1200); // STT VAD threshold
+      if (voice && !stt_has_voice) {
+        Serial.printf("🎤 STT: Voice detected! energy=%d (threshold=1200)\n", energy);
+      }
+      if (voice) stt_has_voice = true;
+
+      // Accumulate amplified samples into stt_audio_buffer
+      if (stt_audio_buffer && stt_audio_size + bytes_read < MAX_STT_AUDIO_SIZE) {
+        for (int i = 0; i < samples; i++) {
+          int32_t amp = (int32_t)vad_buffer[i] << VOLUME_GAIN;
+          if (amp > 32767) amp = 32767;
+          if (amp < -32768) amp = -32768;
+          int16_t out = (int16_t)amp;
+          memcpy(stt_audio_buffer + stt_audio_size, &out, 2);
+          stt_audio_size += 2;
+        }
+      }
+
+      // Periodic status log (every 2s)
+      static unsigned long lastSttStatusLog = 0;
+      if (currentTime - lastSttStatusLog >= 2000) {
+        Serial.printf("🎙️ STT recording: %d bytes (%.1fs) | voice=%s | energy=%d\n",
+          stt_audio_size, (float)stt_audio_size / (SAMPLE_RATE * 2),
+          stt_has_voice ? "YES" : "no", energy);
+        lastSttStatusLog = currentTime;
+      }
+
+      // Every STT_SEND_INTERVAL (10s): always send chunk to server
+      if (currentTime - stt_last_send_time >= STT_SEND_INTERVAL) {
+        if (stt_audio_size > 1024) {
+          Serial.printf("📤 STT: Queuing send — %d bytes (%.1fs)\n",
+            stt_audio_size, (float)stt_audio_size / (SAMPLE_RATE * 2));
+          uint8_t req = NET_STT;
+          xQueueSend(networkQueue, &req, 0);
+        } else {
+          Serial.println("⏰ STT: 10s window — no audio data");
+          stt_audio_size = 0;
+          stt_has_voice = false;
+        }
+        stt_last_send_time = currentTime;
+      }
+
+      // Throttle mic reads during STT to reduce heat
+      vTaskDelay(pdMS_TO_TICKS(30));
     }
 
     // If currently recording, add audio data to buffer
@@ -5469,6 +5636,221 @@ void generate_wav_header(uint8_t *wav_header, uint32_t wav_size,
   };
 
   memcpy(wav_header, header, sizeof(header));
+}
+
+// ================= ROTATION DETECTION FUNCTIONS =================
+// Quadrant from pitch angle (accelerometer-based, not gyro)
+int getRotationQuadrant(float angle_deg) {
+  if (angle_deg >= -45 && angle_deg < 45)   return 0;  // Upright
+  if (angle_deg >= 45 && angle_deg < 135)   return 1;  // Tilted forward
+  if (angle_deg >= -135 && angle_deg < -45)  return 3;  // Tilted backward
+  return 2; // Inverted (135→180 or -180→-135)
+}
+
+void resetRotationState() {
+  rot_quadrants_visited = 0;
+  rot_direction = 0;
+  rot_start_time = 0;
+}
+
+// Called every 100ms from sensor batch — processes raw accel for rotation
+void checkRotationDetection(float ax_raw, float az_raw) {
+  if (!rot_filter_warmed) return;
+
+  // Grace period: ignore first 3 seconds after boot (vibrations from startup)
+  static unsigned long rotDetectStartTime = 0;
+  if (rotDetectStartTime == 0) rotDetectStartTime = millis();
+  if (millis() - rotDetectStartTime < 3000) return;
+
+  // Low-pass filter
+  rot_filtered_ax = ROTATION_LP_ALPHA * ax_raw + (1.0f - ROTATION_LP_ALPHA) * rot_filtered_ax;
+  rot_filtered_az = ROTATION_LP_ALPHA * az_raw + (1.0f - ROTATION_LP_ALPHA) * rot_filtered_az;
+
+  float angle = atan2(rot_filtered_ax, rot_filtered_az) * 180.0f / M_PI;
+  int q = getRotationQuadrant(angle);
+
+  if (q == rot_last_quadrant) return; // No quadrant change
+
+  // Log quadrant transitions
+  static const char* qNames[] = {"UPRIGHT", "TILT-FWD", "INVERTED", "TILT-BACK"};
+  Serial.printf("🔄 Rotation: %s → %s (angle=%.1f°) | count=%d/%d\n",
+    qNames[rot_last_quadrant >= 0 && rot_last_quadrant <= 3 ? rot_last_quadrant : 0],
+    qNames[q], angle, rot_count, ROTATIONS_NEEDED);
+
+  // State machine: sequential quadrant traversal
+  // No time limit — count each full rotation whenever it happens
+  if (rot_quadrants_visited == 0) {
+    if (q != 0 && rot_last_quadrant == 0) {
+      // Just left Q0 — start tracking
+      rot_quadrants_visited = (1 << 0);
+      if (q == 1) {
+        rot_direction = +1;
+        rot_quadrants_visited |= (1 << 1);
+      } else if (q == 3) {
+        rot_direction = -1;
+        rot_quadrants_visited |= (1 << 3);
+      } else {
+        resetRotationState();
+      }
+    }
+  } else {
+    bool valid = false;
+    if (rot_direction == +1) {
+      int fwd[] = {0, 1, 2, 3, 0};
+      for (int i = 0; i < 4; i++) {
+        if (rot_last_quadrant == fwd[i] && q == fwd[i+1]) { valid = true; break; }
+      }
+    } else if (rot_direction == -1) {
+      int bwd[] = {0, 3, 2, 1, 0};
+      for (int i = 0; i < 4; i++) {
+        if (rot_last_quadrant == bwd[i] && q == bwd[i+1]) { valid = true; break; }
+      }
+    }
+
+    if (valid) {
+      rot_quadrants_visited |= (1 << q);
+      if (q == 0 && rot_quadrants_visited == 0x0F) {
+        // FULL ROTATION!
+        rot_count++;
+        rot_last_rotation_time = millis();
+        Serial.printf("🔄 Rotation #%d detected!\n", rot_count);
+        resetRotationState();
+
+        if (rot_count >= ROTATIONS_NEEDED) {
+          if (!sttEnabled) {
+            sttEnabled = true;
+            stt_audio_size = 0;
+            stt_has_voice = false;
+            stt_last_send_time = millis();
+            stt_last_motion_time = millis();
+            sttChunkCount = 0;
+            Serial.println("🎤 STT MODE ACTIVATED! (2 rotations) — \"Talk\" on OLED");
+            Serial.printf("   stt_audio_buffer=%s, PSRAM free=%d\n",
+              stt_audio_buffer ? "OK" : "NULL!", ESP.getFreePsram());
+          } else {
+            Serial.println("🔄 2 rotations done but STT already active — resetting count only");
+          }
+          rot_count = 0;
+        }
+      }
+    } else {
+      resetRotationState();
+    }
+  }
+
+  rot_last_quadrant = q;
+}
+
+// ================= STT AUDIO UPLOAD =================
+// Sends STT audio buffer as WAV via multipart/form-data (same as test_audio_stream)
+bool sendSTTAudioToServer() {
+  if (!stt_audio_buffer || stt_audio_size < 1024) {
+    stt_audio_size = 0;
+    stt_has_voice = false;
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ STT: WiFi not connected");
+    stt_audio_size = 0;
+    stt_has_voice = false;
+    return false;
+  }
+
+  // Boost CPU for HTTPS
+  safeCpuFreq(160);
+
+  // RACE FIX: Snapshot size and copy buffer atomically, then clear so
+  // Core 0 audio task can start refilling immediately
+  size_t snapshot_size = stt_audio_size;  // Snapshot before clearing
+  if (snapshot_size < 1024) {
+    stt_audio_size = 0;
+    stt_has_voice = false;
+    safeCpuFreq(80);
+    return false;
+  }
+
+  // Build WAV in PSRAM (copy buffer content FIRST, then clear)
+  size_t wav_size = snapshot_size + WAV_HEADER_SIZE;
+  uint8_t *wav_data = (uint8_t*)ps_malloc(wav_size);
+  if (!wav_data) {
+    Serial.println("❌ STT: WAV alloc failed");
+    stt_audio_size = 0;
+    stt_has_voice = false;
+    safeCpuFreq(80);
+    return false;
+  }
+
+  generate_wav_header(wav_data, snapshot_size, SAMPLE_RATE);
+  memcpy(wav_data + WAV_HEADER_SIZE, stt_audio_buffer, snapshot_size);
+
+  // Clear STT buffer NOW — Core 0 audio task can start refilling from byte 0
+  stt_audio_size = 0;
+  stt_has_voice = false;
+  size_t sent_size = snapshot_size;
+
+  // Build multipart body
+  String boundary = "----ESP32Audio";
+  String body_start =
+    "--" + boundary + "\r\n"
+    "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
+    "Content-Type: audio/wav\r\n\r\n";
+  String body_end = "\r\n--" + boundary + "--\r\n";
+
+  size_t total_size = body_start.length() + wav_size + body_end.length();
+  uint8_t *post_body = (uint8_t*)ps_malloc(total_size);
+  if (!post_body) {
+    Serial.println("❌ STT: POST body alloc failed");
+    free(wav_data);
+    safeCpuFreq(80);
+    return false;
+  }
+
+  memcpy(post_body, body_start.c_str(), body_start.length());
+  memcpy(post_body + body_start.length(), wav_data, wav_size);
+  memcpy(post_body + body_start.length() + wav_size, body_end.c_str(), body_end.length());
+  free(wav_data);
+
+  // Send HTTPS POST using shared sslNet client
+  // IMPORTANT: Reset connection state before STT (prevents HTTP -1 from stale socket)
+  sslNet.stop();
+  HTTPClient http;
+  http.setConnectTimeout(10000);
+  http.setTimeout(30000);
+  http.begin(sslNet, STT_UPLOAD_URL);
+  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+  sttChunkCount++;
+  Serial.printf("📤 STT chunk #%lu | %d bytes | %.1fs audio\n",
+    sttChunkCount, sent_size, (float)sent_size / (SAMPLE_RATE * 2));
+
+  int code = http.POST(post_body, total_size);
+  String response = http.getString();
+  free(post_body);
+  http.end();
+
+  // Restore sslNet timeout for other network calls (sensor/OLED use 10s)
+  sslNet.setTimeout(10);
+  safeCpuFreq(80);
+
+  if (code == 200) {
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, response);
+    if (!err && doc.containsKey("text")) {
+      const char* text = doc["text"];
+      if (strlen(text) > 0) {
+        Serial.printf("🗣️ STT: \"%s\"\n", text);
+      } else {
+        Serial.println("🔇 STT: (silence)");
+      }
+    } else {
+      Serial.printf("✅ STT OK: %s\n", response.c_str());
+    }
+    return true;
+  } else {
+    Serial.printf("❌ STT HTTP %d: %s\n", code, response.c_str());
+    return false;
+  }
 }
 
 // ================= EVENT POLLING FUNCTIONS =================

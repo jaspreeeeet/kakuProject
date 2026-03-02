@@ -1,74 +1,91 @@
 // =====================================================================
-//  test.ino  —  BLIP IMAGE CAPTIONING TEST
-//  Hardware: XIAO ESP32S3 Sense (OV2640 camera built-in)
+//  test.ino  —  ROTATION DETECTION TEST (3 full flips → DETECTED!)
+//  Hardware: XIAO ESP32S3 Sense + MPU6050 (I2C: SDA=5, SCL=6)
 //  Baud: 115200
 //
 //  PURPOSE:
-//    Tests the full image captioning pipeline:
-//      ESP32 camera → GCP server /upload → HuggingFace BLIP API
-//    Then fetches back the AI caption from /api/latest-image
+//    Detects 3 FULL rotations (flips) of the device on ONE axis.
+//    Uses accelerometer angle (not gyro!) so small tilts are ignored.
+//    Device must physically pass through all 4 orientations:
+//      Forward:  Upright → TiltFwd → Inverted → TiltBack → Upright
+//      Backward: Upright → TiltBack → Inverted → TiltFwd → Upright
 //
-//  HOW TO USE:
-//    1. Flash to device, open Serial Monitor @ 115200
-//    2. Device auto-connects WiFi, inits camera
-//    3. Type 'C' + Enter  →  Capture & upload image
-//    4. Type 'R' + Enter  →  Check latest AI caption result
-//    5. Type 'A' + Enter  →  Auto test (capture + wait 10s + fetch caption)
-//    6. Watch serial output for full flow status
-//
-//  EXPECTED OUTPUT:
-//    ✅ WiFi connected
-//    ✅ Camera initialized
-//    📸 Captured image: XXXXX bytes
-//    📤 Uploading to server...
-//    ✅ Upload OK (200): {"status":"success","image_id":XX,...}
-//    🤖 Fetching AI caption...
-//    🧠 AI Caption: "a person sitting at a desk with a laptop"
-//    💖 Emotion: HAPPY (matched: person)
+//  HOW IT WORKS:
+//    1. Computes pitch angle from accelerometer: atan2(ax, az)
+//    2. Divides 360° into 4 quadrants:
+//       Q0 = Upright (−45° to 45°)
+//       Q1 = Tilted forward (45° to 135°)
+//       Q2 = Inverted (135° to −135°, i.e. upside down)
+//       Q3 = Tilted backward (−135° to −45°)
+//    3. Must visit Q0→Q1→Q2→Q3→Q0 (forward flip)
+//       OR Q0→Q3→Q2→Q1→Q0 (backward flip) for 1 rotation
+//    4. Small tilts stay in Q0 — never counted!
+//    5. After 3 rotations → 🎉 DETECTED!
 // =====================================================================
 
-#include "esp_camera.h"
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
-#include <ArduinoJson.h>
+#include <Wire.h>
+#include "MPU6050.h"
+#include <math.h>
 
-// ================= WiFi CONFIG =================
-#define WIFI_SSID     "Airtel_BumbleBee-777"
-#define WIFI_PASSWORD "kya karoge ."
+// ================= I2C PINS (XIAO ESP32 S3 Sense) =================
+#define SDA_PIN  5
+#define SCL_PIN  6
 
-// ================= SERVER CONFIG =================
-const char* SERVER_BASE = "https://kakuproject-90943350924.asia-south1.run.app";
+// ================= ROTATION DETECTION CONFIG =================
+#define READ_INTERVAL        20      // ms — read accel every 20ms (50Hz)
+#define ROTATIONS_NEEDED     3       // how many full flips to detect
+#define ROTATION_TIMEOUT     5000    // ms — must complete one rotation within this time
+#define COOLDOWN_AFTER_3     3000    // ms — pause after 3 rotations detected
 
-// ================= CAMERA PINS (XIAO ESP32 S3 Sense) =================
-#define PWDN_GPIO_NUM  -1
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM  10
-#define SIOD_GPIO_NUM  40
-#define SIOC_GPIO_NUM  39
-#define Y9_GPIO_NUM    48
-#define Y8_GPIO_NUM    11
-#define Y7_GPIO_NUM    12
-#define Y6_GPIO_NUM    14
-#define Y5_GPIO_NUM    16
-#define Y4_GPIO_NUM    18
-#define Y3_GPIO_NUM    17
-#define Y2_GPIO_NUM    15
-#define VSYNC_GPIO_NUM 38
-#define HREF_GPIO_NUM  47
-#define PCLK_GPIO_NUM  13
+// ================= GLOBALS =================
+MPU6050 mpu;
+bool mpuAvailable = false;
 
-// ── GLOBALS ──────────────────────────────────────────────────
-WiFiClientSecure sslClient;
-bool cameraReady = false;
-int lastImageId = -1;
+// Quadrant tracking state machine
+// Quadrants (based on pitch angle from accelerometer):
+//   Q0: Upright       (-45° to  45°)
+//   Q1: Tilted fwd    ( 45° to 135°)  
+//   Q2: Inverted      (135° to 180° or -180° to -135°)
+//   Q3: Tilted back   (-135° to -45°)
+int current_quadrant     = 0;    // Which quadrant device is in now
+int quadrants_visited    = 0;    // Bitmask of visited quadrants (bits 0-3)
+int last_quadrant        = -1;   // Previous quadrant (to detect transitions)
+int rotation_direction   = 0;    // +1 = forward, -1 = backward, 0 = unknown
+int expected_next        = -1;   // Next quadrant expected for current direction
+int rotation_count       = 0;    // Full rotations completed
+unsigned long rotation_start_time = 0; // When current rotation attempt started
+unsigned long last_read_time = 0;
 
-// ── FUNCTION DECLARATIONS ────────────────────────────────────
-bool initCamera();
-bool captureAndUpload();
-bool fetchLatestCaption();
-void runAutoTest();
-void connectWiFi();
+// Low-pass filter for accelerometer noise
+float filtered_ax = 0, filtered_az = 0;
+const float LP_ALPHA = 0.3;     // Low-pass filter coefficient (0.0-1.0, lower = smoother)
+
+// ── Helper: get quadrant from angle ──────────────────────────
+int getQuadrant(float angle_deg) {
+    // angle_deg is -180 to +180
+    if (angle_deg >= -45 && angle_deg < 45)   return 0;  // Upright
+    if (angle_deg >= 45 && angle_deg < 135)   return 1;  // Tilted forward
+    if (angle_deg >= -135 && angle_deg < -45)  return 3;  // Tilted backward
+    return 2; // Inverted (135 to 180 or -180 to -135)
+}
+
+const char* quadrantName(int q) {
+    switch(q) {
+        case 0: return "UPRIGHT";
+        case 1: return "TILT-FWD";
+        case 2: return "INVERTED";
+        case 3: return "TILT-BACK";
+        default: return "???";
+    }
+}
+
+// ── Reset rotation tracking state ────────────────────────────
+void resetRotationState() {
+    quadrants_visited = 0;
+    rotation_direction = 0;
+    expected_next = -1;
+    rotation_start_time = 0;
+}
 
 // ─────────────────────────────────────────────────────────────
 void setup() {
@@ -76,336 +93,191 @@ void setup() {
     delay(1000);
 
     Serial.println("\n╔══════════════════════════════════════╗");
-    Serial.println("║  BLIP IMAGE CAPTIONING TEST          ║");
-    Serial.println("║  XIAO ESP32S3 Sense → GCP → BLIP    ║");
+    Serial.println("║  ROTATION (FLIP) DETECTION TEST      ║");
+    Serial.println("║  Detect 3 full flips → SUCCESS       ║");
+    Serial.println("║  Must physically flip the device!     ║");
     Serial.println("╚══════════════════════════════════════╝");
     Serial.println();
-    Serial.println("Commands:");
-    Serial.println("  C = Capture & Upload image");
-    Serial.println("  R = Read latest AI caption");
-    Serial.println("  A = Auto test (capture + wait + read)");
-    Serial.println("──────────────────────────────────────\n");
 
-    // Connect WiFi
-    connectWiFi();
+    // Init I2C
+    Wire.begin(SDA_PIN, SCL_PIN);
+    Wire.setClock(400000);
+    delay(200);
 
-    // Init camera
-    if (initCamera()) {
-        Serial.println("✅ Camera initialized (QQVGA 160x120 JPEG)");
+    // Init MPU6050
+    Serial.println("Initializing MPU6050...");
+    mpu.initialize();
+    delay(100);
+
+    if (mpu.testConnection()) {
+        Serial.println("✅ MPU6050 connected!");
+        mpuAvailable = true;
     } else {
-        Serial.println("❌ Camera init FAILED — cannot test");
+        Serial.println("❌ MPU6050 NOT found! Check wiring (SDA=5, SCL=6)");
+        while (1) delay(1000);
     }
 
-    // Skip SSL certificate verification (for testing)
-    sslClient.setInsecure();
-    sslClient.setTimeout(10);  // 10s SSL handshake timeout (matches main sketch)
+    // Warm up low-pass filter
+    for (int i = 0; i < 20; i++) {
+        int16_t ax, ay, az;
+        mpu.getAcceleration(&ax, &ay, &az);
+        filtered_ax = ax / 16384.0;
+        filtered_az = az / 16384.0;
+        delay(20);
+    }
 
-    Serial.println("\n🟢 Ready! Send C/R/A via Serial Monitor.\n");
+    float init_angle = atan2(filtered_ax, filtered_az) * 180.0 / M_PI;
+    current_quadrant = getQuadrant(init_angle);
+    last_quadrant = current_quadrant;
+
+    Serial.printf("✅ Starting angle: %.1f° (Quadrant: %s)\n", init_angle, quadrantName(current_quadrant));
+    Serial.println();
+    Serial.println("🔄 Flip the device! Full rotation required:");
+    Serial.println("   Forward:  Upright → Tilt fwd → Inverted → Tilt back → Upright");
+    Serial.println("   Backward: Upright → Tilt back → Inverted → Tilt fwd → Upright");
+    Serial.println("   Small tilts WON'T count — device must go fully inverted!");
+    Serial.println("════════════════════════════════════════\n");
+
+    last_read_time = millis();
 }
 
 // ─────────────────────────────────────────────────────────────
 void loop() {
-    if (Serial.available()) {
-        char c = toupper((char)Serial.read());
-        // Flush remaining chars (newline etc)
-        while (Serial.available()) Serial.read();
+    if (!mpuAvailable) return;
 
-        switch (c) {
-            case 'C':
-                Serial.println("\n═══ CAPTURE & UPLOAD ═══");
-                captureAndUpload();
-                break;
-            case 'R':
-                Serial.println("\n═══ READ CAPTION ═══");
-                fetchLatestCaption();
-                break;
-            case 'A':
-                Serial.println("\n═══ AUTO TEST (capture → wait 10s → read) ═══");
-                runAutoTest();
-                break;
-            default:
-                if (c >= 32) { // printable char
-                    Serial.printf("Unknown command: '%c'. Use C/R/A\n", c);
+    unsigned long now = millis();
+    if (now - last_read_time < READ_INTERVAL) return;
+    last_read_time = now;
+
+    // Read accelerometer
+    int16_t ax_raw, ay_raw, az_raw;
+    mpu.getAcceleration(&ax_raw, &ay_raw, &az_raw);
+
+    // Low-pass filter to remove vibration noise
+    float ax = ax_raw / 16384.0;
+    float az = az_raw / 16384.0;
+    filtered_ax = LP_ALPHA * ax + (1.0 - LP_ALPHA) * filtered_ax;
+    filtered_az = LP_ALPHA * az + (1.0 - LP_ALPHA) * filtered_az;
+
+    // Compute pitch angle: -180° to +180°
+    float angle = atan2(filtered_ax, filtered_az) * 180.0 / M_PI;
+
+    // Determine current quadrant
+    int q = getQuadrant(angle);
+
+    // Only process on quadrant change
+    if (q != last_quadrant) {
+        Serial.printf("   → Entered %s (angle: %.1f°)\n", quadrantName(q), angle);
+
+        // Check timeout — if rotation takes too long, reset
+        if (rotation_start_time > 0 && (now - rotation_start_time > ROTATION_TIMEOUT)) {
+            Serial.println("   ⏸️ Rotation timeout — too slow, resetting");
+            resetRotationState();
+        }
+
+        // State machine: detect sequential quadrant traversal
+        if (quadrants_visited == 0) {
+            // Starting fresh — must start from Q0 (upright)
+            if (q == 0) {
+                // Already at upright, wait for first move
+            } else if (last_quadrant == 0) {
+                // Just left Q0 — start tracking
+                quadrants_visited = (1 << 0); // Mark Q0 as visited
+                rotation_start_time = now;
+
+                if (q == 1) {
+                    rotation_direction = +1; // Forward rotation
+                    expected_next = 1;
+                    Serial.println("   📐 Forward rotation started (Q0→Q1)");
+                } else if (q == 3) {
+                    rotation_direction = -1; // Backward rotation
+                    expected_next = 3;
+                    Serial.println("   📐 Backward rotation started (Q0→Q3)");
+                } else {
+                    // Jumped to Q2 directly — unusual, reset
+                    resetRotationState();
                 }
-                break;
-        }
-    }
-    delay(50);
-}
 
-// ═════════════════════════════════════════════════════════════
-//  WiFi CONNECTION
-// ═════════════════════════════════════════════════════════════
-void connectWiFi() {
-    Serial.printf("📶 Connecting to WiFi: %s ", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
-    }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n✅ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
-    } else {
-        Serial.println("\n❌ WiFi connection FAILED!");
-    }
-}
-
-// ═════════════════════════════════════════════════════════════
-//  CAMERA INIT
-// ═════════════════════════════════════════════════════════════
-bool initCamera() {
-    camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer   = LEDC_TIMER_0;
-    config.pin_d0       = Y2_GPIO_NUM;
-    config.pin_d1       = Y3_GPIO_NUM;
-    config.pin_d2       = Y4_GPIO_NUM;
-    config.pin_d3       = Y5_GPIO_NUM;
-    config.pin_d4       = Y6_GPIO_NUM;
-    config.pin_d5       = Y7_GPIO_NUM;
-    config.pin_d6       = Y8_GPIO_NUM;
-    config.pin_d7       = Y9_GPIO_NUM;
-    config.pin_xclk     = XCLK_GPIO_NUM;
-    config.pin_pclk     = PCLK_GPIO_NUM;
-    config.pin_vsync    = VSYNC_GPIO_NUM;
-    config.pin_href     = HREF_GPIO_NUM;
-    config.pin_sscb_sda = SIOD_GPIO_NUM;
-    config.pin_sscb_scl = SIOC_GPIO_NUM;
-    config.pin_pwdn     = PWDN_GPIO_NUM;
-    config.pin_reset    = RESET_GPIO_NUM;
-
-    config.xclk_freq_hz = 10000000;        // 10 MHz
-    config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size   = FRAMESIZE_QQVGA;  // 160x120
-    config.jpeg_quality = 15;               // Decent quality for captioning
-    config.fb_count     = 1;
-    config.fb_location  = CAMERA_FB_IN_PSRAM;
-    config.grab_mode    = CAMERA_GRAB_LATEST;
-
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        Serial.printf("❌ Camera init error: 0x%x\n", err);
-        return false;
-    }
-    cameraReady = true;
-    return true;
-}
-
-// ═════════════════════════════════════════════════════════════
-//  CAPTURE & UPLOAD to /upload endpoint
-// ═════════════════════════════════════════════════════════════
-bool captureAndUpload() {
-    if (!cameraReady) {
-        Serial.println("❌ Camera not ready!");
-        return false;
-    }
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("❌ WiFi not connected!");
-        return false;
-    }
-
-    // Capture image
-    Serial.println("📸 Capturing image...");
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        Serial.println("❌ Camera capture FAILED");
-        return false;
-    }
-    Serial.printf("📸 Captured: %d bytes (JPEG %dx%d)\n", fb->len, fb->width, fb->height);
-
-    // Upload to server as binary (with retry)
-    bool success = false;
-    for (int attempt = 1; attempt <= 3 && !success; attempt++) {
-        if (attempt > 1) {
-            Serial.printf("🔄 Retry attempt %d/3...\n", attempt);
-            delay(2000);
-        }
-        
-        Serial.printf("📤 Uploading to %s/upload ...\n", SERVER_BASE);
-        
-        sslClient.stop();
-        delay(100);
-        sslClient.setInsecure();
-        sslClient.setTimeout(10);
-        
-        HTTPClient http;
-        http.setTimeout(10000);
-        http.setConnectTimeout(5000);
-
-        String url = String(SERVER_BASE) + "/upload?device_id=ESP32_TEST";
-        if (!http.begin(sslClient, url)) {
-            Serial.println("❌ HTTP begin failed");
-            continue;
-        }
-
-        http.addHeader("Content-Type", "application/octet-stream");
-        
-        unsigned long startMs = millis();
-        int httpCode = http.sendRequest("POST", fb->buf, fb->len);
-        unsigned long elapsed = millis() - startMs;
-
-        if (httpCode == 200) {
-            String response = http.getString();
-            Serial.printf("✅ Upload OK (%lu ms)\n", elapsed);
-            Serial.printf("📝 Server response: %s\n", response.c_str());
-            
-            // Parse image_id from response
-            StaticJsonDocument<512> doc;
-            DeserializationError jsonErr = deserializeJson(doc, response);
-            if (!jsonErr && doc.containsKey("image_id")) {
-                lastImageId = doc["image_id"].as<int>();
-                Serial.printf("🆔 Image ID: %d\n", lastImageId);
+                if (expected_next >= 0) {
+                    quadrants_visited |= (1 << q);
+                }
             }
-            success = true;
         } else {
-            Serial.printf("❌ Upload FAILED! HTTP %d (%lu ms)\n", httpCode, elapsed);
-            if (httpCode > 0) {
-                Serial.printf("   Response: %s\n", http.getString().c_str());
-            } else {
-                Serial.printf("   Error: connection failed (SSL handshake timeout?)\n");
-            }
-        }
-        http.end();
-    }
+            // Already tracking a rotation — check if this is the expected next quadrant
+            bool valid = false;
 
-    esp_camera_fb_return(fb);
-    return success;
-}
-
-// ═════════════════════════════════════════════════════════════
-//  FETCH LATEST AI CAPTION from /api/latest-image
-// ═════════════════════════════════════════════════════════════
-bool fetchLatestCaption() {
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("❌ WiFi not connected!");
-        return false;
-    }
-
-    Serial.println("🤖 Fetching latest AI caption...");
-    
-    sslClient.stop();
-    delay(100);
-    sslClient.setInsecure();
-    sslClient.setTimeout(10);
-    
-    HTTPClient http;
-    http.setTimeout(10000);
-    http.setConnectTimeout(5000);
-
-    String url = String(SERVER_BASE) + "/api/latest-image?caption_only=1";
-    if (!http.begin(sslClient, url)) {
-        Serial.println("❌ HTTP begin failed");
-        return false;
-    }
-
-    int httpCode = http.GET();
-    
-    if (httpCode == 200) {
-        String response = http.getString();
-        
-        StaticJsonDocument<2048> doc;
-        DeserializationError jsonErr = deserializeJson(doc, response);
-        
-        if (!jsonErr) {
-            bool success     = doc["success"] | false;
-            int imageId      = doc["image_id"] | -1;
-            const char* caption  = doc["ai_caption"] | "N/A";
-            const char* filename = doc["filename"] | "N/A";
-            const char* source   = doc["source"] | "N/A";
-            bool hasImage    = doc.containsKey("image_url");
-
-            Serial.println("┌──────────────────────────────────┐");
-            Serial.println("│     📊 LATEST IMAGE RESULT       │");
-            Serial.println("├──────────────────────────────────┤");
-            Serial.printf( "│ Success  : %s\n", success ? "YES ✅" : "NO ❌");
-            Serial.printf( "│ Image ID : %d\n", imageId);
-            Serial.printf( "│ Filename : %s\n", filename);
-            Serial.printf( "│ Source   : %s\n", source);
-            Serial.printf( "│ Has Image: %s\n", hasImage ? "YES" : "NO");
-            Serial.println("├──────────────────────────────────┤");
-            Serial.printf( "│ 🧠 AI Caption: %s\n", caption);
-            Serial.println("└──────────────────────────────────┘");
-
-            // Check if caption is real (not placeholder)
-            String captionStr = String(caption);
-            if (captionStr == "Waiting for AI analysis..." || captionStr == "N/A") {
-                Serial.println("⏳ Caption not ready yet — BLIP may still be processing");
-                Serial.println("   Try again in a few seconds (send 'R')");
-            } else {
-                Serial.println("✅ BLIP CAPTIONING IS WORKING!");
-                
-                // Check emotion keywords
-                captionStr.toLowerCase();
-                const char* positiveWords[] = {"food", "fruit", "bottle", "toy", "person", "man", "woman", "face", "dog", "cat", "snack"};
-                const char* negativeWords[] = {"trash", "dirty", "fire", "dark", "scary"};
-                
-                bool emotionFound = false;
-                for (int i = 0; i < 11; i++) {
-                    if (captionStr.indexOf(positiveWords[i]) >= 0) {
-                        Serial.printf("💖 Emotion trigger: HAPPY (matched keyword: '%s')\n", positiveWords[i]);
-                        emotionFound = true;
+            if (rotation_direction == +1) {
+                // Forward: Q0 → Q1 → Q2 → Q3 → Q0
+                int forward_seq[] = {0, 1, 2, 3, 0};
+                for (int i = 0; i < 4; i++) {
+                    if (last_quadrant == forward_seq[i] && q == forward_seq[i+1]) {
+                        valid = true;
                         break;
                     }
                 }
-                if (!emotionFound) {
-                    for (int i = 0; i < 5; i++) {
-                        if (captionStr.indexOf(negativeWords[i]) >= 0) {
-                            Serial.printf("😢 Emotion trigger: CRY (matched keyword: '%s')\n", negativeWords[i]);
-                            emotionFound = true;
-                            break;
-                        }
+            } else if (rotation_direction == -1) {
+                // Backward: Q0 → Q3 → Q2 → Q1 → Q0
+                int backward_seq[] = {0, 3, 2, 1, 0};
+                for (int i = 0; i < 4; i++) {
+                    if (last_quadrant == backward_seq[i] && q == backward_seq[i+1]) {
+                        valid = true;
+                        break;
                     }
                 }
-                if (!emotionFound) {
-                    Serial.println("😐 No emotion keyword matched — neutral response");
+            }
+
+            if (valid) {
+                quadrants_visited |= (1 << q);
+
+                // Check if all 4 quadrants visited AND returned to Q0
+                if (q == 0 && quadrants_visited == 0x0F) {
+                    // FULL ROTATION COMPLETED!
+                    rotation_count++;
+                    const char* dir = (rotation_direction == +1) ? "FORWARD" : "BACKWARD";
+                    Serial.printf("\n🔄 Rotation #%d detected! (%s flip)\n\n",
+                        rotation_count, dir);
+
+                    resetRotationState();
+
+                    // Check if 3 rotations reached
+                    if (rotation_count >= ROTATIONS_NEEDED) {
+                        Serial.println("🎉🎉🎉 3 FULL ROTATIONS DETECTED! 🎉🎉🎉");
+                        Serial.println();
+                        Serial.println("════════════════════════════════════════");
+                        Serial.printf("   Total rotations: %d\n", rotation_count);
+                        Serial.println("   Resetting counter in 3 seconds...");
+                        Serial.println("════════════════════════════════════════\n");
+
+                        delay(COOLDOWN_AFTER_3);
+
+                        rotation_count = 0;
+                        resetRotationState();
+                        Serial.println("🔄 Counter reset! Flip again for another round.\n");
+                    }
+                }
+            } else {
+                // Wrong quadrant order — rotation broken, reset
+                if (q != last_quadrant) {
+                    Serial.printf("   ❌ Sequence broken (expected sequential, got %s→%s) — reset\n",
+                        quadrantName(last_quadrant), quadrantName(q));
+                    resetRotationState();
                 }
             }
-        } else {
-            Serial.printf("❌ JSON parse error: %s\n", jsonErr.c_str());
-            Serial.println(response.substring(0, 200));
         }
-    } else if (httpCode == 404) {
-        Serial.println("📭 No images found in database (404)");
-    } else {
-        Serial.printf("❌ Fetch FAILED! HTTP %d\n", httpCode);
+
+        last_quadrant = q;
     }
 
-    http.end();
-    return (httpCode == 200);
-}
-
-// ═════════════════════════════════════════════════════════════
-//  AUTO TEST: Capture → Wait → Fetch caption
-// ═════════════════════════════════════════════════════════════
-void runAutoTest() {
-    Serial.println("\n🔄 === FULL PIPELINE TEST ===\n");
-    
-    // Step 1: Capture & upload
-    Serial.println("── STEP 1/3: Capture & Upload ──");
-    bool uploaded = captureAndUpload();
-    if (!uploaded) {
-        Serial.println("❌ Auto test ABORTED — upload failed");
-        return;
+    // Periodic angle display (every 3 seconds)
+    static unsigned long last_status = 0;
+    if (now - last_status > 3000) {
+        last_status = now;
+        Serial.printf("   📊 Angle: %.1f° | Quadrant: %s | Visited: %s%s%s%s | Rotations: %d/%d\n",
+            angle, quadrantName(q),
+            (quadrants_visited & 1) ? "Q0 " : "",
+            (quadrants_visited & 2) ? "Q1 " : "",
+            (quadrants_visited & 4) ? "Q2 " : "",
+            (quadrants_visited & 8) ? "Q3 " : "",
+            rotation_count, ROTATIONS_NEEDED);
     }
-
-    // Step 2: Wait for BLIP processing
-    Serial.println("\n── STEP 2/3: Waiting 12s for BLIP to process... ──");
-    for (int i = 12; i > 0; i--) {
-        Serial.printf("   ⏳ %d seconds remaining...\n", i);
-        delay(1000);
-    }
-
-    // Step 3: Fetch caption
-    Serial.println("\n── STEP 3/3: Fetch AI Caption ──");
-    bool gotCaption = fetchLatestCaption();
-
-    // Summary
-    Serial.println("\n╔══════════════════════════════════════╗");
-    Serial.printf( "║  Upload:  %s\n", uploaded ? "✅ SUCCESS" : "❌ FAILED");
-    Serial.printf( "║  Caption: %s\n", gotCaption ? "✅ RECEIVED" : "⏳ PENDING");
-    Serial.println("╚══════════════════════════════════════╝\n");   
 }
