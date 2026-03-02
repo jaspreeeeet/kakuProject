@@ -11,6 +11,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "driver/i2s_pdm.h"
@@ -40,6 +41,7 @@ const char* AUDIO_UPLOAD_URL = "https://kakuproject-90943350924.asia-south1.run.
 
 // ================= GLOBALS =================
 i2s_chan_handle_t rx_handle = NULL;
+WiFiClientSecure secureClient;      // Persistent HTTPS client
 
 uint8_t  *audio_buffer    = NULL;   // PSRAM recording buffer (raw PCM)
 size_t    audio_size       = 0;      // Current bytes written
@@ -188,11 +190,11 @@ bool send_audio_to_server()
 
   free(wav_data); // WAV data copied into post body
 
-  // Send HTTP POST
+  // Send HTTP POST (HTTPS with no cert verification)
   HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(15000);
-  http.begin(AUDIO_UPLOAD_URL);
+  http.setConnectTimeout(10000);
+  http.setTimeout(30000);
+  http.begin(secureClient, AUDIO_UPLOAD_URL);
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
 
   chunk_count++;
@@ -254,6 +256,9 @@ void setup()
 
   // Connect WiFi
   connectWiFi();
+
+  // Setup HTTPS (skip certificate verification for Cloud Run)
+  secureClient.setInsecure();
 
   // Init I2S PDM mic
   if (!init_i2s()) {
