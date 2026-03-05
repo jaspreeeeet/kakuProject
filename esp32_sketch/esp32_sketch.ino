@@ -33,7 +33,11 @@ Required Libraries:
 - ArduinoJson, WiFi, HTTPClient, I2Cdev, MPU6050, esp_camera
 */
 
-#include "MPU6050.h"
+// ===== REPLACED: I2Cdev MPU6050.h → Adafruit MPU6050 =====
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include "driver/rtc_io.h"
+// ===== END REPLACEMENT =====
 #include "base64.h"
 #include "driver/i2s_pdm.h"
 #include "esp_camera.h"
@@ -69,6 +73,8 @@ bool wifiProvisioningMode = false; // True = AP mode active, normal tasks paused
 bool phoneConnectedToAP = false;
 #define MAX_STORED_WIFI 5      // Maximum stored WiFi networks in NVS
 #define WIFI_CONNECT_RETRIES 3 // Retries per credential set
+#define WIFI_RECONNECT_MAX_FAILS 10 // After this many consecutive reconnect failures → AP provisioning
+int wifiReconnectFails = 0;        // Consecutive reconnect failure counter
 const char *AP_SSID = "KAKU_SETUP";
 const char *AP_PASS = "12345678";
 Preferences petPrefs;
@@ -345,10 +351,12 @@ struct PetLocalState {
 };
 
 PetLocalState g_petState;
+SemaphoreHandle_t petStateMutex = NULL;     // Protect g_petState cross-core access
 unsigned long lastPhysioTick = 0;
 #define PHYSIO_TICK_MS 360000 // Run physiology logic every 120 seconds
 
 void savePetState() {
+  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
   petPrefs.begin("pet_state", false);
   petPrefs.putInt("hunger", g_petState.hunger);
   petPrefs.putInt("health", g_petState.health);
@@ -363,10 +371,12 @@ void savePetState() {
   petPrefs.putBool("hasPoop", g_petState.hasPoop);
   petPrefs.putInt("version", g_petState.version);
   petPrefs.end();
+  if (petStateMutex) xSemaphoreGive(petStateMutex);
   Serial.println("💾 Pet state saved to NVS");
 }
 
 void loadPetState() {
+  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
   petPrefs.begin("pet_state", true); // Read-only
   g_petState.hunger = petPrefs.getInt("hunger", 0);
   g_petState.health = petPrefs.getInt("health", 100);
@@ -381,6 +391,7 @@ void loadPetState() {
   g_petState.hasPoop = petPrefs.getBool("hasPoop", false);
   g_petState.version = petPrefs.getInt("version", 0);
   petPrefs.end();
+  if (petStateMutex) xSemaphoreGive(petStateMutex);
   Serial.printf("📂 Pet state loaded: Age %d, Lvl %d, XP %d\n",
                 g_petState.ageInt, g_petState.level, g_petState.xp);
 }
@@ -394,7 +405,7 @@ unsigned long lastDisplayCheckTime =
 const unsigned long DISPLAY_CHECK_INTERVAL =
     3000; // Poll server for OLED+events every 3 seconds (combined slot)
 const unsigned long ANIMATION_DISPLAY_INTERVAL =
-    100; // Display animation every 100ms (~10 FPS smooth)
+    125; // Display animation every 125ms (~8 FPS smooth, saves CPU/power)
 uint8_t currentFrame = 0;
 bool displayReady = false;
 bool startupComplete = false; // Track if startup egg animation is done
@@ -406,10 +417,34 @@ bool showSickIcon = false;    // Show heart/sick icon after poop ignored >15 min
 bool showPlayIcon = false;    // Show play icon 15 min after poop cleared
                               // (top-left, paused when sick)
 unsigned long poopClearedTime = 0; // millis() when poop was last cleaned
-String currentScreenType =
-    "MAIN"; // Current menu — controlled locally via right-tilt gesture
-String currentEmotion = "IDLE";  // Current emotion from server (IDLE, CRY, SAD,
-                                 // HAPPY, EATING, SURPRISE)
+char currentScreenType[24] = "MAIN";   // Current menu — controlled locally via right-tilt gesture (char[] for thread safety)
+char currentEmotion[24] = "IDLE";      // Current emotion from server (char[] for thread safety)
+
+// Thread-safe helpers for currentScreenType / currentEmotion
+inline void setScreenType(const char *s) {
+  if (uiStringsMutex && xSemaphoreTake(uiStringsMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    strncpy(currentScreenType, s, sizeof(currentScreenType) - 1);
+    currentScreenType[sizeof(currentScreenType) - 1] = '\0';
+    xSemaphoreGive(uiStringsMutex);
+  } else {
+    Serial.println("[UI] setScreenType mutex timeout — skipping write");
+    return;
+  }
+}
+inline void setEmotion(const char *s) {
+  if (uiStringsMutex && xSemaphoreTake(uiStringsMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    strncpy(currentEmotion, s, sizeof(currentEmotion) - 1);
+    currentEmotion[sizeof(currentEmotion) - 1] = '\0';
+    xSemaphoreGive(uiStringsMutex);
+  } else {
+    Serial.println("[UI] setEmotion mutex timeout — skipping write");
+    return;
+  }
+}
+// Compare helpers (no mutex needed — char[] reads are atomic for short strings on ESP32,
+// and all writes are protected by setScreenType/setEmotion)
+inline bool screenTypeIs(const char *s) { return strcmp(currentScreenType, s) == 0; }
+inline bool emotionIs(const char *s) { return strcmp(currentEmotion, s) == 0; }
 bool justFinishedEating = false; // Show GOOD! text after eating animation
 unsigned long eatingFinishTime =
     0; // When eating finished (for GOOD! text timer)
@@ -426,6 +461,7 @@ bool petIsSick = false;          // Track if pet is sick
 
 // Helper to sync struct to legacy globals used by UI
 void syncLocalStateToUI() {
+  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
   petAgeInt = g_petState.ageInt;
   petHappiness = g_petState.happiness;
   petDiscipline = g_petState.discipline;
@@ -434,6 +470,7 @@ void syncLocalStateToUI() {
   showPoopIcon = g_petState.hasPoop;
   showSickIcon = petIsSick;  // Heart icon when pet is sick
   showFoodIcon = petIsHungry;
+  if (petStateMutex) xSemaphoreGive(petStateMutex);
 
   // 🎮 Play icon: appears 15 min (900000ms) after poop is cleared
   if (poopClearedTime > 0 && !showPoopIcon && !petIsSick &&
@@ -451,20 +488,20 @@ void syncLocalStateToUI() {
   // sensory event)
   if (!isServerEmotionOverride) {
     if (petIsSick)
-      currentEmotion = "SICK";
+      setEmotion("SICK");
     else if (showPoopIcon)
-      currentEmotion = "POOP";
+      setEmotion("POOP");
     else if (petIsHungry) {
       if (petAge == INFANT)
-        currentEmotion = "CRY";
+        setEmotion("CRY");
       else
-        currentEmotion = "HUNGER";
+        setEmotion("HUNGER");
     } else if (petHappiness > 80)
-      currentEmotion = "HAPPY";
+      setEmotion("HAPPY");
     else if (petHappiness < 40)
-      currentEmotion = "SAD";
+      setEmotion("SAD");
     else
-      currentEmotion = "IDLE";
+      setEmotion("IDLE");
   }
 
   // Map integer age to PetAge enum for animations
@@ -491,12 +528,15 @@ bool imageAlreadySentThisSession =
     false; // Track if image sent for current food session
 
 // ================= SLEEP MODE STATE =================
-bool isDeviceSleeping = false;      // True when in sleep mode (neutral >30s)
-unsigned long neutralStartTime = 0; // When neutral state first detected
+bool isDeviceSleeping = false;      // True when entering deep sleep
+unsigned long lastMotionTime = 0;   // millis() of last MPU motion ISR (inactivity tracker)
 unsigned long sleepStartTime = 0;   // When sleep mode started
 uint32_t accumulatedSleepSec =
     0; // Sleep seconds banked, sent on next sensor upload
-const unsigned long NEUTRAL_SLEEP_TIMEOUT = 30000; // 30s inversion → sleep
+const unsigned long INACTIVITY_SLEEP_TIMEOUT = 120000; // 2 min no-motion → deep sleep
+
+// RTC memory — survives deep sleep reboots
+RTC_DATA_ATTR uint32_t rtcWakeCount = 0;  // Deep sleep wake cycle counter
 
 // Walking state — driven by hardware step counter (not server)
 bool petIsWalking = false;
@@ -664,12 +704,21 @@ int coinX[COIN_COUNT];
 int coinY[COIN_COUNT];
 int coinSpeed[COIN_COUNT];
 
-// MPU6050 sensor
-MPU6050 mpu;
+// ===== REPLACED: Adafruit MPU6050 + motion interrupt globals =====
+Adafruit_MPU6050 mpu;
+sensors_event_t accelEvent, gyroEvent, tempEvent;  // Adafruit unified sensor events
 bool mpuAvailable = false; // Track if MPU6050 is working
 
+// MPU6050 INT pin for hardware motion detection + deep sleep wakeup
+#define MPU_INT_PIN      2     // GPIO2 (D1) — connected to MPU6050 INT pin
+#define MOTION_THRESHOLD 10    // LSBs, ~40mg @ ±2g
+#define MOTION_DURATION  20    // samples motion must persist
+volatile bool motionDetected = false;   // Set by ISR, cleared by loop
+volatile unsigned long isrCount = 0;    // Motion interrupt counter
+
 // Pins
-const int LED_PIN = 2; // LED indicator
+const int LED_PIN = 21; // XIAO ESP32 S3 built-in LED (active LOW) — GPIO2 is now MPU INT
+// ===== END REPLACEMENT =====
 
 // Voice Activity Detection
 volatile bool speechDetected = false;
@@ -721,7 +770,7 @@ unsigned long lastInternalReadTime = 0; // Fast internal sensor reading timing
 const unsigned long SEND_INTERVAL =
     2000; // Send sensor data batch every 2 seconds
 const unsigned long INTERNAL_READ_INTERVAL =
-    100; // Read sensor batch every 100ms internally
+    200; // Read sensor batch every 200ms (5/s) — saves CPU, ISR handles real-time
 const unsigned long EVENT_POLL_INTERVAL =
     3000; // Poll for events every 3 seconds
 unsigned long dynamicEventPollInterval =
@@ -744,6 +793,28 @@ uint8_t *audio_buffer = NULL;
 // Audio processing buffers for VAD
 int16_t *vad_buffer;
 const int VAD_BUFFER_SIZE = 512;
+
+// ================= STT MODE (Left Tilt 10s → Enable STT Streaming) =================
+volatile bool sttModeActive = false;           // Master STT on/off flag (volatile: cross-core)
+unsigned long lastSTTActivityTime = 0;         // For 120s inactivity timeout
+unsigned long sttLastSendTime = 0;             // Track 3s WAV chunk intervals
+uint8_t *stt_audio_buffer = NULL;              // PSRAM buffer for STT audio
+size_t stt_audio_size = 0;                     // Current bytes in STT buffer
+bool stt_has_voice = false;                    // VAD flag for current window
+#define STT_SEND_INTERVAL    3000              // Send WAV chunk every 3 seconds
+#define STT_MAX_AUDIO_SIZE   (16000 * 2 * 4)  // ~128KB max (4s of 16kHz 16-bit mono)
+#define STT_TIMEOUT_MS       120000            // 120s inactivity → disable STT
+#define STT_TILT_HOLD_TIME   10000             // 10s left-tilt hold to activate
+#define STT_VAD_THRESHOLD    1200              // Energy threshold for STT voice detection
+// STT tilt gesture tracking
+bool holdingLeftForSTT = false;
+unsigned long sttTiltHoldStartTime = 0;
+// Shared buffer for NET_STT network handler (WAV data to send)
+uint8_t *stt_wav_to_send = NULL;
+size_t stt_wav_to_send_size = 0;
+SemaphoreHandle_t sttDataMutex = NULL;         // Protect stt_wav_to_send
+SemaphoreHandle_t i2cMutex = NULL;             // Protect MPU6050 I2C cross-core access
+SemaphoreHandle_t uiStringsMutex = NULL;       // Protect currentScreenType/currentEmotion cross-core
 
 // PDM microphone handle
 i2s_chan_handle_t rx_handle = NULL;
@@ -784,7 +855,8 @@ enum NetReqType : uint8_t {
   NET_CLEAN = 4,  // Send cleaning request (left tilt 3s on TOILET_MENU)
   NET_INJECT = 5, // Send medicine given (left tilt 3s on HEALTH_MENU)
   NET_HAPPY = 6,       // Right tilt menu cycle interaction → happiness +5
-  NET_GAME_REWARD = 7  // Send game score + KakuCoin reward after game over
+  NET_GAME_REWARD = 7, // Send game score + KakuCoin reward after game over
+  NET_STT = 8          // Send WAV audio chunk to /api/audio-stt for STT
 };
 
 // Pending game reward (written by OLED task, read by networkTask)
@@ -865,6 +937,10 @@ void networkTask(
     void *parameter); // Dedicated HTTP task on Core 1 (queue-driven)\nvoid
                       // checkAndPerformOTA();           // Check firmware
                       // server and perform OTA if newer version exists
+void checkSTTTiltGesture();      // Left tilt 10s hold → activate STT mode
+void drawTalkIndicator();        // Draw "Talk" label at OLED top-right
+void sendSTTAudioChunk();        // Send WAV to /api/audio-stt (called from networkTask)
+void generateSTTWavHeader(uint8_t *header, uint32_t data_size, uint32_t sample_rate);
 
 // ================= WIFI PROVISIONING FUNCTIONS =================
 
@@ -1310,9 +1386,113 @@ void oledTask(void *parameter) {
     if (displayReady && startupComplete) {
       displayPetAnimation(); // Draw animation (non-blocking)
     }
-    vTaskDelay(pdMS_TO_TICKS(100)); // ~10 FPS — sufficient for 64x32 OLED, saves CPU heat
+    vTaskDelay(pdMS_TO_TICKS(125)); // ~8 FPS — sufficient for 64x32 OLED, saves CPU/power
   }
 }
+
+// ===== ADDED FOR MPU6050 MOTION DETECTION + DEEP SLEEP =====
+
+// ISR — fires on RISING edge when MPU6050 INT goes HIGH (motion detected)
+void IRAM_ATTR onMotionInterrupt() {
+  motionDetected = true;
+  isrCount++;
+}
+
+// Print the reason ESP32 woke up (useful for deep sleep debug)
+void printWakeUpReason() {
+  rtcWakeCount++;  // Increment on every boot (RTC memory survives deep sleep)
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  switch (cause) {
+    case ESP_SLEEP_WAKEUP_EXT0:  Serial.println("Wake-up: EXT0 (GPIO)"); break;
+    case ESP_SLEEP_WAKEUP_EXT1:  Serial.println("Wake-up: EXT1 (MPU6050 motion)"); break;
+    case ESP_SLEEP_WAKEUP_GPIO:  Serial.println("Wake-up: GPIO deep-sleep"); break;
+    case ESP_SLEEP_WAKEUP_TIMER: Serial.println("Wake-up: Timer"); break;
+    default: Serial.printf("Wake-up: Power-on / Reset (cause=%d)\n", cause); break;
+  }
+  Serial.printf("RTC wake count: %u\n", rtcWakeCount);
+}
+
+// Configure MPU6050 for awake operation: active HIGH, latched → ISR on RISING
+void configureMPU6050Awake() {
+  mpu.setHighPassFilter(MPU6050_HIGHPASS_5_HZ);
+  mpu.setMotionDetectionThreshold(MOTION_THRESHOLD);
+  mpu.setMotionDetectionDuration(MOTION_DURATION);
+  mpu.setInterruptPinLatch(true);       // stay HIGH until INT_STATUS read
+  mpu.setInterruptPinPolarity(false);   // false = active HIGH
+  mpu.setMotionInterrupt(true);
+  Serial.printf("MPU awake config: threshold=%d, duration=%d, active HIGH\n",
+                MOTION_THRESHOLD, MOTION_DURATION);
+}
+
+// Reconfigure MPU6050 for deep-sleep: active LOW, pulse → ext1 wakeup
+void configureMPU6050ForSleep() {
+  mpu.setHighPassFilter(MPU6050_HIGHPASS_5_HZ);
+  mpu.setMotionDetectionThreshold(MOTION_THRESHOLD);
+  mpu.setMotionDetectionDuration(MOTION_DURATION);
+  mpu.setInterruptPinLatch(false);      // pulse — avoids INT stuck LOW
+  mpu.setInterruptPinPolarity(true);    // true = active LOW
+  mpu.setMotionInterrupt(true);
+  mpu.getMotionInterruptStatus();       // clear any pending interrupt
+  Serial.println("MPU sleep config: active LOW, pulse mode");
+}
+
+// Enter hardware deep sleep — wakes on MPU6050 motion (INT pin LOW)
+void enterDeepSleep() {
+  Serial.println("========================================");
+  Serial.println("  Entering DEEP SLEEP — shake to wake!");
+  Serial.println("========================================");
+
+  // Save pet state to NVS before sleeping (survives deep sleep reboot)
+  savePetState();
+  Serial.println("💾 Pet state saved to NVS");
+
+  // Show sleep message on OLED
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(8, 4);
+  display.print("Zzz...");
+  display.setCursor(2, 20);
+  display.print("Shake 2 wake");
+  display.display();
+  delay(500);
+  display.clearDisplay();
+  display.display();  // Blank OLED before sleep
+
+  Serial.flush();
+
+  // Detach awake ISR before reconfiguring MPU
+  detachInterrupt(digitalPinToInterrupt(MPU_INT_PIN));
+
+  // Reconfigure MPU for active-LOW wakeup
+  configureMPU6050ForSleep();
+  delay(50);
+
+  // Wait for INT pin to go HIGH (idle) before sleeping
+  pinMode(MPU_INT_PIN, INPUT_PULLUP);
+  int retries = 20;
+  while (digitalRead(MPU_INT_PIN) == LOW && retries > 0) {
+    mpu.getMotionInterruptStatus();
+    delay(100);
+    retries--;
+  }
+  if (digitalRead(MPU_INT_PIN) == LOW) {
+    Serial.println("WARNING: INT pin stuck LOW — wake may be instant");
+  }
+
+  // Force LED off
+  digitalWrite(LED_PIN, HIGH);  // Active LOW on XIAO ESP32 S3
+
+  // Configure ext1 wakeup: LOW on GPIO2 = motion
+  esp_sleep_enable_ext1_wakeup(1ULL << MPU_INT_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
+  Serial.println("Deep sleep: ext1 wakeup on GPIO2 LOW");
+
+  Serial.flush();
+  delay(100);
+  esp_deep_sleep_start();
+  // Execution stops here — device reboots on wake
+}
+// ===== END ADDED SECTION =====
 
 // ================= SETUP FUNCTION =================
 void setup() {
@@ -1321,9 +1501,12 @@ void setup() {
 
   Serial.println("\n\nESP32 Dashboard Client Starting...");
 
-  // Initialize LED
+  // ===== ADDED: Print deep sleep wakeup reason =====
+  printWakeUpReason();
+
+  // Initialize LED (GPIO21, active LOW on XIAO ESP32 S3)
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  digitalWrite(LED_PIN, HIGH);  // HIGH = OFF (active LOW)
 
   // ================= WIFI PROVISIONING FLOW =================
   // 1. Try NVS stored credentials (3 retries each)
@@ -1425,6 +1608,7 @@ void setup() {
       slideInfantSlowlyFromLeft();
 
       // Reset local pet state for fresh INFANT
+      if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
       g_petState.hunger = 0;
       g_petState.health = 100;
       g_petState.energy = 100;
@@ -1436,6 +1620,7 @@ void setup() {
       g_petState.totalUptimeSecs = 0;
       g_petState.isSick = false;
       g_petState.hasPoop = false;
+      if (petStateMutex) xSemaphoreGive(petStateMutex);
       savePetState(); // Save fresh stats to NVS
 
       // Mark hatching as done — will never play again
@@ -1460,31 +1645,46 @@ void setup() {
   Serial.println("Scanning I2C devices...");
   scanI2CDevices();
 
-  Serial.println("Initializing MPU6050...");
+  // ===== REPLACED: MPU6050 init — Adafruit + motion interrupt + deep sleep =====
+  Serial.println("Initializing MPU6050 (Adafruit)...");
   bool mpuSuccess = false;
 
-  // Try MPU6050 initialization with timeout
   unsigned long startTime = millis();
   while (!mpuSuccess && (millis() - startTime < 5000)) { // 5 second timeout
-    mpu.initialize();
-    delay(100);
-
-    if (mpu.testConnection()) {
+    if (mpu.begin(0x68, &Wire)) {
       Serial.println("✅ MPU6050 initialized successfully!");
       mpuSuccess = true;
-      mpuAvailable = true; // Set flag for sensor readings
+      mpuAvailable = true;
+
+      // Configure motion interrupt for awake mode (active HIGH, latched)
+      configureMPU6050Awake();
+
+      // Clear any stale interrupt before attaching ISR
+      mpu.getMotionInterruptStatus();
+
+      // Attach hardware interrupt — RISING: LOW → HIGH = motion fired
+      pinMode(MPU_INT_PIN, INPUT);
+      attachInterrupt(digitalPinToInterrupt(MPU_INT_PIN), onMotionInterrupt, RISING);
+      Serial.println("✅ Motion interrupt attached on GPIO2 (RISING)");
 
       // Warm up LP gravity filter (1s) — prevents cold-start false steps
       for (int i = 0; i < 40; i++) {
-        int16_t wx, wy, wz;
-        mpu.getAcceleration(&wx, &wy, &wz);
-        float fx = wx / 16384.0f, fy = wy / 16384.0f, fz = wz / 16384.0f;
+        if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+          Serial.println("[I2C] Mutex timeout in warmup"); continue;
+        }
+        mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+        if (i2cMutex) xSemaphoreGive(i2cMutex);
+        // Adafruit gives m/s² — convert to g for LP filter
+        float fx = accelEvent.acceleration.x / 9.81f;
+        float fy = accelEvent.acceleration.y / 9.81f;
+        float fz = accelEvent.acceleration.z / 9.81f;
         stepGravX = LP_ALPHA_STEP * stepGravX + (1.0f - LP_ALPHA_STEP) * fx;
         stepGravY = LP_ALPHA_STEP * stepGravY + (1.0f - LP_ALPHA_STEP) * fy;
         stepGravZ = LP_ALPHA_STEP * stepGravZ + (1.0f - LP_ALPHA_STEP) * fz;
         delay(25);
       }
       Serial.println("✅ Step gravity filter warmed up");
+      lastMotionTime = millis();  // Start inactivity timer from boot
     } else {
       Serial.print(".");
       delay(500);
@@ -1495,7 +1695,10 @@ void setup() {
     Serial.println("\n❌ MPU6050 initialization failed after 5 seconds");
     Serial.println(
         "⚠️  Continuing without MPU6050 (will send dummy sensor data)");
+  } else {
+    lastMotionTime = millis();  // Ensure inactivity timer starts even if warmup skipped
   }
+  // ===== END REPLACEMENT =====
 
   // Initialize Camera
   initCamera();
@@ -1511,16 +1714,20 @@ void setup() {
   audioMutex = xSemaphoreCreateMutex();
   cameraMutex = xSemaphoreCreateMutex();
   cpuFreqMutex = xSemaphoreCreateMutex(); // CPU frequency race guard
+  petStateMutex = xSemaphoreCreateMutex();   // g_petState cross-core guard
+  i2cMutex = xSemaphoreCreateMutex();        // MPU6050 I2C bus cross-core guard
+  uiStringsMutex = xSemaphoreCreateMutex();  // currentScreenType/currentEmotion guard
 
   // Create network queue and mutex
   networkDataMutex = xSemaphoreCreateMutex();
+  sttDataMutex = xSemaphoreCreateMutex();     // STT WAV buffer handoff guard
   networkQueue =
       xQueueCreate(8, sizeof(uint8_t)); // Queue depth 8, each item 1 byte
 
   // Start audio monitoring task on Core 0 (dedicated to audio/VAD)
   xTaskCreatePinnedToCore(audioMonitorTask, // Task function
                           "AudioMonitor",   // Task name
-                          8192,             // Stack size
+                          12288,            // Stack size (increased for STT path)
                           NULL,             // Parameters
                           2, // Priority (high for real-time audio)
                           &audioTaskHandle, // Task handle
@@ -1530,7 +1737,7 @@ void setup() {
   // Start camera monitoring task on Core 0 (shares core with audio)
   xTaskCreatePinnedToCore(cameraMonitorTask, // Task function
                           "CameraMonitor",   // Task name
-                          4096,              // Stack size
+                          8192,              // Stack size (increased for PSRAM heap ops)
                           NULL,              // Parameters
                           1,                 // Priority (lower than audio)
                           &cameraTaskHandle, // Task handle
@@ -1541,7 +1748,7 @@ void setup() {
   xTaskCreatePinnedToCore(
       oledTask,        // Task function
       "OLED",          // Task name
-      4096,            // Stack size
+      8192,            // Stack size (increased from 4096 for deep animation call chains)
       NULL,            // Parameters
       1,               // Priority (lower than audio)
       &oledTaskHandle, // Task handle — needed for OTA suspend
@@ -2104,10 +2311,13 @@ void readTiltForGame() {
   if (!mpuAvailable)
     return;
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in readTiltForGame"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  float accelY = ay / 16384.0; // Forward/back tilt for gameplay
+  float accelY = accelEvent.acceleration.y / 9.81; // m/s² → g for gameplay
 
   filteredX = 0.6 * filteredX + 0.4 * accelY; // Snappy response (less smoothing)
 
@@ -2243,10 +2453,13 @@ void checkStartGesture() {
   if (!mpuAvailable)
     return;
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in checkStartGesture"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  float accelX = ax / 16384.0;
+  float accelX = accelEvent.acceleration.x / 9.81;
 
   if (accelX < -0.8) {
     if (!holdingLeft) {
@@ -2313,9 +2526,12 @@ void resetGameState() {
 void readTiltForDodge() {
   if (!mpuAvailable)
     return;
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
-  float accelY = ay / 16384.0; // Forward/back tilt for gameplay
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in readTiltForDodge"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  float accelY = accelEvent.acceleration.y / 9.81; // m/s² → g for gameplay
   playerX += accelY * 6.0; // Fast responsive movement
   if (playerX < 0)
     playerX = 0;
@@ -2694,15 +2910,18 @@ void checkMedicineGesture() {
     return;
   if (!mpuAvailable || !petIsSick)
     return;
-  if (currentScreenType != "HEALTH_MENU") {
+  if (!screenTypeIs("HEALTH_MENU")) {
     holdingLeftForMedicine = false;
     return;
   }
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in checkMedicineGesture"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  float accelX = ax / 16384.0;
+  float accelX = accelEvent.acceleration.x / 9.81;
 
   // Check if tilting left (same threshold as game)
   if (accelX < -0.8) {
@@ -2734,15 +2953,18 @@ void checkFeedingGesture() {
     return;
   if (!mpuAvailable)
     return;
-  if (currentScreenType != "FOOD_MENU") {
+  if (!screenTypeIs("FOOD_MENU")) {
     holdingLeftForFeeding = false;
     return;
   }
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in checkFeedingGesture"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  float accelX = ax / 16384.0;
+  float accelX = accelEvent.acceleration.x / 9.81;
 
   // Check if tilting left (same threshold as game)
   if (accelX < -0.8) {
@@ -2766,9 +2988,11 @@ void checkFeedingGesture() {
       Serial.println("🍴 Starting eating animation!");
 
       // Local state update: Feeding reduces hunger and gives XP
+      if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
       g_petState.hunger = max(0, g_petState.hunger - 40);
       g_petState.xp += 20;
       g_petState.energy = min(100, g_petState.energy + 20);
+      if (petStateMutex) xSemaphoreGive(petStateMutex);
       savePetState();
       syncLocalStateToUI();
 
@@ -2791,10 +3015,13 @@ void checkCleaningGesture() {
   if (!showPoopIcon)
     return; // Only clean if poop present
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in checkCleaningGesture"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  float accelX = ax / 16384.0;
+  float accelX = accelEvent.acceleration.x / 9.81;
 
   // Check if tilting left
   if (accelX < -0.8) {
@@ -2818,9 +3045,11 @@ void checkCleaningGesture() {
       Serial.println("🧹 Starting cleaning animation!");
 
       // Local state update: Cleaning clears poop and gives happiness
+      if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
       g_petState.hasPoop = false;
       g_petState.happiness = min(100, g_petState.happiness + 20);
       g_petState.xp += 10;
+      if (petStateMutex) xSemaphoreGive(petStateMutex);
       poopClearedTime = millis(); // Start 15-min play icon timer
       savePetState();
       syncLocalStateToUI();
@@ -2877,8 +3106,10 @@ void playInjectionAnimation() {
         Serial.println("✅ Medicine given! Pet is now healthy!");
 
         // Local state update: Medicine cures sickness and restores health
+        if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
         g_petState.isSick = false;
         g_petState.health = min(100, g_petState.health + 30);
+        if (petStateMutex) xSemaphoreGive(petStateMutex);
         savePetState();
         syncLocalStateToUI();
 
@@ -2903,10 +3134,13 @@ void checkMenuTiltGesture() {
   if ((millis() - lastMenuCycleTime) < MENU_CYCLE_COOLDOWN)
     return; // Respect cooldown
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in checkMenuTiltGesture"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  float accelX = ax / 16384.0;
+  float accelX = accelEvent.acceleration.x / 9.81;
 
   if (accelX > 0.8) {
     if (!holdingRightForMenu) {
@@ -2938,13 +3172,16 @@ void checkMenuTiltGesture() {
 void detectHardwareStep() {
   if (!mpuAvailable)
     return;
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in detectHardwareStep"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
 
-  // Convert to g-units
-  float gx = ax / 16384.0f;
-  float gy = ay / 16384.0f;
-  float gz = az / 16384.0f;
+  // Convert m/s² to g-units for step detection
+  float gx = accelEvent.acceleration.x / 9.81f;
+  float gy = accelEvent.acceleration.y / 9.81f;
+  float gz = accelEvent.acceleration.z / 9.81f;
 
   // Low-pass filter — tracks gravity at ANY tilt orientation
   stepGravX = LP_ALPHA_STEP * stepGravX + (1.0f - LP_ALPHA_STEP) * gx;
@@ -3046,33 +3283,33 @@ void displayWalkingAnimation() {
 void cycleMenu() {
   String newMenu;
 
-  if (currentScreenType == "MAIN") {
+  if (screenTypeIs("MAIN")) {
     newMenu = "FOOD_MENU";
-  } else if (currentScreenType == "FOOD_MENU") {
+  } else if (screenTypeIs("FOOD_MENU")) {
     newMenu = "TOILET_MENU";
-  } else if (currentScreenType == "TOILET_MENU") {
+  } else if (screenTypeIs("TOILET_MENU")) {
     newMenu = "PLAY_MENU";
-  } else if (currentScreenType == "PLAY_MENU") {
+  } else if (screenTypeIs("PLAY_MENU")) {
     newMenu = "HEALTH_MENU";
-  } else if (currentScreenType == "HEALTH_MENU") {
+  } else if (screenTypeIs("HEALTH_MENU")) {
     newMenu = "STATUS_INFO_MENU";
-  } else if (currentScreenType == "STATUS_INFO_MENU") {
+  } else if (screenTypeIs("STATUS_INFO_MENU")) {
     newMenu = "STATS_MENU";
   } else {
     newMenu = "MAIN";
   }
 
-  Serial.printf("📡 Menu cycle: %s → %s\n", currentScreenType.c_str(),
+  Serial.printf("📡 Menu cycle: %s → %s\n", currentScreenType,
                 newMenu.c_str());
 
   // ✅ Reset animation state when LEAVING a menu (prevents stale animations)
-  if (currentScreenType == "TOILET_MENU") {
+  if (screenTypeIs("TOILET_MENU")) {
     isCleaningPoop = false;
     cleanSlideX = SCREEN_WIDTH;
     cleanSlideFrame = 1;
     holdingLeftForCleaning = false;
   }
-  if (currentScreenType == "HEALTH_MENU") {
+  if (screenTypeIs("HEALTH_MENU")) {
     givingMedicine = false;
     holdingLeftForMedicine = false;
     currentInjectionFrame = 0;
@@ -3080,7 +3317,7 @@ void cycleMenu() {
   }
 
   // ✅ CHANGE MENU LOCALLY FIRST (instant, no server dependency)
-  currentScreenType = newMenu;
+  setScreenType(newMenu.c_str());
 
   // ✅ Reset gesture/animation states on ENTERING new menu (prevents stale triggers)
   if (newMenu == "TOILET_MENU") {
@@ -3300,7 +3537,7 @@ void displayPetAnimation() {
 
   // Age transition animation — only plays on MAIN screen
   // If not on MAIN, keep pendingAgeTransition=true until user returns
-  if (pendingAgeTransition && currentScreenType == "MAIN") {
+  if (pendingAgeTransition && screenTypeIs("MAIN")) {
     if (ageTransitionAge > 0 && ageTransitionXP >= 0) {
       pendingAgeTransition = false;
       playAgeTransitionAnimation();
@@ -3318,13 +3555,14 @@ void displayPetAnimation() {
     static unsigned long lastScreenDebug = 0;
     if (millis() - lastScreenDebug >= 3000) {
       Serial.printf("📺 Current Screen: %s | Age: %d | Emotion: %s\n",
-                    currentScreenType.c_str(), petAge, currentEmotion.c_str());
+                    currentScreenType, petAge, currentEmotion);
       lastScreenDebug = millis();
     }
 
     // Check for menu tilt gesture — blocked during game, walking, or sleeping
     if (playGameState != GAME_PLAYING && !petIsWalking && !isDeviceSleeping) {
       checkMenuTiltGesture();
+      checkSTTTiltGesture(); // Left tilt 10s hold → activate STT mode
     }
 
     // Hardware step detection — update petIsWalking from local timing
@@ -3332,24 +3570,24 @@ void displayPetAnimation() {
     petIsWalking = (millis() - lastWalkingStepTime) < WALKING_WINDOW_MS;
 
     // Check which screen to display
-    if (currentScreenType == "FOOD_MENU") {
+    if (screenTypeIs("FOOD_MENU")) {
       displayFoodMenu();
       return; // Exit early
-    } else if (currentScreenType == "TOILET_MENU") {
+    } else if (screenTypeIs("TOILET_MENU")) {
       // Check for cleaning gesture in toilet menu
       checkCleaningGesture();
       displayToiletMenu();
       return; // Exit early
-    } else if (currentScreenType == "PLAY_MENU") {
+    } else if (screenTypeIs("PLAY_MENU")) {
       displayPlayMenu();
       return; // Exit early
-    } else if (currentScreenType == "HEALTH_MENU") {
+    } else if (screenTypeIs("HEALTH_MENU")) {
       displayHealthMenu();
       return; // Exit early
-    } else if (currentScreenType == "STATUS_INFO_MENU") {
+    } else if (screenTypeIs("STATUS_INFO_MENU")) {
       displayStatusInfoMenu();
       return; // Exit early
-    } else if (currentScreenType == "STATS_MENU") {
+    } else if (screenTypeIs("STATS_MENU")) {
       displayStatsMenu();
       return; // Exit early
     }
@@ -3373,7 +3611,7 @@ void displayPetAnimation() {
 
     // EMOTION-BASED ANIMATION SELECTION
     // Priority: Emotion > Age
-    if (currentEmotion == "HAPPY") {
+    if (emotionIs("HAPPY")) {
       switch (petAge) {
       case INFANT: {
         frameData = infant_happy[currentFrame % INFANT_HAPPY_FRAME_COUNT];
@@ -3404,7 +3642,7 @@ void displayPetAnimation() {
         break;
       }
       }
-    } else if (currentEmotion == "CRY") {
+    } else if (emotionIs("CRY")) {
       switch (petAge) {
       case INFANT: {
         frameData = infant_cry_frames[currentFrame % INFANT_CRY_FRAME_COUNT];
@@ -3435,7 +3673,7 @@ void displayPetAnimation() {
         break;
       }
       }
-    } else if (currentEmotion == "SURPRISE") {
+    } else if (emotionIs("SURPRISE")) {
       switch (petAge) {
       case INFANT: {
         frameData =
@@ -3467,8 +3705,8 @@ void displayPetAnimation() {
         break;
       }
       }
-    } else if (currentEmotion == "SAD" || currentEmotion == "HUNGER" ||
-               currentEmotion == "SICK") {
+    } else if (emotionIs("SAD") || emotionIs("HUNGER") ||
+               emotionIs("SICK")) {
       // SAD/HUNGER/SICK - sad animation + heart icon (sick = sad face + blinking heart)
       switch (petAge) {
       case INFANT: {
@@ -3500,7 +3738,7 @@ void displayPetAnimation() {
         break;
       }
       }
-    } else if (currentEmotion == "POOP") {
+    } else if (emotionIs("POOP")) {
       // POOP - angry animation + poop icon (pet is annoyed by poop)
       switch (petAge) {
       case INFANT: {
@@ -3532,7 +3770,7 @@ void displayPetAnimation() {
         break;
       }
       }
-    } else if (currentEmotion == "IDLE") {
+    } else if (emotionIs("IDLE")) {
       // IDLE face - pet is calm/relaxed (not hungry, not sick, not dirty)
       // Show first frame only (static calm face)
       switch (petAge) {
@@ -3591,13 +3829,13 @@ void displayPetAnimation() {
     bool iconsAllowed = !petIsWalking && !isDeviceSleeping;
 
     // Home icon at top-left (always on MAIN screen)
-    if (iconsAllowed && showHomeIcon && currentScreenType == "MAIN") {
+    if (iconsAllowed && showHomeIcon && screenTypeIs("MAIN")) {
       drawHomeIcon();
     }
 
     // Status icons at bottom-right
     // STRICT MUTUAL EXCLUSION (Priority: SICK > POOP > HUNGER > PLAY)
-    if (iconsAllowed && currentScreenType == "MAIN") {
+    if (iconsAllowed && screenTypeIs("MAIN")) {
       if (showSickIcon) {
         drawSickIcon();
       } else if (showPoopIcon) {
@@ -3610,6 +3848,11 @@ void displayPetAnimation() {
     }
 
     // Only animation - no text
+    // STT: Draw blinking "Talk" indicator when STT mode is active
+    if (sttModeActive) {
+      drawTalkIndicator();
+    }
+
     display.display();
 
     // Increment frame
@@ -3699,6 +3942,13 @@ void networkTask(void *parameter) {
         // Game over — send score + KakuCoin reward (safe on Core 1)
         sendKakuCoinReward(pendingRewardScore, pendingRewardKC);
         break;
+
+      case NET_STT:
+        // Send WAV audio chunk to server for STT transcription
+        safeCpuFreq(160);
+        sendSTTAudioChunk();
+        safeCpuFreq(80);
+        break;
       }
       vTaskDelay(pdMS_TO_TICKS(20)); // Brief settle between requests
     }
@@ -3712,6 +3962,8 @@ void handlePhysiology() {
   lastPhysioTick = millis();
 
   Serial.println("💓 Physiology Tick (120s)");
+
+  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
 
   // 1️⃣ Uptime & Aging
   g_petState.totalUptimeSecs += 120;
@@ -3791,6 +4043,8 @@ void handlePhysiology() {
   else
     g_petState.xp += 1;
 
+  if (petStateMutex) xSemaphoreGive(petStateMutex);
+
   // Sync and Persist
   syncLocalStateToUI();
   savePetState();
@@ -3814,7 +4068,22 @@ void loop() {
 
   // Check WiFi connection with timeout protection
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ WiFi disconnected, attempting reconnect...");
+    wifiReconnectFails++;
+    Serial.printf("❌ WiFi disconnected, attempting reconnect (%d/%d)...\n",
+                  wifiReconnectFails, WIFI_RECONNECT_MAX_FAILS);
+
+    // Show reconnect attempt on OLED
+    if (displayReady) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(2, 4);
+      display.println("WiFi Lost");
+      display.setCursor(2, 16);
+      display.printf("Retry %d/%d", wifiReconnectFails, WIFI_RECONNECT_MAX_FAILS);
+      display.display();
+    }
+
     // Try stored credentials first, then hardcoded fallback
     bool reconnected = false;
     int count = getStoredWiFiCount();
@@ -3850,9 +4119,20 @@ void loop() {
     }
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("\n✅ WiFi Reconnected: " + WiFi.localIP().toString());
+      wifiReconnectFails = 0; // Reset counter on success
+    } else if (wifiReconnectFails >= WIFI_RECONNECT_MAX_FAILS) {
+      Serial.printf("\n🚨 WiFi reconnect failed %d times — entering AP provisioning mode\n",
+                    WIFI_RECONNECT_MAX_FAILS);
+      wifiReconnectFails = 0; // Reset counter before entering AP mode
+      startWiFiProvisioningAP();
+      return; // Exit loop() — provisioning guard will handle subsequent calls
     } else {
-      Serial.println("\n⚠️  WiFi reconnection failed — offline mode");
+      Serial.printf("\n⚠️  WiFi reconnection failed — will retry next loop (%d/%d)\n",
+                    wifiReconnectFails, WIFI_RECONNECT_MAX_FAILS);
     }
+  } else {
+    // WiFi is connected — reset fail counter
+    if (wifiReconnectFails > 0) wifiReconnectFails = 0;
   }
 
   // Debug: Print WiFi status + heap health every 10 seconds
@@ -3878,10 +4158,11 @@ void loop() {
   }
 
   // SEALED DEVICE SAFETY: Automatic daily reboot (clears memory fragmentation)
-  // Reboots after 24 hours of uptime — only when device is sleeping (minimal disruption)
+  // With deep sleep, device reboots on every sleep/wake cycle naturally.
+  // This is only a fallback if device stays awake for 24h continuously.
   static const unsigned long DAILY_REBOOT_MS = 86400000UL; // 24 hours
-  if (millis() > DAILY_REBOOT_MS && isDeviceSleeping) {
-    Serial.println("🔄 Daily maintenance reboot (24h uptime, device sleeping)");
+  if (millis() > DAILY_REBOOT_MS) {
+    Serial.println("🔄 Daily maintenance reboot (24h uptime)");
     savePetState();
     delay(500);
     ESP.restart();
@@ -3894,15 +4175,21 @@ void loop() {
       SingleReading reading;
       reading.timestamp_ms = millis();
       if (mpuAvailable) {
-        int16_t ax, ay, az, gx, gy, gz;
-        mpu.getAcceleration(&ax, &ay, &az);
-        reading.accel_x = ax / 16384.0 * 9.81;
-        reading.accel_y = ay / 16384.0 * 9.81;
-        reading.accel_z = az / 16384.0 * 9.81;
-        mpu.getRotation(&gx, &gy, &gz);
-        reading.gyro_x = gx / 131.0;
-        reading.gyro_y = gy / 131.0;
-        reading.gyro_z = gz / 131.0;
+        if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+          Serial.println("[I2C] Mutex timeout in sensor batch");
+          reading.accel_x = reading.accel_y = reading.accel_z = 0.0;
+          reading.gyro_x = reading.gyro_y = reading.gyro_z = 0.0;
+        } else {
+          mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+          if (i2cMutex) xSemaphoreGive(i2cMutex);
+          // Adafruit gives m/s² directly for accel, rad/s for gyro
+          reading.accel_x = accelEvent.acceleration.x;
+          reading.accel_y = accelEvent.acceleration.y;
+          reading.accel_z = accelEvent.acceleration.z;
+          reading.gyro_x = gyroEvent.gyro.x * 57.2958f; // rad/s → °/s
+          reading.gyro_y = gyroEvent.gyro.y * 57.2958f;
+          reading.gyro_z = gyroEvent.gyro.z * 57.2958f;
+        }
       } else {
         reading.accel_x = reading.accel_y = reading.accel_z = 0.0;
         reading.gyro_x = reading.gyro_y = reading.gyro_z = 0.0;
@@ -3927,41 +4214,33 @@ void loop() {
     isUploadingImage = false; // Also reset eating animation
   }
 
-  // ── NEUTRAL / SLEEP STATE DETECTION ──────────────────────────────────────
-  // If the device stays flat (neutral) for 30 s enter sleep mode:
-  //   • network paused, WiFi modem sleeps, display shows sleeping animation
-  //   • sleep seconds accumulated and sent with the next sensor upload on wake
-  if (!isDeviceSleeping) {
-    if (isDeviceInverted()) {
-      if (neutralStartTime == 0)
-        neutralStartTime = millis();
-      if (millis() - neutralStartTime >= NEUTRAL_SLEEP_TIMEOUT) {
-        isDeviceSleeping = true;
-        sleepStartTime = millis();
-        Serial.println("😴 Inverted 30s → SLEEP MODE (network paused)");
-      }
-    } else {
-      neutralStartTime = 0; // reset if device is moved
-    }
-  } else {
-    // Already sleeping — wake on any meaningful movement (non-inverted state)
-    if (!isDeviceInverted()) {
-      uint32_t sleptSec = (millis() - sleepStartTime) / 1000;
-      accumulatedSleepSec += sleptSec;
-      Serial.printf("⏰ Woke up — slept %us (banked: %us)\n", sleptSec,
-                    accumulatedSleepSec);
-      isDeviceSleeping = false;
-      neutralStartTime = 0;
-      sleepStartTime = 0;
-    }
+  // ── STT TIMEOUT — disable after 120s of no left-tilt interaction ─────────
+  // SAFETY: Only set flag here. audioMonitorTask checks this flag and frees
+  // its own buffer safely — prevents race condition / heap corruption.
+  if (sttModeActive && (millis() - lastSTTActivityTime > STT_TIMEOUT_MS)) {
+    sttModeActive = false;  // audioMonitorTask will see this and clean up
+    holdingLeftForSTT = false;
+    Serial.println("🎤 STT timeout (120s no interaction) — flag cleared");
   }
 
-  // While sleeping: skip all network work, yield CPU, and let oledTask render
-  // the animation
-  if (isDeviceSleeping) {
-    vTaskDelay(pdMS_TO_TICKS(500));
-    return;
+  // ===== ISR-BASED INACTIVITY DEEP SLEEP =====
+  // Handle ISR-based motion detection — reset inactivity timer
+  if (motionDetected) {
+    motionDetected = false;
+    mpu.getMotionInterruptStatus();  // clear latched interrupt
+    lastMotionTime = millis();       // any motion resets 2-min sleep countdown
   }
+
+  // If no motion for 2 minutes → enter hardware deep sleep
+  // Uses direct ISR-based inactivity (no orientation/inverted check)
+  if (mpuAvailable && lastMotionTime > 0 &&
+      (millis() - lastMotionTime >= INACTIVITY_SLEEP_TIMEOUT)) {
+    isDeviceSleeping = true;
+    Serial.println("😴 No motion for 2 min → entering DEEP SLEEP");
+    enterDeepSleep();
+    // Never reaches here — ESP32 reboots on wake
+  }
+  // ===== END INACTIVITY SLEEP =====
 
   // ── STAGGERED NETWORK SCHEDULER ───────────────────────────────────────────
   // Uses 500ms tick slots to spread requests — no simultaneous HTTP bursts
@@ -4181,6 +4460,113 @@ void audioMonitorTask(void *parameter) {
       continue;
     }
 
+    // ── STT STREAMING MODE ────────────────────────────────────────────────────
+    // When STT is active, redirect mic data to stt_audio_buffer and send
+    // WAV chunks every 3s via NET_STT. Existing VAD code below is skipped.
+    if (sttModeActive) {
+      // FIX: Reuse heap-allocated vad_buffer instead of stack-local array.
+      // Saves 1024 bytes of stack, preventing stack overflow.
+      size_t stt_bytes_read = 0;
+      esp_err_t stt_err = i2s_channel_read(rx_handle, vad_buffer,
+                                           VAD_BUFFER_SIZE * sizeof(int16_t),
+                                           &stt_bytes_read, pdMS_TO_TICKS(100));
+      if (stt_err == ESP_OK && stt_bytes_read > 0) {
+        // Allocate STT buffer on first use
+        if (!stt_audio_buffer) {
+          stt_audio_buffer = (uint8_t *)ps_malloc(STT_MAX_AUDIO_SIZE);
+          if (!stt_audio_buffer) {
+            Serial.println("❌ STT: PSRAM alloc failed!");
+            sttModeActive = false;
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+          }
+          stt_audio_size = 0;
+          stt_has_voice = false;
+          sttLastSendTime = millis();
+          Serial.println("🎤 STT: PSRAM buffer allocated");
+        }
+
+        int16_t *stt_samples = vad_buffer; // Already int16_t*
+        int stt_sample_count = stt_bytes_read / 2;
+
+        // VAD check for this chunk
+        long stt_energy_sum = 0;
+        for (int i = 0; i < stt_sample_count; i++)
+          stt_energy_sum += abs(stt_samples[i]);
+        if (stt_sample_count > 0 && (stt_energy_sum / stt_sample_count) > STT_VAD_THRESHOLD)
+          stt_has_voice = true;
+
+        // Apply volume gain and append to buffer
+        if (stt_audio_size + stt_bytes_read < STT_MAX_AUDIO_SIZE) {
+          for (int i = 0; i < stt_sample_count; i++) {
+            int32_t amp = (int32_t)stt_samples[i] << VOLUME_GAIN;
+            if (amp > 32767) amp = 32767;
+            if (amp < -32768) amp = -32768;
+            int16_t out = (int16_t)amp;
+            memcpy(stt_audio_buffer + stt_audio_size, &out, 2);
+            stt_audio_size += 2;
+          }
+        }
+
+        // Every 3 seconds: build WAV, hand to networkTask via NET_STT
+        if (millis() - sttLastSendTime >= STT_SEND_INTERVAL && stt_audio_size > 1024) {
+          // Build WAV in PSRAM
+          size_t wav_total = stt_audio_size + 44;
+          uint8_t *wav_buf = (uint8_t *)ps_malloc(wav_total);
+          if (wav_buf) {
+            generateSTTWavHeader(wav_buf, stt_audio_size, SAMPLE_RATE);
+            memcpy(wav_buf + 44, stt_audio_buffer, stt_audio_size);
+
+            // Hand WAV data to networkTask under mutex
+            if (sttDataMutex && xSemaphoreTake(sttDataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+              if (stt_wav_to_send) free(stt_wav_to_send); // Free any unsent previous chunk
+              stt_wav_to_send = wav_buf;
+              stt_wav_to_send_size = wav_total;
+              xSemaphoreGive(sttDataMutex);
+
+              uint8_t req = NET_STT;
+              xQueueSend(networkQueue, &req, 0);
+              Serial.printf("🎤 STT: Queued %d bytes WAV | voice=%s\n",
+                            wav_total, stt_has_voice ? "YES" : "no");
+            } else {
+              free(wav_buf); // Couldn't acquire mutex, discard
+            }
+          }
+          // Reset buffer for next window
+          stt_audio_size = 0;
+          stt_has_voice = false;
+          sttLastSendTime = millis();
+        }
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+
+      // SAFETY: Check if STT was disabled (by timeout in loop or by tilt-off)
+      // Clean up ALL buffers HERE on the audio task — safe because we own them
+      if (!sttModeActive) {
+        if (stt_audio_buffer) {
+          free(stt_audio_buffer);
+          stt_audio_buffer = NULL;
+        }
+        stt_audio_size = 0;
+        stt_has_voice = false;
+        // Also clean up any unsent WAV chunk to prevent memory leak
+        if (sttDataMutex && xSemaphoreTake(sttDataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          if (stt_wav_to_send) {
+            free(stt_wav_to_send);
+            stt_wav_to_send = NULL;
+            stt_wav_to_send_size = 0;
+          }
+          xSemaphoreGive(sttDataMutex);
+        }
+        Serial.println("🎤 STT: Audio task cleaned up all buffers");
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue; // Skip existing VAD code below
+    }
+    // ── END STT STREAMING MODE ──────────────────────────────────────────
+
     // Continuously read audio for VAD analysis
     esp_err_t err = i2s_channel_read(rx_handle, vad_buffer,
                                      VAD_BUFFER_SIZE * sizeof(int16_t),
@@ -4305,18 +4691,19 @@ SensorData readAllSensors() {
   SensorData data = {0};
 
   if (mpuAvailable) {
-    // Read actual sensor data from MPU6050
-    int16_t ax, ay, az;
-    mpu.getAcceleration(&ax, &ay, &az);
-    data.accel_x = ax / 16384.0 * 9.81;
-    data.accel_y = ay / 16384.0 * 9.81;
-    data.accel_z = az / 16384.0 * 9.81;
-
-    int16_t gx, gy, gz;
-    mpu.getRotation(&gx, &gy, &gz);
-    data.gyro_x = gx / 131.0;
-    data.gyro_y = gy / 131.0;
-    data.gyro_z = gz / 131.0;
+    // Read sensor data from MPU6050 (Adafruit — m/s² and rad/s directly)
+    if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+      Serial.println("[I2C] Mutex timeout in readAllSensors");
+      return data; // Return zeroed struct
+    }
+    mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+    if (i2cMutex) xSemaphoreGive(i2cMutex);
+    data.accel_x = accelEvent.acceleration.x;  // m/s² directly
+    data.accel_y = accelEvent.acceleration.y;
+    data.accel_z = accelEvent.acceleration.z;
+    data.gyro_x = gyroEvent.gyro.x * 57.2958f; // rad/s → °/s
+    data.gyro_y = gyroEvent.gyro.y * 57.2958f;
+    data.gyro_z = gyroEvent.gyro.z * 57.2958f;
   } else {
     // MPU6050 not available - send zero values with error indication
     data.accel_x = 0.0;
@@ -4404,6 +4791,12 @@ void getOLEDDisplayFromServer() {
   trackHttpResult(httpCode);
 
   if (httpCode == 200) {
+    int responseSize = http.getSize();
+    if (responseSize > 4096) {
+      Serial.printf("[SAFETY] OLED response too large: %d bytes, skipping\n", responseSize);
+      http.end();
+      return;
+    }
     String response = http.getString();
 
     // Reuse global StaticJsonDocument (no heap allocation)
@@ -4427,9 +4820,13 @@ void getOLEDDisplayFromServer() {
         int newAge = g_oledDoc["age"].as<int>();
         // Only sync if local age is behind server (e.g., first sync or remote
         // reset)
+        if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
         if (g_petState.ageInt < newAge) {
           g_petState.ageInt = newAge;
+          if (petStateMutex) xSemaphoreGive(petStateMutex);
           syncLocalStateToUI();
+        } else {
+          if (petStateMutex) xSemaphoreGive(petStateMutex);
         }
       }
 
@@ -4438,22 +4835,22 @@ void getOLEDDisplayFromServer() {
       /*
       if (g_oledDoc.containsKey("screen_type")) {
           String newScreenType = g_oledDoc["screen_type"].as<String>();
-          if (currentScreenType == "FOOD_MENU" && newScreenType != "FOOD_MENU")
+          if (screenTypeIs("FOOD_MENU") && newScreenType != "FOOD_MENU")
       { imageAlreadySentThisSession = false;
           }
-          currentScreenType = newScreenType;
-          Serial.printf("📺 Screen Type: %s\n", currentScreenType.c_str());
+          setScreenType(newScreenType.c_str());
+          Serial.printf("📺 Screen Type: %s\n", currentScreenType);
       } else if (g_oledDoc.containsKey("screen_state")) {
           String newScreenState = g_oledDoc["screen_state"].as<String>();
-          if (currentScreenType == "FOOD_MENU" && newScreenState != "FOOD_MENU")
+          if (screenTypeIs("FOOD_MENU") && newScreenState != "FOOD_MENU")
       { imageAlreadySentThisSession = false;
           }
-          currentScreenType = newScreenState;
-          Serial.printf("📺 Screen State: %s\n", currentScreenType.c_str());
+          setScreenType(newScreenState.c_str());
+          Serial.printf("📺 Screen State: %s\n", currentScreenType);
       }
       */
 
-      if (currentScreenType == "MAIN") {
+      if (screenTypeIs("MAIN")) {
         showHomeIcon = true;
       } else {
         showHomeIcon = false;
@@ -4523,14 +4920,14 @@ void getOLEDDisplayFromServer() {
           isServerEmotionOverride = false;
         } else {
           isServerEmotionOverride = true;
-          if (currentEmotion != emotion) {
-            currentEmotion = emotion;
+          if (!emotionIs(emotion.c_str())) {
+            setEmotion(emotion.c_str());
             Serial.printf("😊 Server Sensory Override: %s\n",
-                          currentEmotion.c_str());
+                          currentEmotion);
           }
         }
 
-        if (emotion == "EATING" && currentScreenType == "FOOD_MENU") {
+        if (emotion == "EATING" && screenTypeIs("FOOD_MENU")) {
           Serial.println(
               "😋 Emotion: EATING - triggering animation on FOOD MENU!");
           playEatingAnimation();
@@ -4666,7 +5063,16 @@ void checkAndPerformOTA() {
     return;
   }
 
-  String response = http.getString();
+  String response;
+  int otaResponseSize = http.getSize();
+  if (otaResponseSize > 4096) {
+    Serial.printf("[SAFETY] OTA check response too large: %d bytes, skipping\n", otaResponseSize);
+    http.end();
+    otaUpdateRequested = false;
+    setCpuFrequencyMhz(80);
+    return;
+  }
+  response = http.getString();
   http.end();
 
   // Parse response
@@ -4969,6 +5375,12 @@ void notifyServerStartupComplete() {
   trackHttpResult(httpCode);
 
   if (httpCode == 200) {
+    int startupResponseSize = http.getSize();
+    if (startupResponseSize > 4096) {
+      Serial.printf("[SAFETY] Startup response too large: %d bytes, skipping\n", startupResponseSize);
+      http.end();
+      return;
+    }
     String response = http.getString();
     Serial.println("✅ Server acknowledged startup!");
     Serial.printf("   Response: %s\n", response.c_str());
@@ -5088,6 +5500,7 @@ bool sendSensorDataOnly(SensorData data) {
 
   // Add pet local physiology state so the server dashboard updates
   JsonObject petObj = g_sensorDoc.createNestedObject("pet_state");
+  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
   petObj["hunger"] = g_petState.hunger;
   petObj["health"] = g_petState.health;
   petObj["happiness"] = g_petState.happiness;
@@ -5099,6 +5512,7 @@ bool sendSensorDataOnly(SensorData data) {
   petObj["has_poop"] = g_petState.hasPoop;
   petObj["age"] = g_petState.ageInt;
   petObj["uptime"] = g_petState.totalUptimeSecs;
+  if (petStateMutex) xSemaphoreGive(petStateMutex);
 
   // Add sensor batch with all buffered readings
   JsonObject batchObj = g_sensorDoc.createNestedObject("sensor_batch");
@@ -5233,7 +5647,7 @@ void sendImageData(String imageBase64) {
 
     // Trigger eating-finished state to show GOOD! text
     // Image upload = feeding complete (the frame IS the food)
-    if (currentScreenType == "FOOD_MENU") {
+    if (screenTypeIs("FOOD_MENU")) {
       justFinishedEating = true;
       eatingFinishTime = millis();
       Serial.println("🎉 Feeding complete! Showing GOOD! text...");
@@ -5267,7 +5681,7 @@ void sendAudioData(String audioBase64) {
   http.setConnectTimeout(5000);
   http.setTimeout(15000); // Shorter timeout for smaller audio
 
-  if (!http.begin(
+  if (!http.begin(sslNet,
           "https://kakuproject-90943350924.asia-south1.run.app/upload-audio")) {
     Serial.println("❌ Failed to connect to audio server");
     return;
@@ -5352,6 +5766,7 @@ void sendAllDataToServer(SensorData data) {
 
   // Add local pet state (Primary Authority)
   JsonObject pet = jsonDoc.createNestedObject("pet_state");
+  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
   pet["hunger"] = g_petState.hunger;
   pet["health"] = g_petState.health;
   pet["energy"] = g_petState.energy;
@@ -5363,6 +5778,7 @@ void sendAllDataToServer(SensorData data) {
   pet["is_sick"] = g_petState.isSick;
   pet["has_poop"] = g_petState.hasPoop;
   pet["uptime"] = g_petState.totalUptimeSecs;
+  if (petStateMutex) xSemaphoreGive(petStateMutex);
 
   String payload;
   serializeJson(jsonDoc, payload);
@@ -5391,7 +5807,12 @@ void sendAllDataToServer(SensorData data) {
       vTaskDelay(pdMS_TO_TICKS(100));
       digitalWrite(LED_PIN, LOW);
     } else {
-      Serial.printf("❌ Server error: %s\n", http.getString().c_str());
+      int errSize = http.getSize();
+      if (errSize >= 0 && errSize <= 8192) {
+        Serial.printf("❌ Server error: %s\n", http.getString().c_str());
+      } else {
+        Serial.printf("❌ Server error (response too large: %d bytes)\n", errSize);
+      }
     }
   } else {
     Serial.printf("❌ HTTP error: %s\n", http.errorToString(httpCode).c_str());
@@ -5489,9 +5910,14 @@ void sendCleanRequest() {
     Serial.printf("📡 Server response: %d\n", httpCode);
 
     if (httpCode == HTTP_CODE_OK) {
-      String response = http.getString();
-      Serial.println("✅ Cleaning successful!");
-      Serial.println(response);
+      int cleanSize = http.getSize();
+      if (cleanSize > 4096) {
+        Serial.printf("[SAFETY] Clean response too large: %d bytes, skipping\n", cleanSize);
+      } else {
+        String response = http.getString();
+        Serial.println("✅ Cleaning successful!");
+        Serial.println(response);
+      }
 
       // Reset local poop icon
       showPoopIcon = false;
@@ -5643,9 +6069,14 @@ void acknowledgeEvent(int event_id) {
 
   if (httpCode > 0) {
     if (httpCode == HTTP_CODE_OK || httpCode == 200) {
-      String response = http.getString();
-      Serial.printf("✅ Event acknowledged successfully: %s\n",
-                    response.c_str());
+      int ackSize = http.getSize();
+      if (ackSize > 4096) {
+        Serial.printf("[SAFETY] Ack response too large: %d bytes, skipping\n", ackSize);
+      } else {
+        String response = http.getString();
+        Serial.printf("✅ Event acknowledged successfully: %s\n",
+                      response.c_str());
+      }
     } else {
       Serial.printf("⚠️ Acknowledgment response: %d\n", httpCode);
     }
@@ -5655,6 +6086,176 @@ void acknowledgeEvent(int event_id) {
   }
 
   http.end();
+}
+
+// ================= STT MODE FUNCTIONS =================
+// Left tilt 10s → activate STT streaming, 120s timeout → deactivate
+
+// Generate standard 44-byte WAV header for 16kHz 16-bit mono PCM
+void generateSTTWavHeader(uint8_t *header, uint32_t data_size, uint32_t sample_rate) {
+  uint32_t file_size = data_size + 36;
+  uint32_t byte_rate = sample_rate * 2; // 16-bit mono
+  const uint8_t wav[44] = {
+    'R','I','F','F',
+    (uint8_t)(file_size), (uint8_t)(file_size>>8),
+    (uint8_t)(file_size>>16), (uint8_t)(file_size>>24),
+    'W','A','V','E',
+    'f','m','t',' ',
+    16,0,0,0,             // SubChunk1Size (PCM)
+    1,0,                   // AudioFormat (PCM)
+    1,0,                   // NumChannels (Mono)
+    (uint8_t)(sample_rate), (uint8_t)(sample_rate>>8),
+    (uint8_t)(sample_rate>>16), (uint8_t)(sample_rate>>24),
+    (uint8_t)(byte_rate), (uint8_t)(byte_rate>>8),
+    (uint8_t)(byte_rate>>16), (uint8_t)(byte_rate>>24),
+    2,0,                   // BlockAlign (2 bytes / sample)
+    16,0,                  // BitsPerSample
+    'd','a','t','a',
+    (uint8_t)(data_size), (uint8_t)(data_size>>8),
+    (uint8_t)(data_size>>16), (uint8_t)(data_size>>24)
+  };
+  memcpy(header, wav, 44);
+}
+
+// Check left-tilt hold gesture to toggle STT mode
+void checkSTTTiltGesture() {
+  if (!mpuAvailable) return;
+  // Only allow STT activation on MAIN screen (avoids conflict with 3s left-tilt gestures on menu screens)
+  if (!screenTypeIs("MAIN")) {
+    holdingLeftForSTT = false;
+    return;
+  }
+
+  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[I2C] Mutex timeout in checkSTTTiltGesture"); return;
+  }
+  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  float accelX = accelEvent.acceleration.x / 9.81;
+
+  if (accelX < -0.8) {
+    // Device is tilted left
+    if (!holdingLeftForSTT) {
+      holdingLeftForSTT = true;
+      sttTiltHoldStartTime = millis();
+    }
+
+    unsigned long heldFor = millis() - sttTiltHoldStartTime;
+
+    // If STT already active, any left-tilt refreshes the activity timer
+    if (sttModeActive) {
+      lastSTTActivityTime = millis();
+      return;
+    }
+
+    // Show progress feedback on serial every 2 seconds during hold
+    static unsigned long lastSTTProgress = 0;
+    if (heldFor > 2000 && millis() - lastSTTProgress > 2000) {
+      Serial.printf("🎤 STT tilt hold: %.0fs / 10s...\n", heldFor / 1000.0);
+      lastSTTProgress = millis();
+    }
+
+    // 10 seconds held → ACTIVATE STT
+    if (heldFor >= STT_TILT_HOLD_TIME) {
+      sttModeActive = true;
+      lastSTTActivityTime = millis();
+      sttLastSendTime = millis();
+      stt_audio_size = 0;
+      stt_has_voice = false;
+      holdingLeftForSTT = false;
+      Serial.println("🎤✅ STT MODE ACTIVATED! (left tilt 10s held)");
+      Serial.println("🎤 Audio will stream to server every 3s");
+      Serial.printf("🎤 Auto-disable after %ds of no interaction\n", STT_TIMEOUT_MS / 1000);
+    }
+  } else {
+    // Device not tilted left — reset hold timer
+    holdingLeftForSTT = false;
+  }
+}
+
+// Draw small "Talk" label at top-right of 64x32 OLED
+void drawTalkIndicator() {
+  // Blink: visible 800ms, hidden 400ms
+  unsigned long blinkCycle = millis() % 1200;
+  if (blinkCycle > 800) return; // Hidden phase
+
+  display.setTextSize(1);       // 6x8 font
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(40, 0);     // Top-right area ("Talk" = 4 chars * 6px = 24px, starts at x=40 on 64px wide)
+  display.print("Talk");
+}
+
+// Send WAV audio chunk to server /api/audio-stt (runs on Core 1 via networkTask)
+// FIX: Send raw WAV bytes directly (no multipart wrapper, no second buffer).
+// Server has raw-body fallback: request.get_data() when 'file' not in request.files.
+// This eliminates the ~160KB post_body duplication that caused peak ~500KB PSRAM usage.
+void sendSTTAudioChunk() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ STT: WiFi not connected");
+    return;
+  }
+
+  // Grab WAV data under mutex
+  uint8_t *wav_data = NULL;
+  size_t wav_size = 0;
+  if (sttDataMutex && xSemaphoreTake(sttDataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    wav_data = stt_wav_to_send;
+    wav_size = stt_wav_to_send_size;
+    stt_wav_to_send = NULL;
+    stt_wav_to_send_size = 0;
+    xSemaphoreGive(sttDataMutex);
+  }
+
+  if (!wav_data || wav_size < 100) {
+    if (wav_data) free(wav_data);
+    return;
+  }
+
+  // FIX: Reset sslNet before reuse — 97KB POST can timeout/break the TLS
+  // session. Without stop(), the next request reuses the stale session,
+  // mbedTLS writes to freed PSRAM buffers, corrupting heap metadata.
+  // Core 0's next ps_malloc/free then crashes: StoreProhibited 0xFFFFFFFF.
+  sslNet.stop();
+
+  HTTPClient http;
+  http.setConnectTimeout(10000);
+  http.setTimeout(15000);  // 3s audio = ~96KB WAV, 15s is generous
+  http.begin(sslNet, "https://kakuproject-90943350924.asia-south1.run.app/api/audio-stt");
+  http.addHeader("Content-Type", "audio/wav");
+
+  Serial.printf("📤 STT: Sending %d bytes raw WAV...\n", wav_size);
+  int code = http.POST(wav_data, wav_size);
+  String response;
+  if (code > 0) {
+    int sttSize = http.getSize();
+    if (sttSize >= 0 && sttSize <= 8192) {
+      response = http.getString();
+    } else {
+      Serial.printf("[SAFETY] STT response too large: %d bytes, skipping\n", sttSize);
+    }
+  }
+
+  free(wav_data);  // Single free — only buffer that existed
+  wav_data = NULL;
+  http.end();
+  trackHttpResult(code);
+
+  if (code == 200) {
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, response);
+    if (!err && doc.containsKey("text")) {
+      const char *text = doc["text"];
+      if (strlen(text) > 0) {
+        Serial.printf("🗣️ STT: \"%s\"\n", text);
+      } else {
+        Serial.println("🔇 STT: (silence — no speech)");
+      }
+    } else {
+      Serial.printf("✅ STT OK: %s\n", response.c_str());
+    }
+  } else {
+    Serial.printf("❌ STT HTTP %d: %s\n", code, response.c_str());
+  }
 }
 
 /*
