@@ -462,6 +462,11 @@ int petHappiness = 100;          // 0-100 bar
 int petDiscipline = 100;         // 0-100 bar
 bool petIsSick = false;          // Track if pet is sick
 
+// Camera on-demand power management
+volatile bool pendingCameraInit = false;    // Set by Core 1, consumed by cameraMonitorTask (Core 0)
+volatile bool pendingCameraDeinit = false;  // Set by Core 1, consumed by cameraMonitorTask (Core 0)
+bool prevShowFoodIcon = false;               // Track showFoodIcon transitions for camera power
+
 // Helper to sync struct to legacy globals used by UI
 void syncLocalStateToUI() {
   if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
@@ -474,6 +479,16 @@ void syncLocalStateToUI() {
   showSickIcon = petIsSick;  // Heart icon when pet is sick
   showFoodIcon = petIsHungry;
   if (petStateMutex) xSemaphoreGive(petStateMutex);
+
+  // Camera on-demand power: init when hunger starts, deinit when satisfied
+  if (showFoodIcon && !prevShowFoodIcon) {
+    pendingCameraInit = true;
+    Serial.println("📷 Hunger started → camera init queued");
+  } else if (!showFoodIcon && prevShowFoodIcon) {
+    pendingCameraDeinit = true;
+    Serial.println("📷 Hunger satisfied → camera deinit queued");
+  }
+  prevShowFoodIcon = showFoodIcon;
 
   // 🎮 Play icon: appears 15 min (900000ms) after poop is cleared
   if (poopClearedTime > 0 && !showPoopIcon && !petIsSick &&
@@ -1473,6 +1488,9 @@ void enterDeepSleep() {
   savePetState();
   Serial.println("💾 Pet state saved to NVS");
 
+  // Power down camera if it was on (pet may be hungry when inactivity triggers)
+  deinitCamera();
+
   // Show sleep message on OLED
   display.clearDisplay();
   display.setTextSize(1);
@@ -1566,6 +1584,16 @@ void setup() {
       display.println("KAKU");
       display.setCursor(0, 18);
       display.println("Connecting..");
+      display.display();
+    } else {
+      // Deep sleep wake — show brief message while WiFi reconnects
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(4, 8);
+      display.println("Waking up...");
+      display.setCursor(4, 20);
+      display.println("Please wait");
       display.display();
     }
   }
@@ -1730,8 +1758,9 @@ void setup() {
   }
   // ===== END REPLACEMENT =====
 
-  // Initialize Camera
-  initCamera();
+  // Camera starts OFF — initialized on-demand when pet gets hungry
+  setCameraPinsLowPower();
+  Serial.println("📷 Camera OFF at boot (will init when pet is hungry)");
 
   // Initialize I2S Microphone
   initAudio();
@@ -4314,8 +4343,33 @@ void loop() {
   vTaskDelay(pdMS_TO_TICKS(50)); // 50ms loop cadence — reduces CPU heat (was 20ms)
 }
 
+// ================= CAMERA PIN LOW-POWER =================
+static const int cameraPins[] = {
+    XCLK_GPIO_NUM, SIOD_GPIO_NUM,  SIOC_GPIO_NUM, Y9_GPIO_NUM,  Y8_GPIO_NUM,
+    Y7_GPIO_NUM,   Y6_GPIO_NUM,    Y5_GPIO_NUM,   Y4_GPIO_NUM,  Y3_GPIO_NUM,
+    Y2_GPIO_NUM,   VSYNC_GPIO_NUM, HREF_GPIO_NUM, PCLK_GPIO_NUM};
+static const int cameraPinCount = sizeof(cameraPins) / sizeof(cameraPins[0]);
+
+void setCameraPinsLowPower() {
+  for (int i = 0; i < cameraPinCount; i++) {
+    gpio_reset_pin((gpio_num_t)cameraPins[i]);
+    pinMode(cameraPins[i], INPUT);
+  }
+  Serial.println("📷 Camera pins → INPUT (low-power)");
+}
+
+void deinitCamera() {
+  if (!cameraReady) return;
+  cameraReady = false;
+  esp_camera_deinit();
+  delay(100);  // Let hardware settle before pin reset
+  setCameraPinsLowPower();
+  Serial.println("📷 Camera deinitialized and powered down");
+}
+
 // ================= CAMERA INITIALIZATION =================
 bool initCamera() {
+  if (cameraReady) return true;  // Already initialized
   Serial.println("Initializing Camera...");
 
   camera_config_t config;
@@ -4420,6 +4474,22 @@ void cameraMonitorTask(void *parameter) {
   Serial.println("⚡ CPU: 80MHz (camera idle)");
 
   while (true) {
+    // Handle pending camera init/deinit from Core 1 (syncLocalStateToUI)
+    if (pendingCameraInit) {
+      pendingCameraInit = false;
+      if (!cameraReady) {
+        Serial.println("📷 Core 0: Initializing camera (hunger detected)...");
+        initCamera();
+      }
+    }
+    if (pendingCameraDeinit) {
+      pendingCameraDeinit = false;
+      if (cameraReady && !capturingForFeeding && !isUploadingImage) {
+        Serial.println("📷 Core 0: Deinitializing camera (hunger satisfied)...");
+        deinitCamera();
+      }
+    }
+
     if (!cameraReady) {
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
@@ -5670,6 +5740,8 @@ void sendImageData(String imageBase64) {
     // Reset hunger indicators locally (server will sync)
     showFoodIcon = false;
     petIsHungry = false;
+    prevShowFoodIcon = false;       // Keep transition tracker in sync
+    pendingCameraDeinit = true;     // Queue camera power-down (handled by cameraMonitorTask)
     justFedPet = true; // Ignore server updates for 10 seconds
     lastFeedTime = millis();
     Serial.println(
