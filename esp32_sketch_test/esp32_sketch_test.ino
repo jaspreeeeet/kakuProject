@@ -1513,6 +1513,7 @@ void setup() {
 
   // ===== ADDED: Print deep sleep wakeup reason =====
   printWakeUpReason();
+  bool wokeFromDeepSleep = (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_UNDEFINED);
 
   // Initialize LED (GPIO21, active LOW on XIAO ESP32 S3)
   pinMode(LED_PIN, OUTPUT);
@@ -1539,15 +1540,17 @@ void setup() {
     displayReady = true;
     // Create QRCodeGFX object now that display is ready
     qrcode = new QRCodeGFX(display);
-    // Show "Connecting..." while trying credentials
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 8);
-    display.println("KAKU");
-    display.setCursor(0, 18);
-    display.println("Connecting..");
-    display.display();
+    // Show "Connecting..." while trying credentials (skip on deep sleep wake)
+    if (!wokeFromDeepSleep) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 8);
+      display.println("KAKU");
+      display.setCursor(0, 18);
+      display.println("Connecting..");
+      display.display();
+    }
   }
 
   if (!connectWithStoredCredentials()) {
@@ -1560,7 +1563,7 @@ void setup() {
 
   Serial.println("\n✅ WiFi Connected!");
   Serial.println(WiFi.localIP());
-  if (displayReady)
+  if (displayReady && !wokeFromDeepSleep)
     showWiFiSuccess();
 
   // Enable WiFi light-sleep — radio powers down between beacons (~80% power savings)
