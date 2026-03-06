@@ -1,0 +1,555 @@
+================================================================================
+  PART 3: MEMORY SAFETY, HEAP FRAGMENTATION, LEAK & STABILITY AUDIT
+  File: esp32_sketch/esp32_sketch.ino (6152 lines)
+  Date: 2026-03-03
+================================================================================
+
+==============================================================================
+A. PSRAM / HEAP ALLOCATION PATTERNS
+==============================================================================
+
+A1. COMPLETE ALLOCATION INVENTORY
+──────────────────────────────────
+
+ #  | Line  | Call               | What                        | Size                        | Matching Free?
+----|-------|--------------------|-----------------------------|-----------------------------|--------------------------
+ 1  | L4142 | malloc()           | vad_buffer (int16_t*)       | 512 * 2 = 1024 bytes        | NEVER FREED (intentional, allocated once in initMicrophone)
+ 2  | L4184 | ps_malloc()        | capturedImageBuffer         | fb->len (variable, ~10-60KB)| YES: L4182 (before re-alloc), L5329 (in sendImageData)
+ 3  | L4245 | ps_malloc()        | stt_audio_buffer            | STT_MAX_AUDIO_SIZE=128KB    | YES: L4317 (cleanup on STT disable)
+ 4  | L4284 | ps_malloc()        | wav_buf (STT WAV chunk)     | wav_total (~128KB+44)       | YES: L4301 (mutex fail path), ownership transferred to stt_wav_to_send
+ 5  | L4380 | ps_malloc()        | recording_buffer (VAD rec)  | MAX_RECORDING_SIZE+44       | YES: L4446
+    |       |                    |                             | = 16000*2*5+44 = 160044 B   |
+ 6  | L5322 | malloc()           | binary_data (image copy)    | capturedImageLength          | YES: L5362 (begin fail), L5405 (end of sendImageData)
+ 7  | L1373 | new QRCodeGFX()    | qrcode object               | ~small, object on heap      | NEVER FREED (intentional, allocated once in setup)
+
+ Total: 7 allocation sites. 2 are allocate-once (vad_buffer, qrcode). 5 are alloc/free cycles.
+
+A2. LEAK VECTORS — REPEATED ALLOC WITHOUT FREE
+───────────────────────────────────────────────
+
+ FINDING A2-1: capturedImageBuffer — REPEATED ALLOC/FREE CYCLE (LOW RISK)
+   Location: L4184 (cameraMonitorTask), freed at L4182 (before re-alloc) and L5329 (sendImageData)
+   Pattern: Every feeding gesture allocates a new buffer, copies from camera fb, then sendImageData
+   copies again to binary_data and frees the original. Both paths free correctly.
+   Risk: If the image is captured (L4184) but sendImageData is never called (e.g. WiFi disconnects
+   permanently), capturedImageBuffer will remain allocated until the next capture overwrites it.
+   This is NOT a growing leak — bounded to one buffer at a time (max ~60KB in PSRAM).
+   VERDICT: Acceptable. Single allocation cap.
+
+ FINDING A2-2: recording_buffer — REPEATED ALLOC/FREE IN AUDIO TASK (LOW RISK)
+   Location: L4380 (audioMonitorTask), freed at L4446
+   Pattern: Speech detected → alloc ~160KB in PSRAM → record → base64 encode → free.
+   The alloc/free cycle happens per speech event. After free, recording_buffer is set to NULL (L4447).
+   Risk: If speech detection starts but the recording loop never hits the stop condition
+   (silence timeout or buffer full), recording_buffer stays allocated. However, both conditions
+   are guaranteed to fire eventually (SILENCE_TIMEOUT=2000ms, buffer-full check exists).
+   **CONCERN**: base64::encode(recording_buffer, recorded_bytes) at L4432 creates a temporary
+   Arduino String (detectedAudioData) that can be ~213KB for a 160KB recording. This is allocated
+   from internal heap (not PSRAM), potentially fragmenting internal RAM. The String lives until
+   the next speech event overwrites it. See C3 for more detail.
+   VERDICT: Functionally safe, but fragmentation concern.
+
+ FINDING A2-3: stt_audio_buffer + wav_buf — STT STREAMING CYCLE (LOW RISK)
+   See section A4 below for full lifecycle analysis.
+
+A3. esp_camera_fb_get() / esp_camera_fb_return() PAIRING
+─────────────────────────────────────────────────────────
+
+ Site 1: L3164 / L3192 — checkCameraCover() [COMMENTED OUT, dead code]
+   Inside /* */ block. Not active. Pairing was correct when active.
+
+ Site 2: L4175 / L4195 — cameraMonitorTask()
+   fb_get at L4175. fb_return at L4195.
+   ERROR PATH: if fb is NULL (L4196 would not execute — the code checks `if (fb)` at L4177).
+   If fb != NULL but ps_malloc fails (L4184), the code still reaches L4195 for fb_return.
+   If xSemaphoreTake fails (mutex timeout), fb_return is still called at L4195.
+   ✅ ALL PATHS CORRECTLY RETURN fb.
+
+ Site 3: L5179 / L5191 — captureImageBase64()
+   fb_get at L5179. If NULL, returns "" immediately (no fb to return). ✅
+   If non-NULL, base64 encode, then fb_return at L5191. ✅
+   ALL PATHS CORRECT.
+
+ VERDICT: No fb leak detected. All 3 sites (2 active) properly pair get/return.
+
+A4. stt_audio_buffer AND stt_wav_to_send LIFECYCLE
+───────────────────────────────────────────────────
+
+ Declaration:
+   L752: uint8_t *stt_audio_buffer = NULL;   (global, initialized to NULL) ✅
+   L764: uint8_t *stt_wav_to_send = NULL;    (global, initialized to NULL) ✅
+   L766: SemaphoreHandle_t sttDataMutex = NULL;
+
+ ALLOCATION (stt_audio_buffer):
+   L4245: Allocated in audioMonitorTask when sttModeActive && first read.
+   Size: STT_MAX_AUDIO_SIZE = 128KB (PSRAM via ps_malloc).
+   NULL check: L4246 — if alloc fails, sttModeActive set to false, continues. ✅
+
+ FREEING (stt_audio_buffer):
+   L4317: Freed when sttModeActive becomes false (cleanup block at L4314-4328).
+   Set to NULL at L4318. ✅
+   **POTENTIAL ISSUE**: The cleanup block at L4314 is inside the `if (sttModeActive)` block,
+   after the `continue` statement at L4335. The code checks `if (!sttModeActive)` at L4314
+   WITHIN the `if (sttModeActive)` block. This means the check at L4314 fires when sttModeActive
+   was true at the top of the loop iteration but was changed to false by another core (volatile)
+   between the outer check and the inner check. This is a valid race-condition cleanup pattern.
+   However, if sttModeActive is set to false by another core AFTER the `if (sttModeActive)` check
+   at L4235 fails and the code falls through to the normal VAD path, then this cleanup block
+   is NEVER REACHED. The buffer would remain allocated until sttModeActive is set to true again
+   (which re-enters the block and the next disable triggers cleanup).
+
+   RACE WINDOW: sttModeActive=true → Core1 sets it false → audioTask loop iteration
+   starts, checks sttModeActive at L4235 → false → skips entire STT block → falls to
+   normal VAD. Cleanup never runs.
+
+   **LEAK SCENARIO**: stt_audio_buffer (128KB PSRAM) remains allocated indefinitely if
+   STT mode is disabled by Core 1 right as the audio task loop wraps around.
+   SEVERITY: MEDIUM — 128KB PSRAM leak until next STT activation or device reboot.
+   The daily reboot (L3921) and low-heap reboot (L3912) mitigate this.
+
+ ALLOCATION (stt_wav_to_send):
+   L4292: Ownership transferred from wav_buf. wav_buf is allocated at L4284.
+   Protected by sttDataMutex. Previous stt_wav_to_send freed at L4291 before overwrite. ✅
+
+ FREEING (stt_wav_to_send):
+   Path 1: L4325 — cleanup when STT disabled (same cleanup block as stt_audio_buffer).
+   Path 2: L5923-5925 — sendSTTAudioChunk() takes ownership, NULLs the pointer.
+   Path 3: L5931 — sendSTTAudioChunk() frees wav_data if size < 100.
+   Path 4: L5951 — sendSTTAudioChunk() frees wav_data after HTTP POST.
+   All paths set pointer to NULL. ✅
+
+   Same RACE WINDOW as stt_audio_buffer applies — if STT disabled at exactly the wrong
+   moment, stt_wav_to_send may not be freed by the audio task. However, sendSTTAudioChunk()
+   will still pick it up from the queue and free it (L5951). Still safe for this pointer.
+
+ VERDICT: stt_audio_buffer has a narrow race-condition leak window (MEDIUM risk).
+          stt_wav_to_send is properly managed across all paths.
+
+==============================================================================
+B. STACK OVERFLOW RISK
+==============================================================================
+
+B1. FREERTOS TASK STACK SIZES
+──────────────────────────────
+
+ Task              | Stack (bytes) | Core | Priority | Stack Analysis
+ ------------------|---------------|------|----------|-------------------------------------------
+ audioMonitorTask  | 12288 (12K)   | 0    | 2        | See B2
+ cameraMonitorTask | 8192  (8K)    | 0    | 1        | See B3
+ oledTask          | 4096  (4K)    | 0    | 1        | See B4 ⚠️
+ networkTask       | 16384 (16K)   | 1    | 1        | See B5
+
+B2. audioMonitorTask (12K stack)
+────────────────────────────────
+ Local variables:
+   - size_t bytes_read (4B)
+   - unsigned long speechStartTime, lastSoundTime (8B)
+   - bool currentlyRecording (1B)
+   - uint8_t *recording_buffer (4B)
+   - size_t recorded_bytes (4B)
+   - const size_t MAX_RECORDING_SIZE (4B)
+   - Various loop variables (~50B)
+ Function calls:
+   - i2s_channel_read() — moderate stack usage
+   - base64::encode(recording_buffer, recorded_bytes) at L4432 — THIS IS THE RISK.
+     base64::encode creates an Arduino String. For 160KB input, the output is ~213KB.
+     The String object itself is on stack (small), but the heap allocation could fail.
+     The encode function's internal processing may use temporary stack buffers.
+   - memcpy, abs, Serial.printf — modest stack
+ No recursion. ✅
+ VERDICT: 12K is adequate for the main loop. base64::encode is the heaviest call
+ but its stack usage is bounded (it operates on heap data).
+
+B3. cameraMonitorTask (8K stack)
+────────────────────────────────
+ Local variables: minimal (fb pointer, flags).
+ Function calls:
+   - esp_camera_fb_get() — ESP camera driver, moderate stack
+   - ps_malloc, memcpy — minimal stack
+   - xSemaphoreTake/Give — minimal
+ No recursion. ✅
+ VERDICT: 8K is generous for this simple task.
+
+B4. oledTask (4K stack) ⚠️ HIGHEST RISK
+─────────────────────────────────────────
+ The task calls displayPetAnimation() which is a LARGE function (L3323-L3655, 332 lines).
+ displayPetAnimation() calls:
+   - checkMenuTiltGesture()
+   - checkSTTTiltGesture()
+   - detectHardwareStep()
+   - displayFoodMenu() / displayToiletMenu() / displayPlayMenu() / displayHealthMenu()
+     / displayStatusInfoMenu() / displayStatsMenu()
+   - displaySleepingAnimation() / displayWalkingAnimation()
+   - playAgeTransitionAnimation() (L3246-3321) — DEEP CALL with loops + display ops
+
+ Stack usage estimate for displayPetAnimation:
+   - const uint8_t *frameData (4B)
+   - uint8_t frameCount (1B)
+   - String comparisons on currentScreenType, currentEmotion (String == creates temps)
+   - Multiple switch/case blocks (no additional stack per case, but compiler may not optimize)
+
+ Stack usage for playAgeTransitionAnimation (called FROM oledTask):
+   - Multiple for-loops with local int variables (~20B)
+   - random() calls — minimal
+   - display.print() — Adafruit GFX uses moderate stack internally
+   - ageSparkle(), ageSmashEffect(), ageShockwave() — each has small for-loops
+   - Nested call depth: oledTask → displayPetAnimation → playAgeTransitionAnimation
+     → ageShockwave → display.drawCircle → display.display
+     ~5-6 levels deep
+
+ displayFoodMenu() (L1908-2050, 142 lines):
+   - checkFeedingGesture() call
+   - Multiple switch/case with const uint8_t* (4B each, compiler may reuse)
+   - display.drawBitmap() — moderate stack for Adafruit library
+
+ displayToiletMenu() calls drawCleanSpriteFrame() which has nested for-loops
+   with pgm_read_byte (moderate stack for pixel-by-pixel rendering).
+
+ **CRITICAL CONCERN**: String operations in displayPetAnimation.
+   currentScreenType.c_str(), currentEmotion.c_str() — these are references, no alloc.
+   But the String == operator does character comparison, creating no temps.
+   Serial.printf() with currentScreenType.c_str() — no extra stack beyond format args.
+
+ ESTIMATED STACK USAGE:
+   - FreeRTOS overhead: ~300-500B
+   - displayPetAnimation frame: ~100B
+   - Sub-function frame (e.g., displayFoodMenu): ~100B
+   - Adafruit display.display() internal: ~200-500B (SSD1306 I2C write buffer)
+   - Serial.printf: ~100-200B
+   - Worst case total: ~1000-1500B
+
+ 4096 - 1500 = ~2596B margin. This seems okay but is TIGHT for ESP32 where:
+   - FreeRTOS context save can be ~200-300B
+   - Interrupt handlers share the stack on some configurations
+
+ ⚠️ RISK: playAgeTransitionAnimation runs many consecutive display.display() calls in
+ tight loops. If any interrupt fires (e.g., WiFi, timer), stack could overflow.
+ 
+ VERDICT: 4K is TIGHT but probably functional. Recommend increasing to 6K-8K for
+ safety margin, especially given the Adafruit SSD1306 library's I2C buffer usage.
+
+B5. networkTask (16K stack)
+───────────────────────────
+ This task does heavy HTTP operations:
+   - StaticJsonDocument<4096> at L5479 — 4096 bytes ON STACK. This alone uses 25% of stack.
+   - StaticJsonDocument<768> responseDoc at L5132 — 768B on stack.
+   - StaticJsonDocument<256> at multiple locations — 256B each on stack.
+   - String payload / String response — String objects on stack (~32B each, data on heap).
+   - HTTPClient http — object on stack (~100-200B).
+   - WiFiClientSecure is GLOBAL (sslNet, sslOTA) — avoids ~16KB stack impact. ✅ Good design.
+
+ Worst-case stack path: sendSensorDataToServer() (L5456) which uses StaticJsonDocument<4096>
+   on stack. Combined with HTTPClient + misc locals: ~4096 + 200 + 200 + 300 (FreeRTOS) = ~4800B.
+   16K - 4800 = ~11.2K margin. Safe.
+
+ NOTE: The code comment at L5475 acknowledges this risk:
+   "FIX: 8KB StaticJsonDocument on stack risks stack overflow on 16KB task"
+   The doc was reduced to 4096. Good awareness.
+
+ VERDICT: 16K is adequate. The StaticJsonDocument<4096> is the largest stack item.
+
+==============================================================================
+C. LONG-TERM FRAGMENTATION
+==============================================================================
+
+C1. REPEATED DIFFERENT-SIZE ALLOC/FREE IN PSRAM
+────────────────────────────────────────────────
+
+ FINDING C1-1: capturedImageBuffer (PSRAM) — VARIABLE SIZE
+   Allocated at L4184 with fb->len which varies per camera capture (JPEG compression
+   yields different sizes per frame). Old buffer freed at L4182 before new alloc.
+   Pattern: free(old) → ps_malloc(new_size) → copy → later free in sendImageData.
+   FRAGMENTATION RISK: MEDIUM over days. Each capture can produce a different-size JPEG
+   (10-60KB depending on scene complexity). Over thousands of captures, PSRAM heap
+   develops fragmentation. Mitigated by daily reboot (L3921).
+   RECOMMENDATION: Use a fixed-size buffer (e.g., max JPEG size from camera config).
+
+ FINDING C1-2: stt_audio_buffer (PSRAM) — FIXED SIZE ✅
+   Always STT_MAX_AUDIO_SIZE (128KB). Allocated once per STT session, freed on disable.
+   No fragmentation concern from this buffer itself.
+
+ FINDING C1-3: wav_buf (PSRAM) — VARIABLE SIZE
+   Allocated at L4284 with wav_total (= stt_audio_size + 44). stt_audio_size varies
+   based on how much audio was captured in the 3s window. Could be 2KB to 128KB.
+   Ownership transferred to stt_wav_to_send → freed in sendSTTAudioChunk (L5951).
+   FRAGMENTATION RISK: MEDIUM during active STT sessions. Multiple different-size WAV
+   buffers allocated and freed every 3 seconds.
+   RECOMMENDATION: Pre-allocate a fixed WAV buffer alongside stt_audio_buffer.
+
+ FINDING C1-4: recording_buffer (PSRAM) — FIXED SIZE ✅
+   Always MAX_RECORDING_SIZE + WAV_HEADER_SIZE = 160044 bytes. No fragmentation concern.
+
+ FINDING C1-5: binary_data (internal malloc) — VARIABLE SIZE
+   Allocated at L5322 with capturedImageLength (varies per JPEG). This uses internal
+   heap (malloc, not ps_malloc). Freed at L5362 or L5405.
+   FRAGMENTATION RISK: HIGH for internal RAM. Variable-size allocations from the
+   limited ~390KB internal heap. Camera images can be 10-60KB.
+   RECOMMENDATION: Use ps_malloc for binary_data since it's just a copy for HTTP POST.
+
+C2. BUFFERS THAT COULD BE MADE STATIC/PERSISTENT
+─────────────────────────────────────────────────
+
+ FINDING C2-1: capturedImageBuffer
+   Currently: alloc → use → free → alloc → use → free per feeding gesture.
+   Could be: Pre-allocate once at setup with max camera frame size. Reuse forever.
+   config.frame_size = FRAMESIZE_SVGA or similar → max ~60KB. Pre-alloc 64KB in PSRAM.
+
+ FINDING C2-2: binary_data in sendImageData()
+   Currently: malloc(capturedImageLength) per image send.
+   Could be: Eliminated entirely. Send directly from capturedImageBuffer instead of
+   copying to a second buffer. The mutex is held briefly for the copy — but could hold
+   it for the entire HTTP POST duration, or use a persistent second buffer.
+
+ FINDING C2-3: STT wav_buf
+   Currently: ps_malloc(wav_total) every 3 seconds during STT mode.
+   Could be: Pre-allocate a fixed WAV buffer of STT_MAX_AUDIO_SIZE + 44 at STT start.
+   Reuse for every 3s chunk. Would eliminate all STT-related PSRAM fragmentation.
+
+ FINDING C2-4: vad_buffer — Already persistent ✅
+   Allocated once in initMicrophone (L4142), never freed. Good pattern.
+
+ FINDING C2-5: Global StaticJsonDocuments — Already persistent ✅
+   g_oledDoc (L821) and g_sensorDoc (L822) are global and reused. Good pattern.
+   The code explicitly notes "allocated once, no heap fragmentation."
+
+C3. STRING CONCATENATION IN LOOPS (ARDUINO String FRAGMENTATION)
+────────────────────────────────────────────────────────────────
+
+ FINDING C3-1: wifiConfigHtmlPage() — MASSIVE String concatenation (L1062-1220)
+   ~50+ `page += "..."` concatenations building an HTML page.
+   Each concatenation may reallocate the String's internal buffer, creating
+   fragmented heap allocations. Final page is likely 4-8KB of HTML.
+   RISK: MEDIUM. But this function is only called during WiFi provisioning (AP mode),
+   not during normal operation. Once WiFi is configured, this code path is not re-entered.
+   RECOMMENDATION: Use F() macro for string literals / reserve() the String upfront.
+
+ FINDING C3-2: base64::encode in audioMonitorTask (L4432)
+   Creates a String from 160KB recording. The resulting ~213KB String is stored in
+   global `detectedAudioData` (L678) which is an Arduino String. When overwritten
+   on next speech event, the old 213KB is freed and a new one allocated.
+   RISK: HIGH fragmentation of internal heap. 213KB is more than half of the ESP32's
+   internal RAM (~390KB total). This may not even succeed on internal heap.
+   MITIGATING FACTOR: This uses Arduino String which may internally use PSRAM on
+   ESP32-S3 with PSRAM-enabled builds (depends on menuconfig/board settings).
+
+ FINDING C3-3: base64::encode in captureImageBase64() (L5186)
+   Creates a String from camera fb. The function appears unused (comment at L5199 says
+   "Audio recording is now handled by audioMonitorTask"). This is likely dead code.
+   If called, it creates a potentially large String on the stack frame of whatever calls it.
+
+ FINDING C3-4: String payload in sendAudioData() (L5434-5436)
+   `String payload = "{\"audio_data\":\""  + audioBase64 + "\"}"`
+   If audioBase64 is 213KB, payload is ~213KB+20B. Multiple intermediate String
+   objects are created during concatenation.
+   RISK: HIGH. Two copies of ~213KB data exist momentarily during concatenation.
+   RECOMMENDATION: Use chunked transfer or send raw binary instead of base64-in-JSON.
+
+ FINDING C3-5: String payload serialization from JSON docs
+   Multiple locations (L2471, L4759, L5117, L5277, L5522, L5792) use:
+     `String payload; serializeJson(doc, payload);`
+   These are typically small (<1KB). Low fragmentation risk.
+
+ FINDING C3-6: WiFi SSID key construction in loops (L914, L931-938, L992-995)
+   `String key_s = "wifi" + String(i) + "_s";` inside for-loops iterating max ~5 times.
+   Creates small temporary Strings. Negligible risk.
+
+==============================================================================
+D. POINTER SAFETY
+==============================================================================
+
+D1. NULL CHECK AFTER ALLOCATION
+───────────────────────────────
+
+ Line  | Allocation                           | NULL Check?
+ ------|--------------------------------------|------------------------------------------
+ L4142 | vad_buffer = malloc(1024)            | YES: L4143 `if (!vad_buffer)` → returns false ✅
+ L4184 | capturedImageBuffer = ps_malloc(len) | YES: L4185 `if (capturedImageBuffer)` ✅
+ L4245 | stt_audio_buffer = ps_malloc(128K)   | YES: L4246 `if (!stt_audio_buffer)` ✅
+ L4284 | wav_buf = ps_malloc(wav_total)       | YES: L4285 `if (wav_buf)` ✅
+ L4380 | recording_buffer = ps_malloc(160K)   | YES: L4381 `if (recording_buffer)` ✅
+ L5322 | binary_data = malloc(imgLen)         | YES: L5323 `if (binary_data)` ✅
+ L1373 | qrcode = new QRCodeGFX(display)      | NOT CHECKED ⚠️
+       |                                      | If new fails (nothrow not used), it throws
+       |                                      | std::bad_alloc. On ESP32 Arduino, new may
+       |                                      | return NULL. Subsequent uses at L1021 check
+       |                                      | `if (!displayReady || !qrcode)` ✅ Used safely.
+
+ VERDICT: All critical allocations have NULL checks. ✅
+
+D2. DANGLING POINTER RISKS — FREED POINTERS NOT SET TO NULL
+────────────────────────────────────────────────────────────
+
+ FINDING D2-1: capturedImageBuffer freed at L4182 WITHOUT setting to NULL
+   Location: cameraMonitorTask, L4181-4182:
+     if (capturedImageBuffer != NULL) {
+       free(capturedImageBuffer);
+     }
+     capturedImageBuffer = (uint8_t *)ps_malloc(fb->len);  // immediately re-assigned
+   RISK: NONE — immediately overwritten with new allocation. The old pointer value
+   never persists in a dereferenceable state.
+
+ FINDING D2-2: capturedImageBuffer freed at L5329 and set to NULL at L5330 ✅
+
+ FINDING D2-3: recording_buffer freed at L4446, set to NULL at L4447 ✅
+
+ FINDING D2-4: stt_audio_buffer freed at L4317, set to NULL at L4318 ✅
+
+ FINDING D2-5: stt_wav_to_send freed at L4291 — NOT set to NULL before overwrite
+   Location: L4291-4292:
+     if (stt_wav_to_send) free(stt_wav_to_send);
+     stt_wav_to_send = wav_buf;  // immediately overwritten
+   RISK: NONE — immediately overwritten. Same pattern as D2-1.
+
+ FINDING D2-6: stt_wav_to_send freed at L4325, set to NULL at L4326 ✅
+
+ FINDING D2-7: wav_buf freed at L4301 — local variable, goes out of scope
+   The local `wav_buf` is freed if mutex acquisition fails. It then falls through
+   to the reset block (L4304-4305). wav_buf is not used again. ✅
+
+ FINDING D2-8: binary_data freed at L5362 / L5405 — local variable ✅
+   Function returns after free. No dangling risk.
+
+ FINDING D2-9: wav_data freed at L5931 / L5951 in sendSTTAudioChunk(), set to NULL at L5952 ✅
+
+ VERDICT: No dangling pointer risks found. All freed pointers are either set to NULL
+ or immediately overwritten or are local variables going out of scope.
+
+D3. vad_buffer INITIALIZATION
+─────────────────────────────
+
+ FINDING D3-1: vad_buffer declared at L745 WITHOUT initialization
+   Declaration: `int16_t *vad_buffer;` — UNINITIALIZED global pointer.
+   
+   In C/C++ for ESP32 Arduino, global variables in BSS are zero-initialized
+   (NULL). However, explicit initialization is best practice.
+   
+   vad_buffer is assigned at L4142 in initMicrophone(). It is only used inside
+   audioMonitorTask (L4239, L4258, L4340, L4354, L4410) which checks `if (!micReady)`
+   before using it. initMicrophone() sets micReady=true only after successful alloc.
+   
+   RISK: LOW — functionally safe due to execution order. initMicrophone() is called
+   in setup() before audioMonitorTask starts. The micReady guard prevents use before init.
+   
+   RECOMMENDATION: Change declaration to `int16_t *vad_buffer = NULL;` for clarity
+   and defense-in-depth.
+
+==============================================================================
+E. MEMORY MONITORING
+==============================================================================
+
+E1. EXISTING HEAP MONITORING
+─────────────────────────────
+
+ Location 1: L3901-3902 (loop() function, every 10 seconds)
+   ```
+   uint32_t freeHeap = ESP.getFreeHeap();
+   uint32_t minHeap  = ESP.getMinFreeHeap();
+   Serial.printf("🧠 Heap: %u free / %u min\n", freeHeap, minHeap);
+   ```
+   Frequency: Every 10 seconds (lastWiFiCheck timer at L3899).
+   Covers: Internal heap only (getFreeHeap = internal SRAM).
+
+ Location 2: L5010 (OTA download progress, intermittent)
+   ```
+   ESP.getFreeHeap()
+   ```
+   Only during OTA error backoff logging. Not regular monitoring.
+
+ MISSING: No PSRAM monitoring. ESP.getFreePsram() is NEVER called.
+   Given that the firmware uses PSRAM extensively (camera buffers, STT buffers,
+   recording buffers), this is a significant monitoring gap.
+
+ MISSING: No heap_caps_get_free_size() calls to monitor specific memory types
+   (MALLOC_CAP_INTERNAL, MALLOC_CAP_SPIRAM, MALLOC_CAP_DMA).
+
+ MISSING: No heap fragmentation monitoring. heap_caps_get_largest_free_block()
+   would reveal if allocations are failing due to fragmentation vs. total exhaustion.
+
+E2. LOW-MEMORY DETECTION AND RECOVERY
+──────────────────────────────────────
+
+ FINDING E2-1: Critical heap reboot (L3912-3916)
+   ```
+   if (freeHeap < 20000) {
+     Serial.println("🚨 CRITICAL: Heap below 20KB — rebooting to recover!");
+     savePetState();
+     delay(500);
+     ESP.restart();
+   }
+   ```
+   Threshold: 20KB free internal heap → save state → reboot.
+   GOOD: This is a solid last-resort recovery mechanism. ✅
+   CONCERN: Only monitors internal heap. If PSRAM is exhausted but internal heap
+   is fine, this won't trigger. PSRAM exhaustion causes ps_malloc failures which
+   are handled individually (e.g., L4246 disables STT).
+
+ FINDING E2-2: Daily maintenance reboot (L3921-3926)
+   ```
+   static const unsigned long DAILY_REBOOT_MS = 86400000UL; // 24 hours
+   if (millis() > DAILY_REBOOT_MS && isDeviceSleeping) {
+     savePetState();
+     ESP.restart();
+   }
+   ```
+   GOOD: Prevents long-term fragmentation accumulation. Only reboots when device
+   is sleeping (minimal disruption). ✅
+   CONCERN: Uses millis() which overflows at ~49.7 days. After overflow, the condition
+   `millis() > DAILY_REBOOT_MS` becomes false and the safety reboot stops working.
+   The device would run indefinitely without maintenance reboots.
+   RECOMMENDATION: Track uptime separately or use modular arithmetic.
+
+ FINDING E2-3: Individual allocation failure handling
+   - L4246: stt_audio_buffer alloc fail → disable STT mode ✅
+   - L4188: capturedImageBuffer alloc fail → just prints error, doesn't retry ✅
+   - L4143: vad_buffer alloc fail → initMicrophone returns false ✅
+   - L5322: binary_data alloc fail → skips image send ✅
+
+ VERDICT: Recovery mechanisms exist but only monitor internal heap. PSRAM health
+ is invisible. Fragmentation metrics are not tracked.
+
+==============================================================================
+SUMMARY OF FINDINGS BY SEVERITY
+==============================================================================
+
+ CRITICAL (0):
+   None found.
+
+ HIGH (2):
+   H1. [C3-2/C3-4] base64::encode creates ~213KB Arduino String for audio data,
+       potentially exhausting/fragmenting internal heap. sendAudioData() doubles
+       this with String concatenation.
+   H2. [C1-5] binary_data in sendImageData() uses internal malloc() for variable-
+       size camera images (10-60KB). Should use ps_malloc() to avoid fragmenting
+       the limited internal heap.
+
+ MEDIUM (4):
+   M1. [A4] stt_audio_buffer has a narrow race-condition leak window (128KB PSRAM)
+       when STT is disabled by Core 1 at exactly the wrong moment.
+   M2. [B4] oledTask has only 4K stack — tight for displayPetAnimation() deep call
+       chains + Adafruit SSD1306 I2C operations + playAgeTransitionAnimation().
+   M3. [C1-1] capturedImageBuffer variable-size PSRAM alloc/free causes fragmentation.
+   M4. [C1-3] STT wav_buf variable-size PSRAM alloc/free every 3 seconds during
+       active STT mode.
+
+ LOW (5):
+   L1. [D3-1] vad_buffer declared without explicit NULL initialization (L745).
+   L2. [E1] No PSRAM free-space monitoring. Only internal heap is tracked.
+   L3. [E2-2] Daily reboot uses millis() which overflows after 49.7 days.
+   L4. [C3-1] wifiConfigHtmlPage() String concatenation (only during provisioning).
+   L5. [E1] No fragmentation monitoring (heap_caps_get_largest_free_block).
+
+ INFORMATIONAL - GOOD PRACTICES OBSERVED:
+   ✅ Global StaticJsonDocuments (L821-822) avoid repeated heap allocation.
+   ✅ WiFiClientSecure clients are global (L522, L525) — avoids ~16KB stack usage.
+   ✅ OTA buffer is global (L526) — avoids stack overflow.
+   ✅ vad_buffer allocated once and reused (L4142, L4236 comment confirms fix).
+   ✅ Semaphore/mutex protection on shared buffers (cameraMutex, sttDataMutex).
+   ✅ Daily reboot for fragmentation mitigation (L3921).
+   ✅ Critical heap threshold reboot (L3912).
+   ✅ All allocation sites have NULL checks.
+   ✅ All freed pointers set to NULL (or immediately overwritten).
+   ✅ All esp_camera_fb_get/return are properly paired.
+
+================================================================================
+  END OF PART 3 AUDIT
+================================================================================

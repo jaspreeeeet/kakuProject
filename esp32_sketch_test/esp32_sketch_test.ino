@@ -744,7 +744,7 @@ volatile bool motionDetected = false;   // Set by ISR, cleared by loop
 volatile unsigned long isrCount = 0;    // Motion interrupt counter
 
 // Pins
-const int LED_PIN = 21; // XIAO ESP32 S3 built-in LED (active LOW) — GPIO2 is now MPU INT
+// const int LED_PIN = 21; // XIAO ESP32 S3 built-in LED (active LOW) — GPIO2 is now MPU INT
 // ===== END REPLACEMENT =====
 
 // Voice Activity Detection
@@ -1438,7 +1438,31 @@ void configureMPU6050ForSleep() {
   mpu.setInterruptPinPolarity(true);    // true = active LOW
   mpu.setMotionInterrupt(true);
   mpu.getMotionInterruptStatus();       // clear any pending interrupt
-  Serial.println("MPU sleep config: active LOW, pulse mode");
+
+  // ── Low-power mode: disable gyro, enable accel-only cycle mode ───────────
+  // PWR_MGMT_2 (0x6C):
+  //   bits 7:6 = LP_WAKE_CTRL = 01  → 5 Hz sample rate in cycle mode
+  //   bits 5:3 = STBY_XA/YA/ZA = 0 → keep all accel axes active
+  //   bits 2:0 = STBY_XG/YG/ZG = 1 → gyroscope all axes into standby
+  //   value: 0b01000111 = 0x47
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6C);
+  Wire.write(0x47);   // 5 Hz wake rate; gyro X/Y/Z standby (~3.6 mA saved)
+  Wire.endTransmission();
+
+  // PWR_MGMT_1 (0x6B):
+  //   bit 5 = CYCLE   = 1 → accel-only low-power cycle mode
+  //   bit 3 = TEMP_DIS = 1 → temperature sensor off (not needed for wake)
+  //   bits 2:0 = CLKSEL = 000 → internal 8 MHz oscillator (lowest power)
+  //   value: 0b00101000 = 0x28
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
+  Wire.write(0x28);   // CYCLE=1, TEMP_DIS=1 — accel ~tens µA vs ~3.9 mA full-on
+  Wire.endTransmission();
+
+  // mpu.begin() in setup() after deep-sleep wake will DEVICE_RESET the chip,
+  // restoring full-power normal operation automatically.
+  Serial.println("MPU sleep config: active LOW, pulse, gyro OFF, accel cycle 5 Hz (~tens µA)");
 }
 
 // Enter hardware deep sleep — wakes on MPU6050 motion (INT pin LOW)
@@ -1486,7 +1510,7 @@ void enterDeepSleep() {
   }
 
   // Force LED off
-  digitalWrite(LED_PIN, HIGH);  // Active LOW on XIAO ESP32 S3
+  // digitalWrite(LED_PIN, HIGH);  // Active LOW on XIAO ESP32 S3
 
   // Configure ext1 wakeup: LOW on GPIO2 = motion
   esp_sleep_enable_ext1_wakeup(1ULL << MPU_INT_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
@@ -1516,8 +1540,8 @@ void setup() {
   bool wokeFromDeepSleep = (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_UNDEFINED);
 
   // Initialize LED (GPIO21, active LOW on XIAO ESP32 S3)
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);  // HIGH = OFF (active LOW)
+  // pinMode(LED_PIN, OUTPUT);
+  // digitalWrite(LED_PIN, HIGH);  // HIGH = OFF (active LOW)
 
   // ================= WIFI PROVISIONING FLOW =================
   // 1. Try NVS stored credentials (3 retries each)
@@ -5572,9 +5596,9 @@ bool sendSensorDataOnly(SensorData data) {
     Serial.printf("    Chip Temp: %.1f °C\n", data.chip_temperature);
     Serial.printf("    Orient: %s (%.1f%% confidence)\n",
                   data.device_orientation.c_str(), data.orientation_confidence);
-    digitalWrite(LED_PIN, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    digitalWrite(LED_PIN, LOW);
+    // digitalWrite(LED_PIN, HIGH);
+    // vTaskDelay(pdMS_TO_TICKS(50));
+    // digitalWrite(LED_PIN, LOW);
   } else {
     Serial.printf("❌ HTTP error: %s\n", http.errorToString(httpCode).c_str());
   }
@@ -5826,9 +5850,9 @@ void sendAllDataToServer(SensorData data) {
       Serial.printf("    Mic:   %.1f dB\n", data.mic_level);
 
       // Success LED blink
-      digitalWrite(LED_PIN, HIGH);
-      vTaskDelay(pdMS_TO_TICKS(100));
-      digitalWrite(LED_PIN, LOW);
+      // digitalWrite(LED_PIN, HIGH);
+      // vTaskDelay(pdMS_TO_TICKS(100));
+      // digitalWrite(LED_PIN, LOW);
     } else {
       int errSize = http.getSize();
       if (errSize >= 0 && errSize <= 8192) {
@@ -6036,23 +6060,23 @@ void processEvent(const char *event_type, const char *message) {
   // Simple event processing - you can extend this based on your needs
   if (strcmp(event_type, "high_sound") == 0) {
     Serial.println("🔊 High sound detected - might want to take action!");
-    digitalWrite(LED_PIN, HIGH); // Turn on LED for high sound
-    vTaskDelay(pdMS_TO_TICKS(200));
-    digitalWrite(LED_PIN, LOW); // Blink LED
+    // digitalWrite(LED_PIN, HIGH); // Turn on LED for high sound
+    // vTaskDelay(pdMS_TO_TICKS(200));
+    // digitalWrite(LED_PIN, LOW); // Blink LED
   } else if (strcmp(event_type, "sudden_motion") == 0) {
     Serial.println("🏃 Sudden motion detected - something's happening!");
     // Blink LED multiple times for motion
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(LED_PIN, HIGH);
-      vTaskDelay(pdMS_TO_TICKS(100));
-      digitalWrite(LED_PIN, LOW);
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    // for (int i = 0; i < 3; i++) {
+    //   // digitalWrite(LED_PIN, HIGH);
+    //   // vTaskDelay(pdMS_TO_TICKS(100));
+    //   // digitalWrite(LED_PIN, LOW);
+    //   // vTaskDelay(pdMS_TO_TICKS(100));
+    // }
   } else if (strcmp(event_type, "alert") == 0) {
     Serial.println("⚠️ Generic alert received!");
-    digitalWrite(LED_PIN, HIGH); // Solid LED for alert
-    vTaskDelay(pdMS_TO_TICKS(500));
-    digitalWrite(LED_PIN, LOW);
+    // digitalWrite(LED_PIN, HIGH); // Solid LED for alert
+    // vTaskDelay(pdMS_TO_TICKS(500));
+    // digitalWrite(LED_PIN, LOW);
   } else {
     Serial.printf("❓ Unknown event type: %s\n", event_type);
   }

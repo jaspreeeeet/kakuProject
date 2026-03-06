@@ -1436,7 +1436,31 @@ void configureMPU6050ForSleep() {
   mpu.setInterruptPinPolarity(true);    // true = active LOW
   mpu.setMotionInterrupt(true);
   mpu.getMotionInterruptStatus();       // clear any pending interrupt
-  Serial.println("MPU sleep config: active LOW, pulse mode");
+
+  // ── Low-power mode: disable gyro, enable accel-only cycle mode ───────────
+  // PWR_MGMT_2 (0x6C):
+  //   bits 7:6 = LP_WAKE_CTRL = 01  → 5 Hz sample rate in cycle mode
+  //   bits 5:3 = STBY_XA/YA/ZA = 0 → keep all accel axes active
+  //   bits 2:0 = STBY_XG/YG/ZG = 1 → gyroscope all axes into standby
+  //   value: 0b01000111 = 0x47
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6C);
+  Wire.write(0x47);   // 5 Hz wake rate; gyro X/Y/Z standby (~3.6 mA saved)
+  Wire.endTransmission();
+
+  // PWR_MGMT_1 (0x6B):
+  //   bit 5 = CYCLE   = 1 → accel-only low-power cycle mode
+  //   bit 3 = TEMP_DIS = 1 → temperature sensor off (not needed for wake)
+  //   bits 2:0 = CLKSEL = 000 → internal 8 MHz oscillator (lowest power)
+  //   value: 0b00101000 = 0x28
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
+  Wire.write(0x28);   // CYCLE=1, TEMP_DIS=1 — accel ~tens µA vs ~3.9 mA full-on
+  Wire.endTransmission();
+
+  // mpu.begin() in setup() after deep-sleep wake will DEVICE_RESET the chip,
+  // restoring full-power normal operation automatically.
+  Serial.println("MPU sleep config: active LOW, pulse, gyro OFF, accel cycle 5 Hz (~tens µA)");
 }
 
 // Enter hardware deep sleep — wakes on MPU6050 motion (INT pin LOW)

@@ -1,0 +1,741 @@
+================================================================================
+  KAKU ESP32 FIRMWARE AUDIT — PARTS 6, 7, 8
+  File: esp32_sketch/esp32_sketch.ino (6152 lines)
+  Date: 2026-03-03
+================================================================================
+
+################################################################################
+#  PART 6: PERFORMANCE REVIEW                                                  #
+################################################################################
+
+================================================================================
+6A. SERIAL PRINT OVERHEAD
+================================================================================
+
+1. TOTAL COUNT: ~287 Serial.print/println/printf calls across the file.
+
+   Baud rate: 115200 (line 1341: Serial.begin(115200))
+   - 115200 baud is standard and appropriate for ESP32 debug output.
+   - At 115200 baud, each character takes ~87 µs. A 60-char debug line
+     takes ~5.2 ms of UART blocking time.
+
+2. HOT-PATH SERIAL PRINTS (functions that execute every 50-100 ms):
+
+   a) displayPetAnimation() — runs every 100 ms via oledTask (Core 0):
+      - ~3 Serial.printf calls directly in the function, but most are
+        gated by a 3-second timer (lastScreenDebug, line ~3361):
+          Serial.printf("📺 Current Screen: %s | Age: %d | Emotion: %s\n", ...)
+        This fires only every 3s → LOW concern.
+
+   b) displayFoodMenu() — called from displayPetAnimation() when on FOOD_MENU:
+      - Multiple Serial.println calls inside this function (~6 calls)
+        that fire EVERY 100 ms frame. Example:
+          Line ~1934: Serial.println("🍽️ FOOD_MENU: Showing EATING animation");
+          Line ~1940: Serial.println("🍽️ FOOD_MENU: Showing GOOD text");
+          Line ~1950: Serial.println("🍽️ FOOD_MENU: Showing age-based HAPPY...");
+          Line ~1967: Serial.printf("🍽️ FOOD_MENU: Pet HUNGRY (Age: %d)...");
+          Line ~2010: Serial.println("🍽️ FOOD_MENU: Pet NOT hungry...");
+      *** CRITICAL: These print EVERY 100 ms frame. On Food Menu, serial
+          output is ~5 ms per call × 1-2 calls = 5-10 ms per frame wasted. ***
+
+   c) displayHealthMenu() — called from displayPetAnimation():
+      - Line ~2608: Serial.println("❤️ HEALTH_MENU: Pet is SICK - Give Medicine");
+      - Line ~2614: Serial.println("❤️ HEALTH_MENU: Pet is healthy - All Good");
+      *** CRITICAL: Prints every 100 ms frame when on HEALTH_MENU. ***
+
+   d) loop() — runs every 50 ms on Core 1:
+      - ~9 Serial prints in the main body, but most are gated by timers
+        (e.g., WiFi status every 10 s, sensor batch every 10 s).
+      - detectHardwareStep() prints on each step: "👣 HW Step #%u stoss=%.4f\n"
+        — only fires on actual steps, LOW concern.
+
+   e) audioMonitorTask() — Core 0, continuous:
+      - STT mode: prints ~2-3 lines per 3-second WAV chunk — LOW concern.
+      - VAD mode: prints on speech detection start/stop — LOW concern.
+
+3. SERIAL INSIDE TIGHT LOOPS:
+   - scanI2CDevices() (line 1604): Iterates 127 I2C addresses during setup.
+     Each found device triggers a Serial.printf. This is setup-only → OK.
+   - OTA download loop (line ~4958): Prints every 5% — OK for low-frequency.
+   - NO serial prints inside the sensor batch collection loop (100 ms).
+
+4. RECOMMENDATIONS:
+   [HIGH] Wrap displayFoodMenu/displayHealthMenu/displayToiletMenu serial
+          prints with a throttle guard (e.g., every 3 seconds) to match
+          displayPetAnimation's existing pattern. Currently wastes 5-10 ms
+          per 100 ms frame on UART output.
+   [LOW]  Consider a compile-time #define DEBUG_SERIAL flag to disable all
+          debug prints in production builds.
+
+================================================================================
+6B. DELAYS AND BLOCKING
+================================================================================
+
+1. ALL delay() CALLS (raw blocking — starves FreeRTOS scheduler):
+
+   Line  964: delay(500)  — WiFi connect retry loop (setup, tryConnectWiFi)
+   Line  978: delay(500)  — Between WiFi disconnect retries (setup)
+   Line 1048: delay(2000) — showWiFiSuccess() screen hold (setup)
+   Line 1287: delay(2000) — WiFi provisioning save → restart (setup)
+   Line 1345: delay(1000) — Startup "KAKU Starting..." screen hold (setup)
+   Line 1363: delay(500)  — Between egg animation phases (setup, FIRST boot only)
+   Line 1438: delay(1000) — "KAKU Starting..." display hold (setup, first boot)
+   Line 1495: delay(100)  — MPU6050 initialization settle (setup)
+   Line 1510: delay(25)   — LP gravity filter warmup loop (40 iterations, setup)
+   Line 1515: delay(500)  — MPU test connection retry backoff (setup)
+   Line 3844: delay(10)   — WiFi provisioning loop cadence (AP mode only)
+   Line 3914: delay(500)  — Pre-reboot state save settle (emergency reboot)
+   Line 3925: delay(500)  — Pre-daily-reboot settle (only during sleep)
+   Line 4846: delay(2000) — OTA "Up to date!" screen display
+   Line 5082: delay(2000) — OTA "Rebooting.." screen display
+
+   Analysis:
+   - Setup-only delays (lines 964-1515): SAFE — run once during boot.
+   - Provisioning delay (line 3844): SAFE — only when in AP mode.
+   - Emergency reboot delays (3914, 3925): SAFE — device is rebooting anyway.
+   - OTA delays (4846, 5082): ACCEPTABLE — OTA is a rare, disruptive operation,
+     but should use vTaskDelay to feed watchdog. 
+     *** MINOR: Lines 4846 and 5082 use raw delay(2000) — could trigger WDT
+         if other tasks are suspended. Currently tasks ARE suspended during
+         OTA so there's no task to starve, but the idle task watchdog could
+         fire. ***
+
+2. ALL vTaskDelay() CALLS (~50 total):
+   These are RTOS-aware and do NOT block the scheduler. Used correctly in:
+   - oledTask: vTaskDelay(pdMS_TO_TICKS(100)) — 10 FPS render loop ✓
+   - networkTask: vTaskDelay(pdMS_TO_TICKS(200)) queue wait + 20 ms settle ✓
+   - cameraMonitorTask: vTaskDelay(pdMS_TO_TICKS(50)) idle polling ✓
+   - audioMonitorTask: vTaskDelay(pdMS_TO_TICKS(10)) active, 500 ms silent ✓
+   - loop(): vTaskDelay(pdMS_TO_TICKS(50)) — 50 ms cadence ✓
+   - Animation functions: vTaskDelay for frame timing ✓
+   - WiFi reconnect in loop(): vTaskDelay(pdMS_TO_TICKS(300)) ✓
+
+3. WATCHDOG TIMEOUT RISKS:
+
+   a) WiFi reconnect in loop() (line ~3871-3890):
+      Two while-loops that can block up to 10 seconds each (20 s total).
+      Uses vTaskDelay(300 ms) inside → feeds watchdog. OK.
+
+   b) MPU6050 init while-loop (line ~1493):
+      Up to 5 seconds with delay(500) inside. Setup-only → OK.
+
+   c) OTA download while-loop (line ~4958):
+      Long-running (up to 120 s). All other tasks suspended. Uses
+      vTaskDelay inside. Has 120 s stall guard. OK.
+
+   d) WiFi connect while-loop (tryConnectWiFi, line ~963):
+      Up to 10 s with delay(500). Setup-only → OK.
+
+4. BUSY-WAIT LOOPS (while without any yield):
+
+   - ageSmashEffect() (line ~3215): while (y < 12) with vTaskDelay(30 ms) → OK.
+   - playAgeTransitionAnimation XP counter (line ~3303): while + vTaskDelay(40 ms) → OK.
+
+   *** NO true busy-wait loops found. All while-loops contain either
+       delay(), vTaskDelay(), or have bounded iteration counts. ***
+
+================================================================================
+6C. CPU FREQUENCY MANAGEMENT
+================================================================================
+
+1. setCpuFrequencyMhz() DIRECT CALLS (15 total):
+
+   Line 1532: setCpuFrequencyMhz(80)  — End of setup(), drop to idle
+   Line 4158: setCpuFrequencyMhz(80)  — cameraMonitorTask idle baseline
+   Line 4796: setCpuFrequencyMhz(240) — OTA start
+   Lines 4809-5059: setCpuFrequencyMhz(80) — OTA error/cleanup paths (10 calls)
+
+   *** ISSUE: OTA function (checkAndPerformOTA) uses raw setCpuFrequencyMhz()
+       NOT safeCpuFreq(). This is a race condition risk IF networkTask and
+       another Core 0 task both try to change frequency simultaneously.
+       HOWEVER: During OTA, all Core 0 tasks are suspended → low practical risk.
+       Line 4796 sets 240 MHz, then lines 4809-5059 set 80 MHz on various
+       error paths. These don't need the mutex because Core 0 tasks are suspended. ***
+
+2. safeCpuFreq() MUTEX-GUARDED CALLS (11 total):
+
+   Line 3672: safeCpuFreq(160)  — NET_SENSOR in networkTask
+   Line 3675: safeCpuFreq(80)   — After sensor send
+   Line 3684: safeCpuFreq(240)  — NET_OLED + OTA trigger
+   Line 3705: safeCpuFreq(80)   — After OTA
+   Line 3710: safeCpuFreq(160)  — NET_IMAGE
+   Line 3712: safeCpuFreq(80)   — After image send
+   Line 3737: safeCpuFreq(160)  — NET_STT
+   Line 3739: safeCpuFreq(80)   — After STT send
+   Line 4170: safeCpuFreq(240)  — Camera capture in cameraMonitorTask
+   Line 4203: safeCpuFreq(80)   — After camera capture
+
+   Pattern: Boost → work → drop back to 80 MHz. ✓ Consistent.
+
+3. IS CPU STUCK AT HIGH FREQUENCY?
+
+   Every safeCpuFreq() boost has a corresponding 80 MHz drop in the
+   same code block (no early returns that skip the drop-back). Good.
+
+   *** POTENTIAL ISSUE: In NET_OLED handler (line ~3684): ***
+     safeCpuFreq(240);         // Boost for OTA
+     for (otaAttempt ...) {    // Retry loop up to 3 × 30 s = 90 s
+       checkAndPerformOTA();   // ~120 s timeout
+       vTaskDelay(30000);      // 30 s between retries
+     }
+     safeCpuFreq(80);          // Drop back
+   *** CPU stays at 240 MHz for up to 90-120+ seconds during OTA attempts.
+       This is acceptable as OTA is a rare, high-priority operation. ***
+
+   *** MINOR ISSUE: cameraMonitorTask (line 4158) uses raw
+       setCpuFrequencyMhz(80) at startup, but then uses safeCpuFreq()
+       during capture. The startup call is before the mutex is created,
+       but it's also before other tasks start → SAFE. ***
+
+4. cpuFreqMutex CONSISTENCY:
+
+   Created at line ~1540 (after all setup, before task creation). ✓
+   safeCpuFreq() uses 10 ms timeout for semaphore take → if blocked,
+   the setCpuFrequencyMhz is SKIPPED (fails silently). This is a design
+   choice: prefer no frequency change over a deadlock.
+
+   *** CONCERN: If safeCpuFreq(80) is skipped due to mutex contention,
+       the CPU stays at the previous high frequency until the next
+       successful call. In practice this window is tiny (10 ms timeout). ***
+
+================================================================================
+6D. TASK SCHEDULING EFFICIENCY
+================================================================================
+
+1. TASK PRIORITIES:
+
+   Task              Core  Priority  Stack    Role
+   ─────────────────────────────────────────────────────────────
+   audioMonitorTask   0      2       12288    Real-time audio/VAD
+   cameraMonitorTask  0      1       8192     On-demand camera capture
+   oledTask           0      1       4096     OLED animation at ~10 FPS
+   networkTask        1      1       16384    Queue-driven HTTP calls
+   loop() (Arduino)   1      1       (main)   Sensors + scheduling
+
+   Analysis:
+   - Audio at priority 2 is correct — real-time processing preempts
+     camera and OLED on Core 0.
+   - Camera and OLED at same priority (1) on Core 0: They alternate via
+     vTaskDelay(50 ms) and vTaskDelay(100 ms) respectively. No conflict
+     since camera is idle most of the time (on-demand only).
+   - networkTask and loop() at same priority on Core 1: Both have delays
+     (200 ms for network, 50 ms for loop). They round-robin effectively.
+
+   *** No priority inversion risk identified. ***
+   The only shared mutexes (cpuFreqMutex, networkDataMutex, cameraMutex,
+   audioMutex, sttDataMutex) are all taken with short timeouts (10-100 ms)
+   and released quickly. No task holds a mutex while waiting for another.
+
+2. vTaskDelay VALUES APPROPRIATENESS:
+
+   - oledTask: 100 ms → ~10 FPS. Appropriate for 64×32 OLED.
+     *** Could be reduced to 80 ms for smoother game animation in PLAY_MENU. ***
+   - cameraMonitorTask: 50 ms idle poll → appropriate (on-demand).
+   - audioMonitorTask: 10 ms active, 500 ms silent → good power saving.
+   - networkTask: 200 ms queue wait + 20 ms settle → fine for HTTP batching.
+   - loop(): 50 ms cadence → 20 Hz sensor/scheduling. Appropriate.
+
+3. PRIORITY INVERSION CONCERNS:
+   None detected. All mutex holds are short-lived (< 10 ms typically).
+   No task blocks on a mutex held by a lower-priority task for extended
+   periods. The cpuFreqMutex uses a 10 ms timeout — if contended, it
+   simply skips the operation rather than waiting.
+
+
+################################################################################
+#  PART 7: POWER / THERMAL OPTIMIZATION                                        #
+################################################################################
+
+================================================================================
+7A. POWER CONSUMPTION PATTERNS
+================================================================================
+
+1. BASELINE CPU FREQUENCY:
+
+   80 MHz (set at end of setup(), line 1532).
+   Comment: "⚡ CPU idle at 80MHz (boosts to 160/240MHz for network/camera)"
+
+2. CPU AT 240 MHz vs 80 MHz — DUTY CYCLE ANALYSIS:
+
+   240 MHz is used for:
+   - Camera capture: ~200-500 ms per capture (on-demand, feeding gesture only)
+   - OTA update: Up to minutes (rare event)
+   - OTA check inside NET_OLED handler: brief
+
+   160 MHz is used for:
+   - NET_SENSOR: Every 10 s, ~200-2000 ms per HTTP call
+   - NET_IMAGE: On-demand, ~5-10 s per upload
+   - NET_STT: Every 3 s during STT mode, ~1-5 s per upload
+
+   80 MHz is used for:
+   - All other time (idle, OLED rendering, sensor reading, audio monitoring)
+
+   Estimated duty cycle (normal operation, no STT):
+   - 80 MHz:  ~95% of time
+   - 160 MHz: ~5% of time (sensor sends every 10 s + OLED polls every 2 s)
+   - 240 MHz: <1% of time (camera on-demand only)
+
+   *** During STT mode: 160 MHz jumps to ~15-20% duty cycle due to 3 s
+       WAV uploads. This increases power draw significantly. ***
+
+3. WIFI POWER MANAGEMENT — WELL OPTIMIZED:
+
+   Line 1400: WiFi.setSleep(true)         — Light-sleep between beacons ✓
+   Line 1402: WiFi.setAutoReconnect(true) — SDK-level reconnect ✓
+   Line 1405: WiFi.setTxPower(WIFI_POWER_11dBm) — Reduced from 19.5 dBm ✓
+
+   WiFi is ALWAYS ON (STA mode) — no power-off during sleep mode.
+   *** SUGGESTION: During isDeviceSleeping, WiFi could be explicitly
+       disconnected or put into modem sleep for further savings. Currently
+       sleep mode only skips network queue dispatching but the radio
+       remains associated and receiving beacons. ***
+   *** However, WiFi.setSleep(true) already enables light-sleep which
+       powers down the radio between beacons → ~80% WiFi power savings
+       according to Espressif docs. Good enough for most use cases. ***
+
+4. PERIPHERALS — ALWAYS ACTIVE VS ON-DEMAND:
+
+   ALWAYS ACTIVE:
+   - OLED display (I2C, always being refreshed at 10 FPS)
+   - MPU6050 accelerometer (polled every 100 ms in loop)
+   - PDM Microphone (I2S, continuous read in audioMonitorTask)
+     *** However: mic enters 500 ms sleep polling when silent for 2 s → good. ***
+   - WiFi radio (associated, light-sleep enabled)
+
+   ON-DEMAND:
+   - Camera: Only active during feeding gesture capture (~200 ms bursts)
+     XCLK reduced to 10 MHz (line ~4080: "less heat, stable") ✓
+   - LED (GPIO 2): Brief blinks on HTTP success (50-100 ms)
+   - STT mode: Activated by 10 s left-tilt gesture, 120 s timeout
+
+   *** ISSUE: The camera hardware (sensor + XCLK) is initialized at boot
+       and stays powered even when not capturing. The XCLK line keeps
+       toggling at 10 MHz, which continually powers the OV2640 image sensor.
+       Consider calling esp_camera_deinit() when not in use and re-init
+       on demand, though this adds ~200 ms latency. ***
+
+================================================================================
+7B. THERMAL CONCERNS
+================================================================================
+
+1. SUSTAINED HIGH-CPU OPERATIONS:
+
+   a) OTA Update:
+      - 240 MHz for potentially minutes
+      - All other tasks suspended → reduced total load
+      - Single-event, rare → NOT a thermal issue.
+
+   b) STT Streaming Mode:
+      - Audio recording + WAV construction (Core 0) + HTTP upload (Core 1)
+      - 160 MHz boost every 3 seconds for upload
+      - Can run for up to 120 s continuously
+      *** MINOR THERMAL CONCERN: Sustained 120 s of I2S read + WAV build +
+          HTTP upload uses both cores significantly. Camera is idle during
+          this, mitigating somewhat. ***
+
+   c) Normal idle operation:
+      - 80 MHz, OLED render 10 FPS, sensor poll 20 Hz, audio VAD
+      - LOW thermal output. The 500 ms mic sleep during silence helps.
+
+   d) Game mode (PLAY_MENU):
+      - OLED redraws every 100 ms with game logic
+      - MPU6050 polled per frame for tilt control
+      - No network activity during gameplay → CORE 1 mostly idle
+      - LOW thermal concern.
+
+2. CAMERA + WIFI + DISPLAY SIMULTANEOUS:
+
+   This combination only occurs during feeding gesture:
+   - Camera captures (240 MHz, ~200 ms) → Core 0
+   - Image upload (160 MHz, ~5-10 s) → Core 1
+   - OLED shows eating animation (100 ms frames) → Core 0
+
+   Timeline:
+   1. Camera capture at 240 MHz for ~200 ms (both cores at max)
+   2. Drop to 160 MHz for HTTP upload (~5-10 s, Core 1 busy)
+   3. OLED eating animation runs concurrently on Core 0
+
+   *** MODERATE CONCERN: The WiFi SSL handshake (10-16 KB session) +
+       image POST (~1-3 KB body) at 160 MHz while OLED animates is the
+       highest thermal moment in normal operation. Duration is ~5-10 s.
+       Mitigated by: reduced XCLK (10 MHz), QQVGA resolution (160×120),
+       JPEG quality 20, single frame buffer. ***
+
+   Summary thermal profile:
+   - COOL: Normal idle + OLED + sensor polling (80 MHz, WiFi sleep)
+   - WARM: Sensor + OLED poll combined HTTP calls (160 MHz, ~200 ms bursts)
+   - HOT:  Camera capture + upload (240→160 MHz, 5-10 s)
+   - HOT:  STT streaming mode (80-160 MHz, sustained 120 s)
+   - HOTTEST: OTA update (240 MHz, minutes, but rare)
+
+
+################################################################################
+#  PART 8: OLED / CODE EFFICIENCY                                              #
+################################################################################
+
+================================================================================
+8A. DISPLAY REFRESH EFFICIENCY
+================================================================================
+
+1. display.display() CALL COUNT: 44 calls throughout the code.
+
+   Primary render path (displayPetAnimation):
+   - Called once at end of every ANIMATION_DISPLAY_INTERVAL (100 ms) → 10 FPS.
+   - Sub-menus (displayFoodMenu, displayToiletMenu, displayPlayMenu,
+     displayHealthMenu, displayStatusInfoMenu, displayStatsMenu) each call
+     display.display() once and return.
+
+   Other callers (non-hot paths):
+   - Setup screens (WiFi, provisioning, QR code): ~8 calls (one-time)
+   - OTA progress screens: ~6 calls (rare)
+   - Animation sequences (egg, injection, age transition): ~10 calls
+   - Sleep/walk animations: 2 calls (in their respective functions)
+
+2. REDUNDANT DISPLAY UPDATES:
+
+   a) displayPetAnimation() calls display.display() at line ~3649 (end of
+      MAIN screen rendering). But sub-menus like displayFoodMenu() also
+      call display.display() internally AND return early. So display is
+      only called once per frame cycle. ✓ No redundancy.
+
+   b) *** ISSUE: playInjectionAnimation() (line ~2870) calls display.display()
+      every 100 ms frame tick. When medicine is being given and displayHealthMenu
+      is called, it calls playInjectionAnimation() which does its own
+      display.display(). No double-call. ✓ OK. ***
+
+   c) displaySleepingAnimation() and displayWalkingAnimation() each call
+      display.display() and return early from displayPetAnimation().
+      No redundancy. ✓
+
+3. DIRTY-FLAG MECHANISM:
+
+   *** NO dirty-flag mechanism exists. ***
+   Every 100 ms, the entire display buffer is cleared (display.clearDisplay())
+   and redrawn from scratch, then pushed (display.display()).
+
+   For IDLE emotion on MAIN screen, the display shows a STATIC frame
+   (e.g., infant_frames[0]) that never changes between renders. Yet it
+   is redrawn every 100 ms anyway.
+
+   *** RECOMMENDATION [MEDIUM]: Add a dirty flag. When on MAIN screen
+       with IDLE emotion and no icon changes, skip clearDisplay/drawBitmap/
+       display cycle. This saves ~2 ms of I2C transfer per skipped frame
+       and reduces I2C bus contention with MPU6050. ***
+
+   display.clearDisplay() is called 44 times (matches display.display() count).
+   Every display.display() is preceded by clearDisplay. Pattern is consistent.
+
+================================================================================
+8B. ANIMATION EFFICIENCY
+================================================================================
+
+1. ANIMATION STORAGE / RENDERING:
+
+   Animations are stored as PROGMEM const uint8_t arrays in all_pets.h.
+   Each frame is a 64×32 monochrome bitmap = 256 bytes per frame.
+
+   Rendering methods:
+   a) display.drawBitmap() — Used for full-screen pet animations (50 calls).
+      This is the Adafruit GFX library's optimized bitmap renderer.
+      Reads directly from PROGMEM. FAST. ✓
+
+   b) Pixel-by-pixel rendering — Used for icons (home, food, poop, sick,
+      play, health, toilet, injection, clean slide). Iterates every pixel
+      of the icon bitmap and calls display.drawPixel() individually.
+      *** 19 drawPixel calls in the code, but they're inside nested loops. ***
+
+      Example: drawHomeIcon() iterates HOME_ICON_WIDTH × HOME_ICON_HEIGHT
+      pixels, calling drawPixel for each set pixel. For a 12×12 icon,
+      that's up to 144 drawPixel calls per frame.
+
+      *** PERFORMANCE ISSUE [MEDIUM]: Pixel-by-pixel icon rendering is
+          ~10-50× slower than drawBitmap(). Icons like food, poop, sick,
+          play are 24×12 = 288 iterations each. With multiple icons visible,
+          this adds up. drawBitmap() would be much faster but the developer
+          chose pixel-by-pixel "to prevent corruption with other animations"
+          (comment at line ~1768). ***
+
+      However, at 10 FPS on a 64×32 display, even 500 drawPixel calls
+      complete well within 100 ms. Practical impact is LOW.
+
+2. PROGMEM USAGE:
+
+   PROGMEM is used for 6 declarations in the main .ino file:
+   - sleeping_frames (2 frames × 256 bytes = 512 bytes)
+   - walking_animation (6 frames × 256 bytes = 1536 bytes)
+   - statusFlashBitmap (64 bytes)
+   - charFrame1, charFrame2 (8 bytes each)
+   - injection animation delays
+
+   The bulk of animation data is in all_pets.h (included at line 53).
+   All animation frame arrays in all_pets.h also use PROGMEM. ✓
+   Confirmed by pgm_read_byte() calls throughout icon rendering code.
+
+3. ANIMATION OPTIMIZATION OPPORTUNITIES:
+
+   a) Walking animation skips frame 2 at runtime (line ~3065:
+      "if (wFrame == 2) wFrame = 3;"). The frame data is still stored
+      in flash (256 bytes wasted). MINOR — flash is abundant.
+
+   b) playEatingAnimation() (line ~1840) and playAgeTransitionAnimation()
+      (line ~3248) are blocking sequences that run multiple frames with
+      vTaskDelay. These block the oledTask for their duration (1-5 s).
+      Network and sensor tasks on Core 1 are unaffected.
+      *** DESIGN CHOICE: Blocking animations prevent interruption, which
+          is desired for cinematic sequences. ACCEPTABLE. ***
+
+   c) Frame selection uses modulo: currentFrame % FRAME_COUNT. This is
+      efficient. ✓ No unnecessary branches.
+
+================================================================================
+8C. CODE QUALITY ISSUES
+================================================================================
+
+1. DEAD CODE (functions declared but never called):
+
+   a) notifyServerStartupComplete() — Defined at line 5088, forward-declared
+      at line 851, but NEVER CALLED anywhere in the code. The comment at
+      line ~1710 says "REMOVED: Blocking server notification - too slow".
+      *** DEAD CODE: ~90 lines. Can be removed. ***
+
+   b) sendAllDataToServer() — Defined at line 5455, forward-declared at
+      line 849. NOT called anywhere in runtime code. Replaced by
+      sendSensorDataOnly() + separate image/audio endpoints.
+      *** DEAD CODE: ~70 lines. Comment says "rarely used". ***
+
+   c) recordAudioBase64() — Defined at line 5199. Returns empty string
+      with warning message. Replaced by audioMonitorTask VAD system.
+      *** DEAD CODE: ~5 lines stub. ***
+
+   d) isServerAlive() — Defined at line 4527. Forward-declared at line 839.
+      NOT called anywhere in runtime code.
+      *** DEAD CODE: ~15 lines. ***
+
+   e) captureImageBase64() — Defined at line 5176. Returns base64 String.
+      NOT called anywhere — camera capture now uses binary buffer in
+      cameraMonitorTask.
+      *** DEAD CODE: ~15 lines. ***
+
+   f) acknowledgeEvent() — Defined at line ~5793. Forward-declared.
+      NOT called anywhere — events are processed but not individually ack'd.
+      *** DEAD CODE: ~35 lines. ***
+
+   g) Commented-out checkCameraCover() block (lines ~3170-3200):
+      ~30 lines of dead commented code. MINOR clutter.
+
+   h) sendAudioData() — Defined at line 5410. NOT called by any active code
+      path. Audio is handled by STT mode or not sent at all.
+      *** DEAD CODE: ~40 lines. ***
+
+   TOTAL DEAD CODE: ~340+ lines (~5.5% of file).
+
+2. DEAD / UNUSED VARIABLES:
+
+   a) currentMode (line 420): Set to "HARDWARE", never read or used. DEAD.
+   b) SensorData.camera_image_b64 / audio_data_b64 (lines 767-768):
+      Set to "" in readAllSensors(), never populated with real data in the
+      active code path. sendSensorDataOnly() doesn't use them. DEAD fields.
+   c) SensorData.has_new_image / has_new_audio (lines 769-770): Same —
+      always false in active path.
+   d) SensorData.device_orientation / orientation_confidence (lines 772-773):
+      Set to "COMPUTING" / 0.0 but server ignores them (computes from raw data).
+      Technically still sent in JSON but serve no purpose.
+   e) lastEventPoll (line 733): Declared but never read. Events are polled
+      inside NET_OLED handler now.
+   f) dynamicEventPollInterval (line 735): Declared, never used.
+   g) EVENT_POLL_INTERVAL (line 734): Declared, never used (events in OLED slot).
+   h) DISPLAY_CHECK_INTERVAL (line 395): Declared as 3000 ms, never referenced.
+   i) lastDisplayCheckTime (line 393): Set once at end of startup notification
+      (dead code), never used in active code.
+   j) vad_buffer (line 747): Allocated in initAudio() — IS used by both
+      audioMonitorTask and STT mode. NOT dead. ✓
+   k) audio_buffer (line 744): Declared as pointer, never allocated or used.
+      DEAD.
+
+3. REDUNDANT OPERATIONS:
+
+   a) syncLocalStateToUI() is called from:
+      - handlePhysiology() (every 120 s)
+      - checkFeedingGesture() on feed
+      - checkCleaningGesture() on clean
+      - playInjectionAnimation() on medicine
+      - loadPetState() path
+      - getOLEDDisplayFromServer() on age sync
+      Some of these trigger back-to-back (e.g., feed → savePetState →
+      syncLocalStateToUI, then server poll → getOLEDDisplayFromServer →
+      syncLocalStateToUI). The function is cheap (just copies + comparisons)
+      so redundant calls are LOW concern.
+
+   b) display.clearDisplay() is always called before rendering, even when
+      drawBitmap will overwrite all 256 bytes anyway. For full-screen
+      animations, clearDisplay is redundant (~0.5 ms wasted).
+      LOW concern for 64×32 display.
+
+   c) savePetState() opens/closes NVS preferences each time (petPrefs.begin/
+      end). Called after feeding, cleaning, medicine, and every physiology
+      tick (120 s). NVS writes have a ~10 ms flash write overhead per key.
+      With 12 keys, that's ~120 ms per save.
+      *** MODERATE CONCERN: savePetState writes 12 NVS keys every 120 s
+          plus on every user interaction. Consider batching or reducing
+          the save frequency to once per 5 minutes. ***
+
+4. CROSS-THREAD ARDUINO STRING SAFETY:
+
+   Global String objects that are written/read across cores:
+
+   a) currentScreenType (line 409): Written by cycleMenu() (called from
+      oledTask/Core 0), read by loop() and networkTask (Core 1).
+      *** THREAD SAFETY ISSUE [HIGH]: Arduino String is not thread-safe.
+          String assignment involves heap allocation/deallocation. If Core 1
+          reads currentScreenType while Core 0's cycleMenu() is mid-
+          assignment, the heap metadata can corrupt. In practice, String
+          assignment on ESP32 with short strings (<15 chars, SSO) is usually
+          atomic, but NOT guaranteed. Should use a mutex or char array. ***
+
+   b) currentEmotion (line 411): Written by syncLocalStateToUI() (called
+      from multiple contexts including physiology on Core 1) AND by
+      getOLEDDisplayFromServer() (Core 1). Read by displayPetAnimation()
+      (Core 0).
+      *** SAME ISSUE: Cross-core String read/write without synchronization. ***
+
+   c) detectedAudioData (line 678): Protected by audioMutex. ✓ SAFE.
+
+   d) currentMode (line 420): Dead code, never modified at runtime. SAFE.
+
+================================================================================
+8D. GENERAL CODE EFFICIENCY
+================================================================================
+
+1. INEFFICIENT PATTERNS:
+
+   a) HTML page generation (wifiConfigHtmlPage, line ~1062):
+      Builds a ~4-5 KB HTML string with 100+ String concatenation
+      operations (page += "..."). Each concatenation may reallocate.
+      *** INEFFICIENCY: Could use a fixed PROGMEM string or chunked
+          response to avoid heap fragmentation. However, this only runs
+          during WiFi provisioning mode (rare, one-time). LOW priority. ***
+
+   b) Repeated MPU6050 reads:
+      - checkMenuTiltGesture() reads accel data
+      - checkSTTTiltGesture() reads accel data
+      - detectHardwareStep() reads accel data
+      - These are all called within the same 100 ms displayPetAnimation frame.
+      *** MINOR INEFFICIENCY: 3 separate I2C reads per frame when one
+          cached read would suffice. Each mpu.getAcceleration() is ~0.5 ms
+          I2C transaction. Total: ~1.5 ms vs ~0.5 ms. LOW impact. ***
+
+   c) isDeviceInverted() (line ~3038) calls readAllSensors() which reads
+      BOTH accelerometer AND gyroscope, but only uses accel data.
+      Then detectDirection() is called on the result.
+      *** MINOR WASTE: gyro read (~0.5 ms) is discarded. Also, this is
+          called every 50 ms from loop() for sleep detection. Could use
+          a lightweight accel-only read. ***
+
+   d) EGG_CRACK animation stored but only played once ever (first boot).
+      The frame data remains in flash permanently.
+      ACCEPTABLE — PROGMEM flash is not scarce.
+
+2. RESOURCE LEAK ANALYSIS:
+
+   a) WiFiClientSecure sslNet / sslOTA: Global objects, never freed.
+      Appropriate for persistent connections in embedded context. ✓
+
+   b) QRCodeGFX *qrcode: Allocated with new at line ~1367, never deleted.
+      Leaks ~few hundred bytes. Only allocated once. MINOR.
+
+   c) ps_malloc for capturedImageBuffer: Freed after sendImageData sends.
+      Also freed inside cameraMonitorTask if new capture replaces old.
+      *** CHECK: If sendImageData is never called (e.g., network down),
+          the buffer persists until next capture. Not a leak per se, but
+          unbounded if feeding gesture is triggered repeatedly without
+          successful upload. Camera flag (cameraImageReady) prevents
+          re-capture until previous is consumed. ✓ SAFE. ***
+
+   d) STT buffers (stt_audio_buffer, stt_wav_to_send):
+      Properly freed in audioMonitorTask cleanup when STT disabled. ✓
+      stt_wav_to_send freed by sendSTTAudioChunk or by cleanup. ✓
+
+   e) recording_buffer in audioMonitorTask: Allocated on speech start,
+      freed on speech end or buffer full. ✓ No leak path visible.
+
+   f) HTTPClient objects: All local to functions, .end() called before
+      return on all paths. ✓
+
+   g) wifiPrefs / petPrefs (NVS Preferences): .begin() and .end() are
+      properly paired in all usage. One exception:
+      *** Line ~999-1001: wifiPrefs.begin() in loop, then inside the loop
+          body: wifiPrefs.end() followed by wifiPrefs.begin() for next
+          iteration. This is correct but fragile — if the loop body throws
+          or has an early break, wifiPrefs could be left open. MINOR. ***
+
+3. OTHER NOTABLE PATTERNS:
+
+   a) Base64 encoding of audio (line ~4442): Creates a potentially large
+      Arduino String (32 KB base64 for 5 s recording). Passes by value
+      to detectedAudioData (another String). Two copies of ~32 KB String
+      on heap simultaneously.
+      *** HOWEVER: This audio path appears to be dead code (sendAudioData
+          is never called). The STT mode uses raw WAV upload instead. ***
+
+   b) JSON document reuse: Global StaticJsonDocuments (g_oledDoc, g_sensorDoc)
+      are reused with .clear(). ✓ Good for avoiding fragmentation.
+
+   c) The main loop uses millis()-based tick slots for staggered scheduling:
+      - Sensor every 10 s (tick % 20 == 0)
+      - OLED every 2 s (tick % 4 == 0)
+      This is efficient and prevents network burst overlap. ✓
+
+   d) Daily auto-reboot (line ~3920): Reboots after 24 h uptime when
+      sleeping. Good for memory fragmentation hygiene in sealed device. ✓
+
+   e) Heap monitor (line ~3912): Reboots if free heap < 20 KB. Good
+      safety net. ✓
+
+
+================================================================================
+  SUMMARY OF CRITICAL FINDINGS
+================================================================================
+
+  SEVERITY  FINDING
+  ────────  ──────────────────────────────────────────────────────────────
+  [HIGH]    Cross-thread Arduino String writes (currentScreenType,
+            currentEmotion) without mutex protection between Core 0
+            (oledTask) and Core 1 (loop/networkTask). Risk: heap
+            corruption on concurrent read/write.
+
+  [MEDIUM]  Serial.println in displayFoodMenu / displayHealthMenu fires
+            every 100 ms frame — wastes ~5-10 ms UART time per frame.
+            Should be throttled or gated.
+
+  [MEDIUM]  No dirty-flag for OLED display — static IDLE screen is
+            redrawn every 100 ms unnecessarily.
+
+  [MEDIUM]  savePetState() writes 12 NVS keys with flash overhead every
+            120 seconds + every user interaction. Could cause flash wear
+            and ~120 ms blocking.
+
+  [LOW]     ~340 lines of dead code (6 unused functions, ~10 unused
+            variables). Adds maintenance burden and flash usage.
+
+  [LOW]     Pixel-by-pixel icon rendering vs drawBitmap — slower but
+            not a practical issue at 10 FPS on 64×32 display.
+
+  [LOW]     Camera sensor (OV2640) stays powered via XCLK even when
+            idle. Minor power waste.
+
+  [LOW]     Repeated MPU6050 I2C reads in same frame (3× per 100 ms
+            when in MAIN screen).
+
+  [LOW]     isDeviceInverted() reads gyro data unnecessarily — called
+            every 50 ms in loop() for sleep detection.
+
+  [INFO]    WiFi light-sleep and TX power reduction properly configured.
+  [INFO]    CPU frequency management is well-structured with mutex guard.
+  [INFO]    OTA has robust retry, progress reporting, and task suspension.
+  [INFO]    Daily reboot + heap monitoring provide good sealed-device safety.
+  [INFO]    No busy-wait loops found. All while-loops yield properly.
+  [INFO]    Baud rate 115200 is standard and appropriate.
+
+================================================================================
+  END OF PARTS 6-8 AUDIT
+================================================================================

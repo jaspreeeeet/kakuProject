@@ -1,0 +1,920 @@
+================================================================================
+KAKU ESP32 FIRMWARE AUDIT — PARTS 4 & 5
+File: esp32_sketch/esp32_sketch.ino (6152 lines)
+Date: 2026-03-03
+================================================================================
+
+████████████████████████████████████████████████████████████████████████████████
+██  PART 4: NETWORK ROBUSTNESS                                                ██
+████████████████████████████████████████████████████████████████████████████████
+
+================================================================================
+4A. WiFi DISCONNECT / RECONNECT HANDLING
+================================================================================
+
+[4A-1] WiFi LOSS DETECTION
+--------------------------------------------------------------------------------
+Location: loop() at lines 3855-3894
+
+WiFi connectivity is checked at the TOP of every loop() iteration:
+
+    if (WiFi.status() != WL_CONNECTED) {
+        // reconnect logic
+    }
+
+This runs on Core 1 inside the Arduino loop(), approximately every 50ms
+(the vTaskDelay at the bottom of loop is 50ms).
+
+ASSESSMENT: ✅ GOOD — WiFi loss is detected promptly each loop() cycle.
+
+[4A-2] WiFi RECONNECTION STRATEGY
+--------------------------------------------------------------------------------
+The reconnection logic at lines 3856-3894 follows this sequence:
+
+1. Try most-recently-stored NVS WiFi credential (newest slot).
+2. If that fails, try hardcoded WIFI_SSID / WIFI_PASSWORD fallback.
+3. Each attempt has a 10-second timeout (millis()-based, non-blocking via
+   vTaskDelay(300ms)).
+4. If both attempts fail, the device enters "offline mode" — it just prints
+   a warning and continues the loop.
+
+FINDING [4A-2a] ⚠️ MEDIUM: ONLY TRIES ONE STORED CREDENTIAL
+    The reconnect logic in loop() only tries the MOST RECENTLY stored
+    credential (slot count-1). If the user has multiple saved networks,
+    the older ones are never tried during reconnect.
+    Compare: connectWithStoredCredentials() (used at startup only, lines 983+)
+    tries ALL stored credentials newest-first, then hardcoded fallback.
+    The loop() reconnect is a simplified version that skips older slots.
+
+FINDING [4A-2b] ⚠️ MEDIUM: NO RECONNECT BACKOFF / COOLDOWN
+    If WiFi is persistently disconnected, the reconnect attempt runs EVERY
+    loop() iteration (every ~50ms, modulo the 10s timeout). This means the
+    device will spend ~10s trying to reconnect, then immediately try again
+    on the very next loop(). There is no exponential backoff for reconnect
+    attempts. This wastes CPU cycles and may cause battery drain.
+
+FINDING [4A-2c] ℹ️ LOW: NO WiFi EVENT CALLBACK
+    WiFi loss is detected by polling WiFi.status(). There is no
+    WiFi.onEvent() handler registered for station-mode disconnects (only
+    for provisioning AP mode at line 1299). An event-based handler could
+    respond faster and avoid repeated polling during connected state.
+
+[4A-3] WiFi WATCHDOG
+--------------------------------------------------------------------------------
+There is NO dedicated WiFi watchdog timer. However, the firmware has:
+
+1. Low-heap reboot (line 3912): If ESP.getFreeHeap() < 20KB → reboot.
+2. Daily maintenance reboot (line 3922): After 24h uptime → reboot when
+   sleeping. This incidentally "fixes" any persistent WiFi issues.
+
+FINDING [4A-3a] ⚠️ MEDIUM: NO SERVER-UNREACHABLE WATCHDOG
+    If WiFi IS connected but the server is unreachable (DNS failure, server
+    down), the firmware has no specific handling. It will:
+    - Continue attempting HTTP calls every 2-10 seconds (OLED poll, sensor).
+    - Each call will fail with HTTP errors (timeout, -1, etc.).
+    - The trackHttpResult() mechanism (lines 543-554) will increment
+      httpConsecutiveErrors and call resetSSLConnection() after 3 consecutive
+      failures. This resets the TLS session but does NOT back off.
+    - The device will keep hammering the server at full polling rate.
+    There is an isServerAlive() function (line 4526) but it is NEVER called
+    from the main scheduling code — it appears to be dead code.
+
+[4A-4] IN-FLIGHT HTTP REQUESTS DURING WiFi LOSS
+--------------------------------------------------------------------------------
+FINDING [4A-4a] ⚠️ MEDIUM: IN-FLIGHT REQUESTS NOT PROTECTED
+    The WiFi status check is only in loop() (Core 1 Arduino loop), NOT in
+    networkTask() before each HTTP call. The sequence is:
+    1. loop() checks WiFi.status() OK → queues NET_SENSOR.
+    2. WiFi drops.
+    3. networkTask picks up NET_SENSOR, calls sendSensorDataOnly().
+    4. sendSensorDataOnly() checks WiFi.status() at line 5207 → returns.
+
+    Each individual send function (sendSensorDataOnly, sendCleanRequest,
+    getOLEDDisplayFromServer, etc.) checks WiFi.status() at the top. This
+    is GOOD — they will bail early if WiFi dropped between queue and execute.
+
+    However, if WiFi drops DURING an active HTTP POST, the HTTPClient
+    timeout will eventually fire (2-15 seconds depending on function), and
+    the call will return a negative error code. This is handled by
+    trackHttpResult().
+
+    VERDICT: Reasonably handled. Requests will fail with timeout errors
+    but http.end() is always called in the normal code path. No request
+    will hang forever thanks to setTimeout values.
+
+[4A-5] QUEUED REQUESTS WHEN WiFi DROPS
+--------------------------------------------------------------------------------
+The network queue (xQueueCreate(8, ...)) can hold up to 8 pending requests.
+When WiFi drops:
+- New requests continue being queued from loop() until checked again.
+- networkTask() processes them and each function checks WiFi.status().
+- Functions return early without HTTP call.
+- Queue items are consumed (not re-queued on failure).
+
+FINDING [4A-5a] ℹ️ LOW: NO RE-QUEUE ON FAILURE
+    When a network request fails (WiFi down or server error), it is simply
+    discarded. Sensor data, OLED poll, rewards, etc. are lost. For sensor
+    data this is fine (next reading replaces it). For game rewards or
+    feeding confirmations, the data is lost. However, feeding/cleaning
+    effects are applied locally first, so the user doesn't notice — server
+    will sync on next successful poll.
+
+
+================================================================================
+4B. HTTP FAILURE HANDLING — PER-FUNCTION ANALYSIS
+================================================================================
+
+[4B-1] GLOBAL HTTP ERROR TRACKING (lines 528-554)
+--------------------------------------------------------------------------------
+The firmware has a clever auto-reset mechanism:
+- httpConsecutiveErrors counter tracks consecutive negative HTTP codes.
+- After 3 consecutive errors → resetSSLConnection() is called.
+- resetSSLConnection() calls sslNet.stop(), sslNet.setInsecure(),
+  sslNet.setTimeout(10), resets counter.
+- trackHttpResult() is called after every HTTP call.
+
+ASSESSMENT: ✅ GOOD self-healing mechanism.
+
+[4B-2] FUNCTION-BY-FUNCTION HTTP ANALYSIS
+--------------------------------------------------------------------------------
+
+─── sendKakuCoinReward() (lines 2442-2485) ───
+    WiFi check:        ✅ Line 2444
+    http.begin check:  ✅ Line 2456 (!http.begin → return)
+    Timeouts:          ✅ connect=2000ms, read=5000ms
+    Response check:    ✅ Line 2477 (checks httpCode==200)
+    5xx handling:      ❌ NO — only checks ==200, prints error for anything else
+    http.end():        ✅ Line 2484 — always reached (no early returns after begin)
+    trackHttpResult(): ✅ Line 2476
+    sslNet.stop():     ❌ Not called before begin (shared sslNet client)
+
+─── isServerAlive() (lines 4526-4541) ───
+    WiFi check:        ❌ NO — no WiFi check before http.begin
+    http.begin check:  ✅ Line 4532 (!http.begin → return false)
+    Timeouts:          ✅ connect=2000ms, read=3000ms
+    Response check:    ✅ Line 4538 (checks code==200)
+    http.end():        ✅ Line 4540 — always reached
+    trackHttpResult(): ✅ Line 4539
+    NOTE: This function appears to be DEAD CODE — never called.
+
+─── getOLEDDisplayFromServer() (lines 4545-4725) ───
+    WiFi check:        ❌ NO — no WiFi status check at start
+    http.begin check:  ✅ Line 4552 (resets SSL + returns on failure)
+    Timeouts:          ✅ connect=3000ms, read=3000ms
+    Response check:    ✅ Line 4558 (checks httpCode==200)
+    JSON parse check:  ✅ Line 4566 (checks DeserializationError)
+    Missing fields:    ✅ Uses containsKey() for every optional field
+    5xx handling:      ❌ NO — silently drops non-200 responses
+    http.end():        ✅ Line 4726 — always reached
+    trackHttpResult(): ✅ Line 4559
+    FINDING [4B-2a] ⚠️ LOW: No WiFi check. The caller (networkTask) may
+    invoke this when WiFi just dropped. However, http.begin will fail, and
+    resetSSLConnection is called, so it's self-recovering.
+    FINDING [4B-2b] ⚠️ LOW: After JSON parse error, function silently falls
+    through to http.end(). No logging of the malformed response body.
+
+─── postOTAProgress() (lines 4734-4765) ───
+    WiFi check:        ✅ Line 4736
+    http.begin check:  ✅ Line 4743
+    Timeouts:          ✅ connect=5000ms, read=5000ms
+    Response check:    ❌ NO — fire-and-forget (only logs HTTP code)
+    http.end():        ✅ Line 4764
+    trackHttpResult(): ✅ Line 4762
+
+─── checkAndPerformOTA() (lines 4775-5082) ───
+    WiFi check:        ✅ Line 4776
+    http.begin check:  ✅ Lines 4806, 4893 (both check return value)
+    Timeouts:          ✅ Generous: connect=10-15s, read=10-120s
+    TLS handshake:     ✅ setHandshakeTimeout(30) on sslOTA
+    Response check:    ✅ Lines 4814, 4902 (check ==200, also !=200)
+    JSON parse check:  ✅ Line 4829 (checks DeserializationError)
+    Content length:    ✅ Line 4908 (checks contentLength <= 0)
+    Download stall:    ✅ 120s watchdog at line 4960
+    Read errors:       ✅ 150 consecutive read error tolerance with backoff
+    Update.begin:      ✅ Line 4932 (checks space, aborts cleanly)
+    Update.end:        ✅ Line 5058 (checks success, logs error)
+    http.end():        ✅ Lines 4818/4825 (check path), 5035 (download)
+    Task suspend/resume: ✅ Suspends audio/camera/OLED, resumes on any failure
+    sslOTA lifecycle:  ✅ stop() + setInsecure() + setTimeout() before each use
+    FINDING [4B-2c] ✅ OTA IS WELL-IMPLEMENTED — most robust HTTP function
+    in the codebase. Has retry (3 attempts at caller level, lines 3685-3703),
+    stall detection, read error tolerance with exponential backoff, proper
+    abort, and task suspension for reliability.
+    FINDING [4B-2d] ⚠️ LOW: otaUpdateRequested is set to false on connection
+    failure (line 4808), but the caller retries 3 times. The retry works
+    because the outer loop checks `otaUpdateRequested` — wait, actually
+    the function sets `otaUpdateRequested = false` on connect failure.
+    The caller loop checks `otaUpdateRequested` to decide whether to retry.
+    So if http.begin fails, otaUpdateRequested=false → no more retries.
+    This is correct behavior (if can't even connect, retrying is futile),
+    but means sslOTA.stop() + reinit is not attempted between retries.
+    UPDATE: Re-reading the code — only the initial version-check URL sets
+    otaUpdateRequested=false on failure. The download URL failure at line
+    4897 also sets it false. So the retry loop at line 3685 will see
+    `otaUpdateRequested` is false and stop retrying. This means: if OTA
+    download fails, it will NOT retry even though the outer loop allows 3
+    attempts. This is a BUG — the function clears the flag prematurely.
+
+─── notifyServerStartupComplete() (lines 5088-5172) ───
+    WiFi check:        ✅ Line 5089
+    http.begin check:  ✅ Line 5102
+    Timeouts:          ✅ connect=2000ms, read=2000ms
+    Response check:    ✅ Line 5125 (checks httpCode==200)
+    JSON parse check:  ✅ Line 5133 (checks DeserializationError)
+    Missing fields:    ✅ Uses containsKey() for optional fields
+    http.end():        ✅ Line 5172 — always reached
+    trackHttpResult(): ✅ Line 5124
+    FINDING [4B-2e] ⚠️ MEDIUM: http.end() at line 5172 is called AFTER the
+    response is parsed AND a 3-second vTaskDelay(3000) at line 5164. The
+    HTTP connection is held open unnecessarily for 3 seconds. This blocks
+    the SSL socket. Should move http.end() before the delay.
+
+─── sendSensorDataOnly() (lines 5205-5301) ───
+    WiFi check:        ✅ Line 5207
+    http.begin check:  ✅ Line 5217
+    Timeouts:          ✅ connect=2000ms, read=5000ms
+    http.setReuse:     ✅ Line 5213
+    Response check:    ✅ Line 5282 (checks httpCode==200)
+    5xx handling:      ❌ — only logs error string for non-200
+    http.end():        ✅ Line 5300 — always reached
+    trackHttpResult(): ✅ Line 5283
+    ASSESSMENT: ✅ CLEAN — straightforward send with proper cleanup.
+
+─── sendImageData() (lines 5303-5408) ───
+    WiFi check:        ✅ Line 5305
+    http.begin check:  ✅ Line 5358
+    sslNet.stop():     ✅ Line 5352 — reset before reuse (documented fix)
+    Timeouts:          ✅ read=10s, connect=5s
+    Response check:    ✅ Line 5375 (checks httpCode==200)
+    http.end():        ✅ Line 5404 — always reached
+    free(binary_data): ✅ Line 5405 — always called (also freed on begin fail)
+    trackHttpResult(): ✅ Line 5373
+    isUploadingImage:  ✅ Reset on all paths
+    ASSESSMENT: ✅ VERY CLEAN — proper resource cleanup on all paths.
+
+─── sendAudioData() (lines 5411-5454) ───
+    WiFi check:        ✅ Line 5411
+    http.begin check:  ✅ Line 5425
+    Timeouts:          ✅ connect=5000ms, read=15000ms
+    Response check:    ✅ Line 5441 (checks httpCode==200)
+    http.end():        ✅ Line 5450 — always reached
+    trackHttpResult(): ✅ Line 5442
+    FINDING [4B-2f] 🐛 BUG: http.begin() at line 5425-5426 is called with
+    a URL STRING ONLY — no WiFiClientSecure! This means HTTPClient will
+    internally create its own WiFiClient. For an HTTPS URL, this will NOT
+    work correctly on ESP32 — it needs a WiFiClientSecure. This will either:
+    (a) fail silently, (b) create a second internal WiFiClientSecure on the
+    stack (dangerous on a 16KB task), or (c) attempt plain HTTP on port 443.
+    All other HTTPS calls use http.begin(sslNet, url). This function is
+    INCONSISTENT and likely broken for HTTPS.
+
+─── sendAllDataToServer() (lines 5456-5555) ───
+    WiFi check:        ✅ Line 5456
+    http.begin check:  ✅ Line 5468
+    Timeouts:          ✅ connect=10000ms, read=15000ms
+    Response check:    ✅ Line 5531 (checks httpCode > 0)
+    5xx handling:      ✅ Line 5549 — prints server error body for non-200
+    http.end():        ✅ Line 5555 — always reached
+    trackHttpResult(): ✅ Line 5532
+    FINDING [4B-2g] ⚠️ LOW: Uses StaticJsonDocument<4096> — fairly large
+    for stack allocation on a 16KB task. Comment acknowledges this risk.
+    This function appears to be a LEGACY path (sendSensorDataOnly is primary).
+
+─── sendCleanRequest() (lines 5619-5663) ───
+    WiFi check:        ✅ Line 5619
+    http.begin check:  ✅ Line 5632
+    Timeouts:          ⚠️ setTimeout(5000) — no setConnectTimeout()
+    Response check:    ✅ Line 5640 (checks httpCode > 0, then ==200)
+    http.end():        ✅ Line 5662 — always reached
+    trackHttpResult(): ✅ Line 5641
+    FINDING [4B-2h] ⚠️ LOW: Missing setConnectTimeout(). Default is a very
+    long timeout (10-15 seconds platform default), which could block the
+    network task unnecessarily.
+
+─── sendCoverHappyRequest() (lines 5670-5693) ───
+    WiFi check:        ✅ Line 5671
+    http.begin check:  ✅ Line 5680
+    Timeouts:          ⚠️ setTimeout(5000) — no setConnectTimeout()
+    http.end():        ✅ Line 5692
+    trackHttpResult(): ✅ Line 5685
+    Same missing setConnectTimeout as sendCleanRequest.
+
+─── sendInjectRequest() (lines 5695-5733) ───
+    WiFi check:        ✅ Line 5696
+    http.begin check:  ✅ Line 5709
+    Timeouts:          ⚠️ setTimeout(5000) — no setConnectTimeout()
+    http.end():        ✅ Line 5732
+    trackHttpResult(): ✅ Line 5717
+    Same missing setConnectTimeout.
+
+─── acknowledgeEvent() (lines 5770-5813) ───
+    WiFi check:        ❌ NO — no WiFi check
+    http.begin check:  ✅ Line 5775
+    Timeouts:          ⚠️ setTimeout(5000) at line 5782, no setConnectTimeout
+    http.end():        ✅ Line 5812
+    trackHttpResult(): ✅ Line 5797
+    FINDING [4B-2i] ⚠️ LOW: No WiFi check before acknowledgeEvent().
+    Also missing setConnectTimeout.
+
+─── sendSTTAudioChunk() (lines 5914-5971) ───
+    WiFi check:        ✅ Line 5914
+    sslNet.stop():     ✅ Line 5939 — documented fix for stale TLS session
+    http.begin:        ⚠️ Line 5944 — return value NOT checked
+    Timeouts:          ✅ connect=10000ms, read=15000ms
+    Response check:    ✅ Line 5949 (code > 0 for getString)
+    JSON parse check:  ✅ Line 5958 (checks error + containsKey)
+    free(wav_data):    ✅ Line 5952 — always freed
+    http.end():        ✅ Line 5953
+    trackHttpResult(): ✅ Line 5954
+    FINDING [4B-2j] ⚠️ MEDIUM: http.begin() return value is NOT checked
+    at line 5944. If begin() fails, http.POST() will crash or return
+    unexpected error. All other functions check !http.begin().
+
+[4B-3] HTTP TIMEOUT SETTINGS SUMMARY
+--------------------------------------------------------------------------------
+Function                    Connect(ms)  Read(ms)  Reasonable?
+─────────────────────────── ──────────── ───────── ───────────
+sendKakuCoinReward          2000         5000      ✅
+isServerAlive               2000         3000      ✅
+getOLEDDisplayFromServer    3000         3000      ✅
+postOTAProgress             5000         5000      ✅
+checkAndPerformOTA (check)  10000        10000     ✅ (Cloud Run cold start)
+checkAndPerformOTA (DL)     15000        120000    ✅ (large binary)
+notifyServerStartupComplete 2000         2000      ✅
+sendSensorDataOnly          2000         5000      ✅
+sendImageData               5000         10000     ✅
+sendAudioData (VAD)         5000         15000     ✅
+sendAllDataToServer         10000        15000     ✅
+sendCleanRequest            DEFAULT      5000      ⚠️ missing connect
+sendCoverHappyRequest       DEFAULT      5000      ⚠️ missing connect
+sendInjectRequest           DEFAULT      5000      ⚠️ missing connect
+acknowledgeEvent            DEFAULT      5000      ⚠️ missing connect
+sendSTTAudioChunk           10000        15000     ✅
+
+sslNet (socket-level)       N/A          10 sec    ✅
+sslOTA (socket-level)       N/A          120 sec   ✅
+
+ASSESSMENT: Overall reasonable. Cloud Run cold start latency is accommodated
+by longer OTA timeouts. Regular API calls use 2-5s which is sensible for a
+realtime pet device.
+
+[4B-4] BLOCKING HTTP CALLS
+--------------------------------------------------------------------------------
+All HTTP calls run on the networkTask (FreeRTOS task on Core 1, 16KB stack).
+They are queue-driven and execute sequentially. No HTTP call runs on Core 0.
+
+The worst-case blocking time scenarios:
+- Normal API call: up to 7 seconds (2s connect + 5s read timeout)
+- Image upload:    up to 15 seconds (5s connect + 10s read)
+- OTA download:    up to ~135 seconds (15s connect + 120s read + stall detect)
+- STT audio:       up to 25 seconds (10s connect + 15s read)
+
+FINDING [4B-4a] ⚠️ LOW: During OTA, the network task is busy for up to
+several minutes (download + flash). All other queued requests (sensor, OLED,
+clean, etc.) will be blocked. This is mitigated by the OTA code suspending
+other tasks anyway, but the queue will fill up (capacity 8) and subsequent
+xQueueSend calls with timeout=0 will silently drop requests.
+
+
+================================================================================
+4C. TLS/SSL ROBUSTNESS
+================================================================================
+
+[4C-1] SSL CLIENT CONFIGURATION
+--------------------------------------------------------------------------------
+Two global WiFiClientSecure instances (lines 522-525):
+- sslOTA: Dedicated to OTA firmware downloads.
+- sslNet: Shared across ALL other network calls (sensor, OLED, events, image,
+  audio, clean, inject, STT).
+
+Both are configured with:
+- setInsecure(): ❌ SKIPS certificate verification entirely.
+- No CA certificate pinning (setCACert() never called).
+- No client certificates.
+
+FINDING [4C-1a] ⚠️ MEDIUM: setInsecure() disables TLS certificate
+    verification. The device will connect to ANY server presenting ANY
+    certificate, including MITM proxies. For a consumer IoT device, this
+    is a security concern — someone on the same network could intercept
+    all traffic including OTA firmware (code injection risk).
+    MITIGATION: The OTA update does use X-OTA-Token authentication, so
+    firmware replacement requires the token. But sensor data, pet state,
+    and images are unprotected.
+
+[4C-2] TLS HANDSHAKE FAILURE HANDLING
+--------------------------------------------------------------------------------
+- sslOTA.setHandshakeTimeout(30): Set at lines 4801, 4886.
+- sslNet: NO handshake timeout set (uses default).
+
+When TLS handshake fails:
+- http.begin() returns false → function returns early (in most cases).
+- getOLEDDisplayFromServer has explicit SSL reset on begin failure (line 4554).
+- The trackHttpResult auto-reset (3 consecutive errors → resetSSLConnection)
+  provides a general safety net.
+
+FINDING [4C-2a] ⚠️ LOW: sslNet has no explicit handshake timeout. The
+    default WiFiClientSecure handshake timeout is platform-dependent (often
+    30 seconds). This could cause blocking during TLS negotiation failures.
+
+[4C-3] TLS RETRY LOGIC
+--------------------------------------------------------------------------------
+- The auto-reset mechanism (resetSSLConnection at 3 errors) acts as an
+  implicit TLS retry. After reset, the next HTTP call will establish a new
+  TLS session.
+- OTA has explicit sslOTA.stop() + reconfigure before each attempt.
+- sendSTTAudioChunk() explicitly calls sslNet.stop() before each use
+  (documented fix for stale TLS sessions after large POST).
+- sendImageData() explicitly calls sslNet.stop() before use.
+
+ASSESSMENT: ✅ ADEQUATE — TLS failures result in auto-reset and the next
+request attempts a fresh connection. OTA handles TLS more carefully.
+
+
+================================================================================
+4D. OTA UPDATE SAFETY
+================================================================================
+
+[4D-1] OTA ERROR HANDLING (checkAndPerformOTA, lines 4775-5082)
+--------------------------------------------------------------------------------
+✅ COMPREHENSIVE error handling at every stage:
+1. WiFi connectivity check (line 4776).
+2. Version check HTTP failure → abort + clear flag.
+3. JSON parse failure → abort + clear flag.
+4. No update available → clean exit.
+5. Download HTTP connect failure → abort + report to server.
+6. Download HTTP error code → abort + report.
+7. Invalid content length → abort + report.
+8. Not enough flash space (Update.begin fail) → abort + resume tasks.
+9. Download stall (120s no data) → break + abort.
+10. Excessive read errors (150 consecutive) → break + abort.
+11. Incomplete download (written != contentLength) → Update.abort() + resume.
+12. Flash failure (Update.end fail) → log error + resume tasks.
+13. Success → reboot.
+
+Each failure path:
+- Reports status to server via postOTAProgress("failed", ...).
+- Resumes suspended tasks (audio, camera, OLED).
+- Clears otaUpdateRequested flag.
+- Resets CPU frequency to 80MHz.
+
+[4D-2] OTA INTERRUPTED DOWNLOAD
+--------------------------------------------------------------------------------
+If download is interrupted:
+- 120-second stall watchdog detects no-data condition → breaks download loop.
+- Read error counter (150 tolerance with exponential backoff) handles
+  transient stream errors.
+- On incomplete download: Update.abort() is called → discards partial data
+  from inactive OTA partition.
+- ESP32 dual-partition scheme means the running firmware is NEVER modified.
+
+FINDING [4D-2a] ✅ SAFE: Interrupted OTA cannot brick the device because
+    ESP32 uses A/B partition scheme. The running partition is never touched.
+    Update.abort() cleanly discards the partial write.
+
+[4D-3] OTA ROLLBACK CAPABILITY
+--------------------------------------------------------------------------------
+The firmware uses ESP32's built-in dual-partition OTA:
+- partitions_8mb_ota.csv exists in the project, confirming A/B layout.
+- After successful Update.end(true), ESP32 marks the new partition as boot.
+- ESP.restart() boots into the new firmware.
+
+FINDING [4D-3a] ⚠️ MEDIUM: NO EXPLICIT ROLLBACK MECHANISM
+    There is no code to call esp_ota_mark_app_valid_cancel_rollback() or
+    esp_ota_mark_app_invalid_rollback_and_reboot(). The ESP-IDF rollback
+    feature requires the new firmware to explicitly confirm it's working
+    (esp_ota_mark_app_valid) or the bootloader will roll back on next reboot.
+    Without explicit confirmation:
+    - If CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is set in sdkconfig, and
+      the new firmware crashes before confirming → auto-rollback occurs.
+    - If not configured, NO rollback protection exists.
+    The firmware does call notifyServerStartupComplete() which proves
+    successful boot, but it doesn't call the ESP-IDF rollback API.
+
+FINDING [4D-3b] 🐛 BUG (from 4B-2d): OTA RETRY LOOP IS DEFEATED
+    checkAndPerformOTA() sets otaUpdateRequested=false on most failure
+    paths (lines 4808, 4822, 4833, etc.). The caller's retry loop at
+    line 3685 checks `otaUpdateRequested` to decide whether to retry:
+        for (int otaAttempt = 1; otaAttempt <= 3 && otaUpdateRequested; ...)
+    Since the function clears the flag, the loop exits after 1 attempt.
+    The 3-retry mechanism is essentially dead code for most failure modes.
+    The only case where retry works is if checkAndPerformOTA() returns
+    WITHOUT clearing the flag — which doesn't appear to happen.
+
+
+████████████████████████████████████████████████████████████████████████████████
+██  PART 5: ERROR HANDLING COVERAGE                                            ██
+████████████████████████████████████████████████████████████████████████████████
+
+================================================================================
+5A. I2C (MPU6050) ERROR HANDLING
+================================================================================
+
+[5A-1] MPU6050 INITIALIZATION (lines 1488-1521)
+--------------------------------------------------------------------------------
+✅ GOOD initialization pattern:
+- Retry loop with 5-second timeout.
+- mpu.testConnection() validates the sensor.
+- mpuAvailable flag is set only on success.
+- 1-second gravity filter warm-up after init.
+- On failure: prints warning, continues without MPU (graceful degradation).
+
+[5A-2] MPU6050 RUNTIME READS
+--------------------------------------------------------------------------------
+The mpuAvailable flag is checked by every function that reads the MPU:
+- readTiltForGame() line 2130
+- checkStartGesture() line 2269
+- checkCatchFoodGesture() line 2340
+- checkInjectionGesture() line 2721
+- checkFeedingGesture() line 2761
+- checkCleaningGesture() line 2815
+- checkMenuTiltGesture() line 2927/2965
+- readAllSensors() line 4462
+- loop() sensor batch line 3935
+
+All return early or send zero values when mpuAvailable is false.
+
+FINDING [5A-2a] 🐛 HIGH: NO RUNTIME FAILURE DETECTION
+    mpu.getAcceleration() and mpu.getRotation() are called WITHOUT checking
+    return values. The MPU6050 library's I2Cdev reads can fail silently:
+    - If I2C bus locks up → reads return stale/zero data.
+    - If MPU6050 disconnects after init → reads return garbage or zeros.
+    - The raw int16_t values are divided by 16384.0 / 131.0 → could produce
+      NaN or extreme values if the I2C transaction fails.
+
+    There is ZERO runtime error detection for MPU6050 after initialization.
+    No I2C error checking (Wire.endTransmission() return values are only
+    checked in scanI2CDevices, not in sensor reads). No plausibility checks
+    on accelerometer values. No watchdog to detect MPU6050 going offline.
+
+    IMPACT: If MPU6050 disconnects during operation:
+    - Tilt gestures will stop working (feeding, cleaning, menu navigation).
+    - Step counter will read zero.
+    - Game tilt controls will freeze.
+    - Sensor data sent to server will be garbage.
+    - But the device won't crash — it will just silently malfunction.
+
+FINDING [5A-2b] ⚠️ MEDIUM: NO I2C BUS RECOVERY
+    If the I2C bus locks up (SDA held low by a slave), there's no recovery
+    mechanism. No Wire.end() / Wire.begin() cycle, no clock stretching
+    recovery, no GPIO bit-banging to free the bus. The only recovery is
+    a device reboot (which happens daily or on low heap).
+
+
+================================================================================
+5B. CAMERA ERROR HANDLING
+================================================================================
+
+[5B-1] CAMERA INITIALIZATION (initCamera, lines 4056-4098)
+--------------------------------------------------------------------------------
+    esp_err_t err = esp_camera_init(&config);
+    if (err != ESP_OK) {
+        Serial.printf("Camera init failed with error 0x%x\n", err);
+        return false;
+    }
+    cameraReady = true;
+
+FINDING [5B-1a] ⚠️ MEDIUM: initCamera() returns false on failure, but the
+    caller in setup() (line 1525: `initCamera()`) does NOT check the return
+    value. If camera init fails, cameraReady stays false, and the camera
+    monitor task will loop indefinitely doing nothing (line 4162 checks
+    cameraReady). This is graceful degradation but never logged as a
+    persistent error condition.
+
+[5B-2] CAMERA FRAME CAPTURE
+--------------------------------------------------------------------------------
+Two locations capture camera frames:
+
+(a) cameraMonitorTask() — line 4175:
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+        // process...
+        esp_camera_fb_return(fb);
+    } else {
+        Serial.println("❌ Core 0: Camera capture failed");
+    }
+    capturingForFeeding = false;
+
+    ✅ NULL check present. On NULL, feeding capture is silently cancelled.
+
+(b) captureImageBase64() — line 5179:
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        Serial.println("❌ Camera capture failed");
+        return "";
+    }
+    // ... process + esp_camera_fb_return(fb)
+
+    ✅ NULL check present.
+
+FINDING [5B-2a] ⚠️ LOW: If esp_camera_fb_get() returns NULL repeatedly
+    (camera hardware failure), the feeding gesture will repeatedly fail
+    silently. The user tilts to feed, eating animation plays, but no image
+    is sent. There's no counter or flag to indicate persistent camera failure.
+    The user has no feedback that the camera is broken.
+
+FINDING [5B-2b] ⚠️ LOW: ps_malloc() failure in cameraMonitorTask (line
+    4186) is checked and logged, but the capture is silently dropped. If
+    PSRAM is exhausted, every capture attempt will allocate and fail.
+
+
+================================================================================
+5C. MICROPHONE ERROR HANDLING
+================================================================================
+
+[5C-1] PDM MIC INITIALIZATION (initAudio, lines 4100-4150)
+--------------------------------------------------------------------------------
+Three-stage init with error checks at each stage:
+
+    err = i2s_new_channel(...)    // Line ~4109
+    if (err != ESP_OK) { return false; }
+
+    err = i2s_channel_init_pdm_rx_mode(...)  // Line 4130
+    if (err != ESP_OK) { return false; }
+
+    err = i2s_channel_enable(...)   // Line 4136
+    if (err != ESP_OK) { return false; }
+
+    vad_buffer = (int16_t *)malloc(VAD_BUFFER_SIZE * sizeof(int16_t));
+    if (!vad_buffer) { return false; }
+
+    micReady = true;
+
+FINDING [5C-1a] ⚠️ MEDIUM: initAudio() returns false on failure, but the
+    caller in setup() (line 1529: `initAudio()`) does NOT check the return
+    value. Same pattern as camera. micReady stays false and the audio task
+    will spin doing nothing (line 4228 checks micReady).
+
+FINDING [5C-1b] ⚠️ LOW: On i2s_channel_init_pdm_rx_mode() or
+    i2s_channel_enable() failure, the previously allocated channel (from
+    i2s_new_channel) is NOT freed/deleted. Minor resource leak on init failure.
+
+[5C-2] MICROPHONE RUNTIME READ (audioMonitorTask)
+--------------------------------------------------------------------------------
+i2s_channel_read() is called at two locations:
+
+(a) STT mode — line 4239:
+    esp_err_t stt_err = i2s_channel_read(rx_handle, vad_buffer, ...);
+    if (stt_err == ESP_OK && stt_bytes_read > 0) {
+        // process
+    }
+    // else: silently skipped
+
+(b) VAD mode — line 4340:
+    esp_err_t err = i2s_channel_read(rx_handle, vad_buffer, ...);
+    if (err != ESP_OK || bytes_read == 0) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+    }
+
+FINDING [5C-2a] ⚠️ LOW: i2s_channel_read() failures are silently ignored
+    (just delay + continue). If the I2S peripheral locks up, the audio task
+    will spin in an infinite loop of read-fail-delay. No escalation, no
+    re-init attempt, no error counter. This loop runs at 1ms intervals.
+
+FINDING [5C-2b] ℹ️ LOW: STT mode PSRAM allocation failure (line 4248) is
+    handled correctly — sttModeActive is set to false and the mode exits.
+
+
+================================================================================
+5D. OLED ERROR HANDLING
+================================================================================
+
+[5D-1] OLED INITIALIZATION (lines 1366-1372)
+--------------------------------------------------------------------------------
+    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+        Serial.println("❌ OLED initialization failed!");
+        displayReady = false;
+    } else {
+        displayReady = true;
+    }
+
+✅ GOOD — display.begin() return value is checked. displayReady flag is
+used throughout the codebase to guard OLED operations.
+
+[5D-2] OLED RUNTIME ERROR DETECTION
+--------------------------------------------------------------------------------
+Functions that use the display check displayReady:
+- oledTask line 1335
+- drawProvisioningQR line 1021
+- showWiFiConnectedScreen line 1035
+- displayPetAnimation line 3324
+- Various animation functions (1639, 1658, 1682, 1832)
+
+FINDING [5D-2a] 🐛 HIGH: NO I2C ERROR DETECTION FOR DISPLAY
+    After initialization, display.clearDisplay(), display.drawBitmap(),
+    display.display(), display.setCursor(), etc. are called without ANY
+    error checking. The Adafruit SSD1306 library does not return error
+    codes from most methods — they are void functions.
+
+    If the OLED disconnects or the I2C bus has errors:
+    - Wire.endTransmission() inside the Adafruit library will fail silently.
+    - The display calls won't crash but will become no-ops.
+    - There is NO mechanism to detect that the OLED has gone offline.
+    - The oledTask will continue running, wasting CPU on invisible draws.
+    - User will see a blank/frozen screen with no indication in logs.
+
+FINDING [5D-2b] ⚠️ LOW: The oledTask runs continuously at ~10 FPS
+    (100ms vTaskDelay). Even if the display is offline, the I2C writes
+    continue, consuming bus bandwidth and potentially blocking MPU6050
+    reads on the shared I2C bus.
+
+
+================================================================================
+5E. PREFERENCES / NVS ERROR HANDLING
+================================================================================
+
+[5E-1] NVS WRITE FAILURE HANDLING
+--------------------------------------------------------------------------------
+savePetState() at lines 351-366:
+
+    petPrefs.begin("pet_state", false);
+    petPrefs.putInt("hunger", g_petState.hunger);
+    petPrefs.putInt("health", g_petState.health);
+    // ... 10 more putInt/putUInt/putBool calls ...
+    petPrefs.end();
+
+FINDING [5E-1a] 🐛 HIGH: NO ERROR CHECKING ON NVS WRITES
+    None of the Preferences put*() calls check return values.
+    Preferences::putInt() returns size_t (bytes written, 0 on failure).
+    Preferences::begin() returns bool (false on failure).
+    If NVS is full or flash is worn out:
+    - putInt() returns 0 → silently ignored.
+    - begin() returns false → silently ignored, subsequent writes go nowhere.
+    - Pet state is "saved" but actually lost → desync on reboot.
+
+    Same issue for WiFi credential storage (saveCredentialToNVS, lines 935-948):
+    - wifiPrefs.putString return values not checked.
+    - wifiPrefs.putInt return value not checked.
+
+[5E-2] NVS WRITE FREQUENCY (FLASH WEAR CONCERN)
+--------------------------------------------------------------------------------
+savePetState() is called from:
+1. handlePhysiology() — every PHYSIO_TICK_MS (360000ms = 6 minutes)
+   *** NOTE: Comment says 120 seconds but #define is 360000ms = 6 min ***
+2. Feeding gesture — each time user feeds pet (~user-triggered)
+3. Cleaning gesture — each time user cleans poop (~user-triggered)
+4. Injection gesture — each time user gives medicine (~user-triggered)
+5. Egg hatching — once at first boot
+6. Low-heap reboot — once per emergency reboot
+7. Daily reboot — once per 24h
+
+CALCULATION:
+- Routine writes: ~240 writes/day (every 6 minutes = 10/hour * 24)
+- User actions: maybe ~20/day (feeding, cleaning, etc.)
+- Total: ~260 writes/day
+
+ESP32 NVS uses SPI flash with ~100,000 erase cycles per sector.
+NVS wear leveling distributes across pages.
+260 writes/day * 365 days = ~95,000 writes/year.
+Each savePetState() writes 12 keys → 12 NVS entries per call.
+
+FINDING [5E-2a] ⚠️ MEDIUM: NVS WEAR CONCERN
+    ~260 save operations per day × 12 keys = ~3,120 NVS writes/day.
+    Over a year: ~1.14 million key writes. ESP32's NVS has wear leveling,
+    but the underlying flash has limited erase cycles. For a consumer device
+    expected to last years, this write rate is borderline. The PHYSIO_TICK_MS
+    interval (6 minutes) is the main contributor.
+
+    RECOMMENDATION: Save pet state less frequently (every 30 min or only on
+    significant changes) and/or before reboots. Alternatively, use a dirty
+    flag to only write changed values.
+
+
+================================================================================
+5F. SERVER RESPONSE PARSING
+================================================================================
+
+[5F-1] MALFORMED JSON HANDLING
+--------------------------------------------------------------------------------
+All JSON parsing uses ArduinoJson with DeserializationError check:
+
+(a) getOLEDDisplayFromServer (line 4566):
+    DeserializationError error = deserializeJson(g_oledDoc, response);
+    if (!error) { ... }
+    // If error → silently falls through to http.end()
+    FINDING [5F-1a] ⚠️ LOW: Malformed JSON is silently ignored — no log.
+
+(b) checkAndPerformOTA (line 4829):
+    DeserializationError error = deserializeJson(otaDoc, response);
+    if (error) {
+        Serial.printf("❌ OTA: JSON parse error: %s\n", error.c_str());
+        otaUpdateRequested = false;
+        return;
+    }
+    ✅ GOOD — error logged, OTA aborted cleanly.
+
+(c) notifyServerStartupComplete (line 5133):
+    DeserializationError error = deserializeJson(responseDoc, response);
+    if (!error) { ... } else {
+        Serial.printf("⚠️ JSON parse error: %s\n", error.c_str());
+    }
+    ✅ GOOD — error logged.
+
+(d) sendSTTAudioChunk (line 5958):
+    DeserializationError err = deserializeJson(doc, response);
+    if (!err && doc.containsKey("text")) { ... }
+    ✅ GOOD — only processes valid JSON with expected fields.
+
+[5F-2] MISSING JSON FIELDS HANDLING
+--------------------------------------------------------------------------------
+getOLEDDisplayFromServer (the main polling function) uses containsKey()
+extensively for ALL fields:
+- animation_id, age, show_food_icon, has_poop, happiness, discipline,
+  is_hungry, current_emotion, ota_update, events
+
+Each field is checked with g_oledDoc.containsKey("field") before access.
+
+FINDING [5F-2a] ✅ EXCELLENT: The OLED polling function is robust against
+    missing fields. Every field is optional and checked before use.
+
+FINDING [5F-2b] ⚠️ LOW: In checkAndPerformOTA(), the fields "version",
+    "download_url", "file_size", "checksum" use the `| default` operator:
+        String newVersion = String(otaDoc["version"] | "?");
+        String downloadUrl = String(otaDoc["download_url"] | "");
+        int fileSize = otaDoc["file_size"] | 0;
+    If download_url is missing → empty string → http.begin("") → will fail.
+    If file_size is 0 → content length mismatch → OTA aborts.
+    These are handled by downstream checks, but there's no early validation
+    of required fields.
+
+FINDING [5F-2c] ⚠️ LOW: processEvent() at line 5739 checks for null
+    event_type and message pointers, which is good. But it doesn't validate
+    that the JsonObject fields are strings (not numbers or nested objects).
+    If server sends wrong types, as<const char*>() returns nullptr, which
+    is caught by the null check.
+
+[5F-3] JSON BUFFER OVERFLOW PROTECTION
+--------------------------------------------------------------------------------
+The codebase uses StaticJsonDocument with fixed sizes:
+- g_oledDoc: 768 bytes (OLED + events, reusable global)
+- g_sensorDoc: 2048 bytes (sensor data, reusable global)
+- OTA doc: 512 bytes (local in checkAndPerformOTA)
+- Startup response: 768 bytes (local in notifyServerStartupComplete)
+- STT response: 1024 bytes (local in sendSTTAudioChunk)
+- Reward doc: 256 bytes
+- Event ack: 256 bytes
+- OTA progress: 256 bytes
+
+FINDING [5F-3a] ⚠️ LOW: If server sends a response larger than the
+    StaticJsonDocument capacity, deserializeJson returns
+    DeserializationError::NoMemory. This is checked and handled gracefully
+    in most cases. However, g_oledDoc at 768 bytes could overflow if the
+    server sends many bundled events — each event with long message strings
+    could exceed the buffer.
+
+
+================================================================================
+SUMMARY OF ALL FINDINGS
+================================================================================
+
+🐛 BUGS (4):
+  [4B-2d/4D-3b] OTA retry loop defeated — otaUpdateRequested cleared prematurely
+  [4B-2f]  sendAudioData uses http.begin(URL) without sslNet — HTTPS broken
+  [4B-2j]  sendSTTAudioChunk doesn't check http.begin() return value
+  [5A-2a]  No runtime MPU6050 failure detection — silent malfunction
+  [5D-2a]  No I2C error detection for OLED display at runtime
+  [5E-1a]  No error checking on NVS writes — silent data loss
+
+⚠️ MEDIUM ISSUES (9):
+  [4A-2a]  WiFi reconnect only tries most recent stored credential
+  [4A-2b]  No reconnect backoff — retry storm when WiFi persistently down
+  [4A-3a]  No server-unreachable watchdog — keeps hammering dead server
+  [4A-4a]  In-flight HTTP requests handled by per-function WiFi check (OK-ish)
+  [4B-2e]  notifyServerStartupComplete holds HTTP connection open 3s unnecessarily
+  [4C-1a]  setInsecure() disables all TLS certificate verification
+  [4D-3a]  No explicit OTA rollback API call (esp_ota_mark_app_valid)
+  [5C-1a]  initAudio() return value not checked by caller
+  [5E-2a]  NVS write frequency (~3120 writes/day) borderline for flash wear
+
+⚠️ LOW ISSUES (14):
+  [4A-2c]  No WiFi event callback for station-mode disconnects
+  [4A-5a]  Failed network requests discarded (no re-queue)
+  [4B-2a]  getOLEDDisplayFromServer has no WiFi check at top
+  [4B-2b]  Malformed JSON in OLED poll silently ignored
+  [4B-2g]  sendAllDataToServer uses 4KB stack StaticJsonDocument (legacy)
+  [4B-2h]  sendCleanRequest/sendCoverHappy/sendInject missing setConnectTimeout
+  [4B-2i]  acknowledgeEvent has no WiFi check
+  [4B-4a]  OTA blocks network queue for extended period
+  [4C-2a]  sslNet has no explicit TLS handshake timeout
+  [5B-1a]  initCamera() return value not checked by caller
+  [5B-2a]  Repeated camera capture NULL not escalated
+  [5C-1b]  I2S channel not freed on partial init failure
+  [5C-2a]  i2s_channel_read failures silently ignored — infinite retry
+  [5F-1a]  OLED poll malformed JSON not logged
+
+✅ STRENGTHS:
+  - trackHttpResult() + resetSSLConnection() = self-healing SSL
+  - OTA update is the most robust HTTP path (stall detection, read error
+    tolerance, exponential backoff, task suspension, progress reporting)
+  - All HTTP functions call http.end() on every code path
+  - All optional JSON fields use containsKey() before access
+  - mpuAvailable / cameraReady / micReady / displayReady flags provide
+    graceful degradation when hardware is absent
+  - Heap monitoring with auto-reboot below 20KB
+  - Daily maintenance reboot clears any accumulated issues
+  - Queue-driven network architecture keeps HTTP off Core 0
+  - Global StaticJsonDocuments avoid heap fragmentation
+
+================================================================================
+END OF AUDIT — PARTS 4 & 5
+================================================================================
