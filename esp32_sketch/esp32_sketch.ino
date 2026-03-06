@@ -33,6 +33,10 @@ Required Libraries:
 - ArduinoJson, WiFi, HTTPClient, I2Cdev, MPU6050, esp_camera
 */
 
+// ===== Fix sensor_t conflict: camera must be included before Adafruit =====
+#define sensor_t camera_sensor_t
+#include "esp_camera.h"
+#undef sensor_t
 // ===== REPLACED: I2Cdev MPU6050.h → Adafruit MPU6050 =====
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
@@ -40,7 +44,6 @@ Required Libraries:
 // ===== END REPLACEMENT =====
 #include "base64.h"
 #include "driver/i2s_pdm.h"
-#include "esp_camera.h"
 #include "fb_gfx.h"
 #include "img_converters.h"
 #include <ArduinoJson.h>
