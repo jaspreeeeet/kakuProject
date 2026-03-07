@@ -2,7 +2,7 @@
 // ║  FORCE_EGG_HATCH — set to true to replay egg animation     ║
 // ║  Set false for normal operation (egg plays once, then never)║
 // ╚══════════════════════════════════════════════════════════════╝
-#define FORCE_EGG_HATCH true   // ← Change to true to replay egg animation
+#define FORCE_EGG_HATCH false  // ← Change to true to replay egg animation
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -356,10 +356,12 @@ struct PetLocalState {
 PetLocalState g_petState;
 SemaphoreHandle_t petStateMutex = NULL;     // Protect g_petState cross-core access
 unsigned long lastPhysioTick = 0;
-#define PHYSIO_TICK_MS 360000 // Run physiology logic every 120 seconds
+#define PHYSIO_TICK_MS 120000 // Run physiology logic every 120 seconds
 
 void savePetState() {
-  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
+  if (petStateMutex && xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    Serial.println("[WARN] petStateMutex timeout in savePetState"); return;
+  }
   petPrefs.begin("pet_state", false);
   petPrefs.putInt("hunger", g_petState.hunger);
   petPrefs.putInt("health", g_petState.health);
@@ -379,7 +381,9 @@ void savePetState() {
 }
 
 void loadPetState() {
-  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
+  if (petStateMutex && xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    Serial.println("[WARN] petStateMutex timeout in loadPetState"); return;
+  }
   petPrefs.begin("pet_state", true); // Read-only
   g_petState.hunger = petPrefs.getInt("hunger", 0);
   g_petState.health = petPrefs.getInt("health", 100);
@@ -469,7 +473,9 @@ bool prevShowFoodIcon = false;               // Track showFoodIcon transitions f
 
 // Helper to sync struct to legacy globals used by UI
 void syncLocalStateToUI() {
-  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
+  if (petStateMutex && xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    Serial.println("[WARN] petStateMutex timeout in syncLocalStateToUI"); return;
+  }
   petAgeInt = g_petState.ageInt;
   petHappiness = g_petState.happiness;
   petDiscipline = g_petState.discipline;
@@ -833,6 +839,7 @@ size_t stt_wav_to_send_size = 0;
 SemaphoreHandle_t sttDataMutex = NULL;         // Protect stt_wav_to_send
 SemaphoreHandle_t i2cMutex = NULL;             // Protect MPU6050 I2C cross-core access
 SemaphoreHandle_t uiStringsMutex = NULL;       // Protect currentScreenType/currentEmotion cross-core
+SemaphoreHandle_t displayMutex = NULL;         // Protect display object cross-core access (Bug #1 fix)
 
 // PDM microphone handle
 i2s_chan_handle_t rx_handle = NULL;
@@ -941,9 +948,9 @@ void displayHealthMenu();      // Display health menu screen
 void displayStatusInfoMenu();  // Display status info menu (smiley + age + flash
                                // + score)
 void displayStatsMenu();     // Display stats menu (happiness + discipline bars)
-void checkMenuTiltGesture(); // Right tilt 2s hold → cycle menu
+void checkMenuTiltGesture(float accelX_g); // Right tilt 2s hold → cycle menu
 bool isDeviceNeutral(); // True when device lies flat (no significant X/Y tilt)
-void detectHardwareStep(); // Count steps via MPU6050 stoss method
+void detectHardwareStep(float gx, float gy, float gz); // Count steps via MPU6050 stoss method
 const char *detectDirection(SensorData data); // Orientation from accel data
 bool isDeviceInverted();                      // True when device is face-down
 void displaySleepingAnimation();              // 2-frame sleeping animation
@@ -955,7 +962,7 @@ void networkTask(
     void *parameter); // Dedicated HTTP task on Core 1 (queue-driven)\nvoid
                       // checkAndPerformOTA();           // Check firmware
                       // server and perform OTA if newer version exists
-void checkSTTTiltGesture();      // Left tilt 10s hold → activate STT mode
+void checkSTTTiltGesture(float accelX_g);      // Left tilt 10s hold → activate STT mode
 void drawTalkIndicator();        // Draw "Talk" label at OLED top-right
 void sendSTTAudioChunk();        // Send WAV to /api/audio-stt (called from networkTask)
 void generateSTTWavHeader(uint8_t *header, uint32_t data_size, uint32_t sample_rate);
@@ -1402,7 +1409,11 @@ void oledTask(void *parameter) {
 
   while (true) {
     if (displayReady && startupComplete) {
-      displayPetAnimation(); // Draw animation (non-blocking)
+      // FIX Bug #1: Acquire displayMutex to prevent cross-core display corruption
+      if (displayMutex && xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        displayPetAnimation();
+        xSemaphoreGive(displayMutex);
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(125)); // ~8 FPS — sufficient for 64x32 OLED, saves CPU/power
   }
@@ -1484,6 +1495,11 @@ void enterDeepSleep() {
   Serial.println("  Entering DEEP SLEEP — shake to wake!");
   Serial.println("========================================");
 
+  // FIX Bug #2/#3: Suspend tasks FIRST to prevent display/I2C races
+  if (oledTaskHandle) { vTaskSuspend(oledTaskHandle); Serial.println("⏸️ oledTask suspended"); }
+  if (audioTaskHandle) { vTaskSuspend(audioTaskHandle); Serial.println("⏸️ audioTask suspended"); }
+  if (cameraTaskHandle) { vTaskSuspend(cameraTaskHandle); Serial.println("⏸️ cameraTask suspended"); }
+
   // Save pet state to NVS before sleeping (survives deep sleep reboot)
   savePetState();
   Serial.println("💾 Pet state saved to NVS");
@@ -1491,7 +1507,7 @@ void enterDeepSleep() {
   // Power down camera if it was on (pet may be hungry when inactivity triggers)
   deinitCamera();
 
-  // Show sleep message on OLED
+  // Show sleep message on OLED (safe now — oledTask is suspended)
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -1500,7 +1516,7 @@ void enterDeepSleep() {
   display.setCursor(2, 20);
   display.print("Shake 2 wake");
   display.display();
-  delay(500);
+  vTaskDelay(pdMS_TO_TICKS(500));  // FIX Bug #12: vTaskDelay instead of delay
   display.clearDisplay();
   display.display();  // Blank OLED before sleep
 
@@ -1511,14 +1527,14 @@ void enterDeepSleep() {
 
   // Reconfigure MPU for active-LOW wakeup
   configureMPU6050ForSleep();
-  delay(50);
+  vTaskDelay(pdMS_TO_TICKS(50));  // FIX Bug #12
 
   // Wait for INT pin to go HIGH (idle) before sleeping
   pinMode(MPU_INT_PIN, INPUT_PULLUP);
   int retries = 20;
   while (digitalRead(MPU_INT_PIN) == LOW && retries > 0) {
     mpu.getMotionInterruptStatus();
-    delay(100);
+    vTaskDelay(pdMS_TO_TICKS(100));  // FIX Bug #12
     retries--;
   }
   if (digitalRead(MPU_INT_PIN) == LOW) {
@@ -1533,7 +1549,7 @@ void enterDeepSleep() {
   Serial.println("Deep sleep: ext1 wakeup on GPIO2 LOW");
 
   Serial.flush();
-  delay(100);
+  vTaskDelay(pdMS_TO_TICKS(100));  // FIX Bug #12
   esp_deep_sleep_start();
   // Execution stops here — device reboots on wake
 }
@@ -1553,6 +1569,18 @@ void setup() {
   // Initialize LED (GPIO21, active LOW on XIAO ESP32 S3)
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);  // HIGH = OFF (active LOW)
+
+  // ===== FIX Bug #8: Create ALL mutexes EARLY — before any code that uses them =====
+  audioMutex = xSemaphoreCreateMutex();
+  cameraMutex = xSemaphoreCreateMutex();
+  cpuFreqMutex = xSemaphoreCreateMutex();
+  petStateMutex = xSemaphoreCreateMutex();
+  i2cMutex = xSemaphoreCreateMutex();
+  uiStringsMutex = xSemaphoreCreateMutex();
+  displayMutex = xSemaphoreCreateMutex();
+  networkDataMutex = xSemaphoreCreateMutex();
+  sttDataMutex = xSemaphoreCreateMutex();
+  networkQueue = xQueueCreate(8, sizeof(uint8_t));
 
   // ================= WIFI PROVISIONING FLOW =================
   // 1. Try NVS stored credentials (3 retries each)
@@ -1666,19 +1694,20 @@ void setup() {
       slideInfantSlowlyFromLeft();
 
       // Reset local pet state for fresh INFANT
-      if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-      g_petState.hunger = 0;
-      g_petState.health = 100;
-      g_petState.energy = 100;
-      g_petState.happiness = 100;
-      g_petState.discipline = 100;
-      g_petState.xp = 0;
-      g_petState.level = 1;
-      g_petState.ageInt = 0;
-      g_petState.totalUptimeSecs = 0;
-      g_petState.isSick = false;
-      g_petState.hasPoop = false;
-      if (petStateMutex) xSemaphoreGive(petStateMutex);
+      if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        g_petState.hunger = 0;
+        g_petState.health = 100;
+        g_petState.energy = 100;
+        g_petState.happiness = 100;
+        g_petState.discipline = 100;
+        g_petState.xp = 0;
+        g_petState.level = 1;
+        g_petState.ageInt = 0;
+        g_petState.totalUptimeSecs = 0;
+        g_petState.isSick = false;
+        g_petState.hasPoop = false;
+        if (petStateMutex) xSemaphoreGive(petStateMutex);
+      }
       savePetState(); // Save fresh stats to NVS
 
       // Mark hatching as done — will never play again
@@ -1697,6 +1726,7 @@ void setup() {
     startupComplete = true;
     showHomeIcon = true;
     syncLocalStateToUI();
+    lastPhysioTick = millis(); // Don't fire physiology immediately on boot
     Serial.println("✅ Startup complete! Main screen ready.");
   }
 
@@ -1769,19 +1799,9 @@ void setup() {
   setCpuFrequencyMhz(80);
   Serial.println("⚡ CPU idle at 80MHz (boosts to 160/240MHz for network/camera)");
 
-  // Create mutexes for synchronization
-  audioMutex = xSemaphoreCreateMutex();
-  cameraMutex = xSemaphoreCreateMutex();
-  cpuFreqMutex = xSemaphoreCreateMutex(); // CPU frequency race guard
-  petStateMutex = xSemaphoreCreateMutex();   // g_petState cross-core guard
-  i2cMutex = xSemaphoreCreateMutex();        // MPU6050 I2C bus cross-core guard
-  uiStringsMutex = xSemaphoreCreateMutex();  // currentScreenType/currentEmotion guard
-
-  // Create network queue and mutex
-  networkDataMutex = xSemaphoreCreateMutex();
-  sttDataMutex = xSemaphoreCreateMutex();     // STT WAV buffer handoff guard
-  networkQueue =
-      xQueueCreate(8, sizeof(uint8_t)); // Queue depth 8, each item 1 byte
+  // Mutexes and queue already created early in setup() (Bug #8 fix)
+  // audioMutex, cameraMutex, cpuFreqMutex, petStateMutex, i2cMutex,
+  // uiStringsMutex, displayMutex, networkDataMutex, sttDataMutex, networkQueue
 
   // Start audio monitoring task on Core 0 (dedicated to audio/VAD)
   xTaskCreatePinnedToCore(audioMonitorTask, // Task function
@@ -1823,8 +1843,8 @@ void setup() {
   sslNet.setTimeout(10);
 
   // Start dedicated network task on Core 1 (HTTP only, queue-driven)
-  loadPetState();
-  syncLocalStateToUI();
+  // FIX Bug #9: Removed duplicate loadPetState()/syncLocalStateToUI() —
+  // already called in hatching flow above
 
   xTaskCreatePinnedToCore(
       networkTask, // Task function
@@ -3047,11 +3067,12 @@ void checkFeedingGesture() {
       Serial.println("🍴 Starting eating animation!");
 
       // Local state update: Feeding reduces hunger and gives XP
-      if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-      g_petState.hunger = max(0, g_petState.hunger - 40);
-      g_petState.xp += 20;
-      g_petState.energy = min(100, g_petState.energy + 20);
-      if (petStateMutex) xSemaphoreGive(petStateMutex);
+      if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        g_petState.hunger = max(0, g_petState.hunger - 40);
+        g_petState.xp += 20;
+        g_petState.energy = min(100, g_petState.energy + 20);
+        if (petStateMutex) xSemaphoreGive(petStateMutex);
+      }
       savePetState();
       syncLocalStateToUI();
 
@@ -3104,11 +3125,12 @@ void checkCleaningGesture() {
       Serial.println("🧹 Starting cleaning animation!");
 
       // Local state update: Cleaning clears poop and gives happiness
-      if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-      g_petState.hasPoop = false;
-      g_petState.happiness = min(100, g_petState.happiness + 20);
-      g_petState.xp += 10;
-      if (petStateMutex) xSemaphoreGive(petStateMutex);
+      if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        g_petState.hasPoop = false;
+        g_petState.happiness = min(100, g_petState.happiness + 20);
+        g_petState.xp += 10;
+        if (petStateMutex) xSemaphoreGive(petStateMutex);
+      }
       poopClearedTime = millis(); // Start 15-min play icon timer
       savePetState();
       syncLocalStateToUI();
@@ -3165,10 +3187,11 @@ void playInjectionAnimation() {
         Serial.println("✅ Medicine given! Pet is now healthy!");
 
         // Local state update: Medicine cures sickness and restores health
-        if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-        g_petState.isSick = false;
-        g_petState.health = min(100, g_petState.health + 30);
-        if (petStateMutex) xSemaphoreGive(petStateMutex);
+        if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+          g_petState.isSick = false;
+          g_petState.health = min(100, g_petState.health + 30);
+          if (petStateMutex) xSemaphoreGive(petStateMutex);
+        }
         savePetState();
         syncLocalStateToUI();
 
@@ -3187,21 +3210,14 @@ void playInjectionAnimation() {
 
 // ================= MENU TILT GESTURE (RIGHT TILT 2 SEC) =================
 // Right tilt + hold 2 seconds → cycle through menus
-void checkMenuTiltGesture() {
+// FIX Bug #4: Accept cached accelX to avoid redundant I2C reads
+void checkMenuTiltGesture(float accelX_g) {
   if (!mpuAvailable)
     return;
   if ((millis() - lastMenuCycleTime) < MENU_CYCLE_COOLDOWN)
     return; // Respect cooldown
 
-  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-    Serial.println("[I2C] Mutex timeout in checkMenuTiltGesture"); return;
-  }
-  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
-  if (i2cMutex) xSemaphoreGive(i2cMutex);
-
-  float accelX = accelEvent.acceleration.x / 9.81;
-
-  if (accelX > 0.8) {
+  if (accelX_g > 0.8) {
     if (!holdingRightForMenu) {
       holdingRightForMenu = true;
       menuTiltHoldStartTime = millis();
@@ -3228,19 +3244,10 @@ void checkMenuTiltGesture() {
 
 // Hardware step counter — stoss/barrier method (same algorithm as original
 // server detect_steps) Uses g-unit values so barrier is sensor-independent
-void detectHardwareStep() {
+// FIX Bug #4: Accept cached sensor values to avoid redundant I2C reads
+void detectHardwareStep(float gx, float gy, float gz) {
   if (!mpuAvailable)
     return;
-  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-    Serial.println("[I2C] Mutex timeout in detectHardwareStep"); return;
-  }
-  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
-  if (i2cMutex) xSemaphoreGive(i2cMutex);
-
-  // Convert m/s² to g-units for step detection
-  float gx = accelEvent.acceleration.x / 9.81f;
-  float gy = accelEvent.acceleration.y / 9.81f;
-  float gz = accelEvent.acceleration.z / 9.81f;
 
   // Low-pass filter — tracks gravity at ANY tilt orientation
   stepGravX = LP_ALPHA_STEP * stepGravX + (1.0f - LP_ALPHA_STEP) * gx;
@@ -3618,14 +3625,26 @@ void displayPetAnimation() {
       lastScreenDebug = millis();
     }
 
+    // FIX Bug #4: Single MPU read per OLED frame — cache accel values
+    float frameAccelX_g = 0, frameAccelY_g = 0, frameAccelZ_g = 0;
+    if (mpuAvailable) {
+      if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
+        if (i2cMutex) xSemaphoreGive(i2cMutex);
+        frameAccelX_g = accelEvent.acceleration.x / 9.81f;
+        frameAccelY_g = accelEvent.acceleration.y / 9.81f;
+        frameAccelZ_g = accelEvent.acceleration.z / 9.81f;
+      }
+    }
+
     // Check for menu tilt gesture — blocked during game, walking, or sleeping
     if (playGameState != GAME_PLAYING && !petIsWalking && !isDeviceSleeping) {
-      checkMenuTiltGesture();
-      checkSTTTiltGesture(); // Left tilt 10s hold → activate STT mode
+      checkMenuTiltGesture(frameAccelX_g);
+      checkSTTTiltGesture(frameAccelX_g); // Left tilt 10s hold → activate STT mode
     }
 
     // Hardware step detection — update petIsWalking from local timing
-    detectHardwareStep();
+    detectHardwareStep(frameAccelX_g, frameAccelY_g, frameAccelZ_g);
     petIsWalking = (millis() - lastWalkingStepTime) < WALKING_WINDOW_MS;
 
     // Check which screen to display
@@ -4022,7 +4041,9 @@ void handlePhysiology() {
 
   Serial.println("💓 Physiology Tick (120s)");
 
-  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
+  if (petStateMutex && xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    Serial.println("[WARN] petStateMutex timeout in handlePhysiology"); return;
+  }
 
   // 1️⃣ Uptime & Aging
   g_petState.totalUptimeSecs += 120;
@@ -4131,8 +4152,8 @@ void loop() {
     Serial.printf("❌ WiFi disconnected, attempting reconnect (%d/%d)...\n",
                   wifiReconnectFails, WIFI_RECONNECT_MAX_FAILS);
 
-    // Show reconnect attempt on OLED
-    if (displayReady) {
+    // Show reconnect attempt on OLED (FIX Bug #1: protect with displayMutex)
+    if (displayReady && displayMutex && xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       display.clearDisplay();
       display.setTextSize(1);
       display.setTextColor(SSD1306_WHITE);
@@ -4141,6 +4162,7 @@ void loop() {
       display.setCursor(2, 16);
       display.printf("Retry %d/%d", wifiReconnectFails, WIFI_RECONNECT_MAX_FAILS);
       display.display();
+      xSemaphoreGive(displayMutex);
     }
 
     // Try stored credentials first, then hardcoded fallback
@@ -4286,7 +4308,11 @@ void loop() {
   // Handle ISR-based motion detection — reset inactivity timer
   if (motionDetected) {
     motionDetected = false;
-    mpu.getMotionInterruptStatus();  // clear latched interrupt
+    // FIX Bug #5: Protect I2C read with mutex (ISR only sets flag, not I2C)
+    if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      mpu.getMotionInterruptStatus();  // clear latched interrupt
+      xSemaphoreGive(i2cMutex);
+    }
     lastMotionTime = millis();       // any motion resets 2-min sleep countdown
   }
 
@@ -4920,13 +4946,14 @@ void getOLEDDisplayFromServer() {
         int newAge = g_oledDoc["age"].as<int>();
         // Only sync if local age is behind server (e.g., first sync or remote
         // reset)
-        if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-        if (g_petState.ageInt < newAge) {
-          g_petState.ageInt = newAge;
-          if (petStateMutex) xSemaphoreGive(petStateMutex);
-          syncLocalStateToUI();
-        } else {
-          if (petStateMutex) xSemaphoreGive(petStateMutex);
+        if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+          if (g_petState.ageInt < newAge) {
+            g_petState.ageInt = newAge;
+            if (petStateMutex) xSemaphoreGive(petStateMutex);
+            syncLocalStateToUI();
+          } else {
+            if (petStateMutex) xSemaphoreGive(petStateMutex);
+          }
         }
       }
 
@@ -5030,7 +5057,13 @@ void getOLEDDisplayFromServer() {
         if (emotion == "EATING" && screenTypeIs("FOOD_MENU")) {
           Serial.println(
               "😋 Emotion: EATING - triggering animation on FOOD MENU!");
-          playEatingAnimation();
+          // FIX Bug #1.1: Acquire displayMutex — this runs on Core 1 (networkTask)
+          // while oledTask runs on Core 0. Without mutex, both cores write to
+          // the display/I2C simultaneously causing bus collisions.
+          if (displayMutex && xSemaphoreTake(displayMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            playEatingAnimation();
+            xSemaphoreGive(displayMutex);
+          }
           justFinishedEating = true;
           eatingFinishTime = millis();
         }
@@ -5600,19 +5633,20 @@ bool sendSensorDataOnly(SensorData data) {
 
   // Add pet local physiology state so the server dashboard updates
   JsonObject petObj = g_sensorDoc.createNestedObject("pet_state");
-  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-  petObj["hunger"] = g_petState.hunger;
-  petObj["health"] = g_petState.health;
-  petObj["happiness"] = g_petState.happiness;
-  petObj["discipline"] = g_petState.discipline;
-  petObj["energy"] = g_petState.energy;
-  petObj["level"] = g_petState.level;
-  petObj["xp"] = g_petState.xp;
-  petObj["is_sick"] = g_petState.isSick;
-  petObj["has_poop"] = g_petState.hasPoop;
-  petObj["age"] = g_petState.ageInt;
-  petObj["uptime"] = g_petState.totalUptimeSecs;
-  if (petStateMutex) xSemaphoreGive(petStateMutex);
+  if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    petObj["hunger"] = g_petState.hunger;
+    petObj["health"] = g_petState.health;
+    petObj["happiness"] = g_petState.happiness;
+    petObj["discipline"] = g_petState.discipline;
+    petObj["energy"] = g_petState.energy;
+    petObj["level"] = g_petState.level;
+    petObj["xp"] = g_petState.xp;
+    petObj["is_sick"] = g_petState.isSick;
+    petObj["has_poop"] = g_petState.hasPoop;
+    petObj["age"] = g_petState.ageInt;
+    petObj["uptime"] = g_petState.totalUptimeSecs;
+    if (petStateMutex) xSemaphoreGive(petStateMutex);
+  }
 
   // Add sensor batch with all buffered readings
   JsonObject batchObj = g_sensorDoc.createNestedObject("sensor_batch");
@@ -5868,19 +5902,20 @@ void sendAllDataToServer(SensorData data) {
 
   // Add local pet state (Primary Authority)
   JsonObject pet = jsonDoc.createNestedObject("pet_state");
-  if (petStateMutex) xSemaphoreTake(petStateMutex, portMAX_DELAY);
-  pet["hunger"] = g_petState.hunger;
-  pet["health"] = g_petState.health;
-  pet["energy"] = g_petState.energy;
-  pet["happiness"] = g_petState.happiness;
-  pet["discipline"] = g_petState.discipline;
-  pet["xp"] = g_petState.xp;
-  pet["level"] = g_petState.level;
-  pet["age"] = g_petState.ageInt;
-  pet["is_sick"] = g_petState.isSick;
-  pet["has_poop"] = g_petState.hasPoop;
-  pet["uptime"] = g_petState.totalUptimeSecs;
-  if (petStateMutex) xSemaphoreGive(petStateMutex);
+  if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    pet["hunger"] = g_petState.hunger;
+    pet["health"] = g_petState.health;
+    pet["energy"] = g_petState.energy;
+    pet["happiness"] = g_petState.happiness;
+    pet["discipline"] = g_petState.discipline;
+    pet["xp"] = g_petState.xp;
+    pet["level"] = g_petState.level;
+    pet["age"] = g_petState.ageInt;
+    pet["is_sick"] = g_petState.isSick;
+    pet["has_poop"] = g_petState.hasPoop;
+    pet["uptime"] = g_petState.totalUptimeSecs;
+    if (petStateMutex) xSemaphoreGive(petStateMutex);
+  }
 
   String payload;
   serializeJson(jsonDoc, payload);
@@ -6220,7 +6255,8 @@ void generateSTTWavHeader(uint8_t *header, uint32_t data_size, uint32_t sample_r
 }
 
 // Check left-tilt hold gesture to toggle STT mode
-void checkSTTTiltGesture() {
+// FIX Bug #4: Accept cached accelX to avoid redundant I2C reads
+void checkSTTTiltGesture(float accelX_g) {
   if (!mpuAvailable) return;
   // Only allow STT activation on MAIN screen (avoids conflict with 3s left-tilt gestures on menu screens)
   if (!screenTypeIs("MAIN")) {
@@ -6228,12 +6264,7 @@ void checkSTTTiltGesture() {
     return;
   }
 
-  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-    Serial.println("[I2C] Mutex timeout in checkSTTTiltGesture"); return;
-  }
-  mpu.getEvent(&accelEvent, &gyroEvent, &tempEvent);
-  if (i2cMutex) xSemaphoreGive(i2cMutex);
-  float accelX = accelEvent.acceleration.x / 9.81;
+  float accelX = accelX_g;
 
   if (accelX < -0.8) {
     // Device is tilted left
