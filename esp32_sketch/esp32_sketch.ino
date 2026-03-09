@@ -4317,12 +4317,12 @@ void loop() {
     lastMotionTime = millis();       // any motion resets 2-min sleep countdown
   }
 
-  // If no motion for 2 min (or 5 min on FOOD/PLAY menu) → enter hardware deep sleep
+  // If no motion for 2 min (or 5 min on FOOD/PLAY menu or STT active) → enter hardware deep sleep
   // Uses direct ISR-based inactivity (no orientation/inverted check)
-  unsigned long sleepTimeout = (screenTypeIs("FOOD_MENU") || screenTypeIs("PLAY_MENU"))
+  unsigned long sleepTimeout = (screenTypeIs("FOOD_MENU") || screenTypeIs("PLAY_MENU") || sttModeActive) // ADDED sttModeActive FOR STT TIMEOUT
                                  ? INACTIVITY_SLEEP_TIMEOUT_LONG
                                  : INACTIVITY_SLEEP_TIMEOUT;
-  if (mpuAvailable && lastMotionTime > 0 &&
+  if (mpuAvailable && !otaInProgress && lastMotionTime > 0 &&
       (millis() - lastMotionTime >= sleepTimeout)) {
     isDeviceSleeping = true;
     Serial.printf("😴 No motion for %lus → entering DEEP SLEEP\n", sleepTimeout / 1000);
@@ -5152,9 +5152,13 @@ void postOTAProgress(const char *otaStatus, int progress,
 // failure. Flow: check /api/firmware/latest → if newer → download .bin → flash
 // → reboot
 void checkAndPerformOTA() {
+  // FIX: Suspend oledTask FIRST to prevent Core 0 overwriting OTA OLED messages
+  if (oledTaskHandle) vTaskSuspend(oledTaskHandle);
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("⚠️ OTA: WiFi not connected, aborting");
     otaUpdateRequested = false;
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5186,6 +5190,7 @@ void checkAndPerformOTA() {
     Serial.println("❌ OTA: Failed to connect to firmware server");
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5197,6 +5202,7 @@ void checkAndPerformOTA() {
     http.end();
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5207,6 +5213,7 @@ void checkAndPerformOTA() {
     http.end();
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
   response = http.getString();
@@ -5219,6 +5226,7 @@ void checkAndPerformOTA() {
     Serial.printf("❌ OTA: JSON parse error: %s\n", error.c_str());
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5234,6 +5242,7 @@ void checkAndPerformOTA() {
     delay(2000);
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5281,6 +5290,7 @@ void checkAndPerformOTA() {
     postOTAProgress("failed", 0, newVersion, "Failed to connect for download");
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5294,6 +5304,7 @@ void checkAndPerformOTA() {
                     ("Download HTTP error " + String(dlCode)).c_str());
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5304,6 +5315,7 @@ void checkAndPerformOTA() {
     postOTAProgress("failed", 0, newVersion, "Invalid content length");
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 

@@ -4,7 +4,7 @@
 // ║  Only aging/hunger/poop/sickness timers are sped up         ║
 // ╚══════════════════════════════════════════════════════════════╝
 #define FORCE_EGG_HATCH false   // ← Always replay egg animation in test
-#define TEST_START_AGE 0     // ← Set to 0-18 to force pet age (days), 99 = use saved age
+#define TEST_START_AGE 12     // ← Set to 0-18 to force pet age (days), 99 = use saved age
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -65,7 +65,7 @@ Required Libraries:
 
 // ================= FIRMWARE VERSION (increment before each upload)
 // =================
-#define FIRMWARE_VERSION "1.0.5"
+#define FIRMWARE_VERSION "1.0.6"
 
 // ================= WIFI =================
 #define WIFI_SSID "Airtel_BumbleBee-777"
@@ -78,7 +78,7 @@ bool wifiProvisioningMode = false; // True = AP mode active, normal tasks paused
 bool phoneConnectedToAP = false;
 #define MAX_STORED_WIFI 5      // Maximum stored WiFi networks in NVS
 #define WIFI_CONNECT_RETRIES 3 // Retries per credential set
-#define WIFI_RECONNECT_MAX_FAILS 5 // After this many consecutive reconnect failures → AP provisioning
+#define WIFI_RECONNECT_MAX_FAILS 3 // After this many consecutive reconnect failures → AP provisioning
 int wifiReconnectFails = 0;        // Consecutive reconnect failure counter
 const char *AP_SSID = "KAKU_SETUP";
 const char *AP_PASS = "12345678";
@@ -561,8 +561,8 @@ unsigned long lastMotionTime = 0;   // millis() of last MPU motion ISR (inactivi
 unsigned long sleepStartTime = 0;   // When sleep mode started
 uint32_t accumulatedSleepSec =
     0; // Sleep seconds banked, sent on next sensor upload
-const unsigned long INACTIVITY_SLEEP_TIMEOUT = 120000;        // 2 min no-motion → deep sleep
-const unsigned long INACTIVITY_SLEEP_TIMEOUT_LONG = 300000;  // 5 min for FOOD_MENU / PLAY_MENU
+const unsigned long INACTIVITY_SLEEP_TIMEOUT = 360000;        // 2 min no-motion → deep sleep
+const unsigned long INACTIVITY_SLEEP_TIMEOUT_LONG = 500000;  // 5 min for FOOD_MENU / PLAY_MENU
 
 // RTC memory — survives deep sleep reboots
 RTC_DATA_ATTR uint32_t rtcWakeCount = 0;  // Deep sleep wake cycle counter
@@ -734,7 +734,7 @@ bool stt_has_voice = false;                    // VAD flag for current 5s window
 #define STT_SEND_INTERVAL    3000              // Send WAV chunk every 3 seconds (lower latency)
 #define STT_MAX_AUDIO_SIZE   (16000 * 2 * 4)  // ~128KB max (4s of 16kHz 16-bit mono)
 #define STT_TIMEOUT_MS       120000            // 120s inactivity → disable STT
-#define STT_TILT_HOLD_TIME   10000             // 10s left-tilt hold to activate
+#define STT_TILT_HOLD_TIME   5000             // 10s left-tilt hold to activate
 #define STT_VAD_THRESHOLD    1200              // Energy threshold for STT voice detection
 // STT tilt gesture tracking
 bool holdingLeftForSTT = false;
@@ -4320,12 +4320,12 @@ void loop() {
     lastMotionTime = millis();       // any motion resets 2-min sleep countdown
   }
 
-  // If no motion for 2 min (or 5 min on FOOD/PLAY menu) → enter hardware deep sleep
+  // If no motion for 2 min (or 5 min on FOOD/PLAY menu or STT active) → enter hardware deep sleep
   // Uses direct ISR-based inactivity (no orientation/inverted check)
-  unsigned long sleepTimeout = (screenTypeIs("FOOD_MENU") || screenTypeIs("PLAY_MENU"))
+  unsigned long sleepTimeout = (screenTypeIs("FOOD_MENU") || screenTypeIs("PLAY_MENU") || sttModeActive) // ADDED sttModeActive FOR STT TIMEOUT
                                  ? INACTIVITY_SLEEP_TIMEOUT_LONG
                                  : INACTIVITY_SLEEP_TIMEOUT;
-  if (mpuAvailable && lastMotionTime > 0 &&
+  if (mpuAvailable && !otaInProgress && lastMotionTime > 0 &&
       (millis() - lastMotionTime >= sleepTimeout)) {
     isDeviceSleeping = true;
     Serial.printf("😴 No motion for %lus → entering DEEP SLEEP\n", sleepTimeout / 1000);
@@ -4440,7 +4440,7 @@ bool initCamera() {
   config.xclk_freq_hz =
       10000000; // 10 MHz — reduced from 20 MHz (less heat, stable)
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_QQVGA; // 160x120 - reduced for power
+  config.frame_size = FRAMESIZE_QVGA; // 160x120 - reduced for power
   config.jpeg_quality = 20;            // Lower quality = less heat
   config.fb_count = 1;                 // Single buffer = less memory
   config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -5169,9 +5169,13 @@ void postOTAProgress(const char *otaStatus, int progress,
 // failure. Flow: check /api/firmware/latest → if newer → download .bin → flash
 // → reboot
 void checkAndPerformOTA() {
+  // FIX: Suspend oledTask FIRST to prevent Core 0 overwriting OTA OLED messages
+  if (oledTaskHandle) vTaskSuspend(oledTaskHandle);
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("⚠️ OTA: WiFi not connected, aborting");
     otaUpdateRequested = false;
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5203,6 +5207,7 @@ void checkAndPerformOTA() {
     Serial.println("❌ OTA: Failed to connect to firmware server");
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5214,6 +5219,7 @@ void checkAndPerformOTA() {
     http.end();
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5224,6 +5230,7 @@ void checkAndPerformOTA() {
     http.end();
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
   response = http.getString();
@@ -5236,6 +5243,7 @@ void checkAndPerformOTA() {
     Serial.printf("❌ OTA: JSON parse error: %s\n", error.c_str());
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5251,6 +5259,7 @@ void checkAndPerformOTA() {
     delay(2000);
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5298,6 +5307,7 @@ void checkAndPerformOTA() {
     postOTAProgress("failed", 0, newVersion, "Failed to connect for download");
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5311,6 +5321,7 @@ void checkAndPerformOTA() {
                     ("Download HTTP error " + String(dlCode)).c_str());
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
@@ -5321,6 +5332,7 @@ void checkAndPerformOTA() {
     postOTAProgress("failed", 0, newVersion, "Invalid content length");
     otaUpdateRequested = false;
     setCpuFrequencyMhz(80);
+    if (oledTaskHandle) vTaskResume(oledTaskHandle); // Resume on early exit
     return;
   }
 
