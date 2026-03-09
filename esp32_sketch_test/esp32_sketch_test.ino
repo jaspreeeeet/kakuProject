@@ -5,6 +5,7 @@
 // ╚══════════════════════════════════════════════════════════════╝
 #define FORCE_EGG_HATCH false   // ← Always replay egg animation in test
 #define TEST_START_AGE 12     // ← Set to 0-18 to force pet age (days), 99 = use saved age
+#define TEST_NEAR_AGE_UP true  // ← Set to true to start one physio tick away from aging up (triggers celebration naturally)
 
 /*
 ESP32 Tamagotchi Client - Arduino C++ (XIAO ESP32 S3 Sense)
@@ -1849,10 +1850,20 @@ void setup() {
   #if TEST_START_AGE < 99
     if (!petStateMutex || xSemaphoreTake(petStateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
       g_petState.ageInt = TEST_START_AGE;
-      g_petState.totalUptimeSecs = (uint32_t)TEST_START_AGE * 86400;
+      // TEST_NEAR_AGE_UP: set uptime one physio tick (14400s = 4h) before the next birthday
+      // so the very next physio tick triggers the age-up naturally (no direct override)
+      if (TEST_NEAR_AGE_UP) {
+        g_petState.totalUptimeSecs = ((uint32_t)(TEST_START_AGE + 1) * 86400) - 14400;
+      } else {
+        g_petState.totalUptimeSecs = (uint32_t)TEST_START_AGE * 86400;
+      }
       if (petStateMutex) xSemaphoreGive(petStateMutex);
     }
-    Serial.printf("⚡ TEST: Forced age to %d days (uptime=%lu)\n", TEST_START_AGE, (uint32_t)TEST_START_AGE * 86400);
+    if (TEST_NEAR_AGE_UP) {
+      Serial.printf("⚡ TEST: Age=%d, uptime set to 1 tick before age-up (next physio tick will trigger birthday)\n", TEST_START_AGE);
+    } else {
+      Serial.printf("⚡ TEST: Forced age to %d days (uptime=%lu)\n", TEST_START_AGE, (uint32_t)TEST_START_AGE * 86400);
+    }
   #endif
 
   syncLocalStateToUI();
@@ -3610,6 +3621,10 @@ void playAgeTransitionAnimation() {
 // ================= PET ANIMATION FUNCTION =================
 void displayPetAnimation() {
   if (!displayReady)
+    return;
+
+  // WiFi provisioning active — don't overwrite the QR / setup screen
+  if (wifiProvisioningMode)
     return;
 
   // Age transition animation — only plays on MAIN screen

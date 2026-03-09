@@ -3602,6 +3602,10 @@ void displayPetAnimation() {
   if (!displayReady)
     return;
 
+  // WiFi provisioning active — don't overwrite the QR / setup screen
+  if (wifiProvisioningMode)
+    return;
+
   // Age transition animation — only plays on MAIN screen
   // If not on MAIN, keep pendingAgeTransition=true until user returns
   if (pendingAgeTransition && screenTypeIs("MAIN")) {
