@@ -561,7 +561,8 @@ unsigned long lastMotionTime = 0;   // millis() of last MPU motion ISR (inactivi
 unsigned long sleepStartTime = 0;   // When sleep mode started
 uint32_t accumulatedSleepSec =
     0; // Sleep seconds banked, sent on next sensor upload
-const unsigned long INACTIVITY_SLEEP_TIMEOUT = 120000; // 2 min no-motion → deep sleep
+const unsigned long INACTIVITY_SLEEP_TIMEOUT = 120000;        // 2 min no-motion → deep sleep
+const unsigned long INACTIVITY_SLEEP_TIMEOUT_LONG = 300000;  // 5 min for FOOD_MENU / PLAY_MENU
 
 // RTC memory — survives deep sleep reboots
 RTC_DATA_ATTR uint32_t rtcWakeCount = 0;  // Deep sleep wake cycle counter
@@ -4319,12 +4320,15 @@ void loop() {
     lastMotionTime = millis();       // any motion resets 2-min sleep countdown
   }
 
-  // If no motion for 2 minutes → enter hardware deep sleep
+  // If no motion for 2 min (or 5 min on FOOD/PLAY menu) → enter hardware deep sleep
   // Uses direct ISR-based inactivity (no orientation/inverted check)
+  unsigned long sleepTimeout = (screenTypeIs("FOOD_MENU") || screenTypeIs("PLAY_MENU"))
+                                 ? INACTIVITY_SLEEP_TIMEOUT_LONG
+                                 : INACTIVITY_SLEEP_TIMEOUT;
   if (mpuAvailable && lastMotionTime > 0 &&
-      (millis() - lastMotionTime >= INACTIVITY_SLEEP_TIMEOUT)) {
+      (millis() - lastMotionTime >= sleepTimeout)) {
     isDeviceSleeping = true;
-    Serial.println("😴 No motion for 2 min → entering DEEP SLEEP");
+    Serial.printf("😴 No motion for %lus → entering DEEP SLEEP\n", sleepTimeout / 1000);
     enterDeepSleep();
     // Never reaches here — ESP32 reboots on wake
   }
